@@ -98,9 +98,64 @@ internal static class DebugCube
         }
     }
 
+    // 这套像素校验只在特定姿态下有定义，先把前提算出来。Phase F 起相机可以平移、可以无界缩放，
+    // 会有相当一部分姿态本来就验不了——那些姿态下必须明说「跳过」，不能一声不吭地放过去。
+    //
+    // 两条前提：
+    // 一、相机看向立方体中心（原点）。轮廓关于投影中心对称只在看向中心时成立，
+    //     而那正是「质心落在画面中心」那条断言的全部依据。平移之后立方体本来就会离开画面中央，
+    //     那不是 bug。用视线方向当判据不会把检查架空：ForwardOf 的三个轴向由
+    //     CameraState.VerifyConvention 单独钉着，这里不承担那个职责。
+    // 二、立方体完整落在视口里，而且不能小到只剩几十个像素。判据用外接球在画面里的占比：
+    //     「轮廓被视口切掉一部分」与「覆盖率落在 2%~50%」都是像素计数断言的隐含前提，
+    //     凑到半屏、或者远到只剩几个像素时，那些断言就不再说明任何事。
+    //     覆盖率那两条的上下界反推出距离窗口约 [1.9, 9.6] 个世界单位，这里取 [0.30, 0.85] 的占比，
+    //     对应约 [2.4, 7.0]，两头都留了余量。
+    //
+    // 判据只用相机自己的参数（位置、朝向、fov、宽高比），不碰投影矩阵：
+    // 投影矩阵漏了转置时，质心那条断言正是要红的——把投影算进前提里等于把那条检查自己关掉。
+    internal static bool IsVerifiable(CameraState camera, int width, int height, out string reason)
+    {
+        // 边长 1 的立方体外接球半径 √3/2。立方体在原点，这是渲染器写死的。
+        const float BoundingRadius = 0.866f;
+
+        Vector3 toCenter = -camera.Position;
+        float distance = toCenter.Length();
+
+        if (!float.IsFinite(distance) || distance <= 0f)
+        {
+            reason = $"相机压在立方体中心上 distance={distance}";
+            return false;
+        }
+
+        float alignment = Vector3.Dot(camera.Forward, toCenter / distance);
+        if (alignment < 0.9999f)
+        {
+            reason = $"相机没看向立方体中心 alignment={alignment:F6}（平移之后属于预期）";
+            return false;
+        }
+
+        float halfHeight = distance * MathF.Tan(float.DegreesToRadians(camera.Fov) / 2f);
+        float aspect = height == 0 ? 1f : width / (float)height;
+
+        // 取紧的那条轴：窗口比高还窄时，装不装得下由宽度说了算。
+        float fraction = BoundingRadius / (halfHeight * MathF.Min(1f, aspect));
+        if (fraction is > 0.85f or < 0.30f)
+        {
+            reason = $"立方体在画面里的占比不在可用区间 fraction={fraction:F3} range=[0.3,0.85] " +
+                $"distance={distance:F3} fov={camera.Fov}";
+            return false;
+        }
+
+        reason = string.Empty;
+        return true;
+    }
+
     // 整张 framebuffer 读回来，按颜色反推画面上出现了什么。
     // 这一条比「中心像素不是背景色」强得多：它同时证明了几何没画错、
     // 深度测试生效、投影矩阵没转置反，以及——相机确实是从外面传进来的那个。
+    //
+    // 调用方必须先过 IsVerifiable：质心与覆盖率那两条断言只在看向中心、且完整可见的姿态下有定义。
     public static void CheckRendered(
         float[] vertices,
         byte[] rgba,

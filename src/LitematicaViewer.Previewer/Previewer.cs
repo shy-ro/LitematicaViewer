@@ -75,7 +75,11 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
     // 整张 framebuffer 读回来会强制 GPU 同步，逐帧读会把帧率打到地板上，
     // 所以只在相机变化时读，且总数封顶。换了相机就是换了一张画面，值得验一次；
     // 相机没变时同一张画面验两遍不给新信息。
-    private const int MaxCameraVerifications = 6;
+    //
+    // 6 改 24：Phase F 起每帧都可能换相机（按住 W 时就是），6 次在第一秒就被一个走动花光了，
+    // 之后整个会话都不再抽样。24 仍然是「一次会话」的预算而不是每秒的——
+    // 每次读回是几 MB 加一次同步，二十几次摊在一个会话里可以忽略，而摊不了帧率。
+    private const int MaxCameraVerifications = 24;
 
     private int _verifiedCameraVersion = -1;
     private int _cameraVerifications;
@@ -183,10 +187,10 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         // 这一段是约定里说的例外：断言本身在 Release 下会消失，但读回那一下 GPU 同步不会，
         // 所以连调用点一起包掉。其余探针都不需要 #if DEBUG。
 #if DEBUG
-        if (_cameraVersion != _verifiedCameraVersion && _cameraVerifications < MaxCameraVerifications)
+        if (_cameraVersion != _verifiedCameraVersion)
         {
+            // 同一个姿态只判一次：没换相机时重算是白算，而读回那一下是强制 GPU 同步。
             _verifiedCameraVersion = _cameraVersion;
-            _cameraVerifications++;
             VerifyFrame(gl, width, height);
         }
 #endif
@@ -230,12 +234,25 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
             $"[PREVIEWER][gl.error] code=0x{error:X} expected=0x0 cameraVersion={_cameraVersion}");
         Debug.Assert(error == 0, $"[PREVIEWER][gl.error] 有残留的 GL 错误 code=0x{error:X}");
 
+        // 姿态不在校验适用的范围内就跳过，并且明说跳过了。
+        // 「跳过」和「通过」在日志里必须是两句不同的话：相机现在可以平移、可以无界缩放，
+        // 有相当一部分姿态本来就验不了，把两者混成一片安静等于把这条检查整个作废。
+        if (!DebugCube.IsVerifiable(_camera, width, height, out string reason))
+        {
+            Debug.WriteLine(
+                $"[PREVIEWER][gl.readback] 跳过画面校验 cameraVersion={_cameraVersion} 原因={reason}");
+            return;
+        }
+
         byte[]? pixels = ReadFrameBuffer(gl, width, height);
         if (pixels is null)
         {
             return;
         }
 
+        // 读了才算一次。预算花在真读回上，而不是花在「判了一下但跳过了」上——
+        // 后者一次同步都不产生，却会把名额吃掉，于是真正换相机的那些帧反而没验。
+        _cameraVerifications++;
         DebugCube.CheckRendered(GlCubeRenderer.Vertices, pixels, width, height, _camera, ClearColor);
     }
 
