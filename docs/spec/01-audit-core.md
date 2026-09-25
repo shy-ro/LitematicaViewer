@@ -14,6 +14,10 @@
     BlockStatesCodec.GetBitsPerBlock(paletteSize)     -> int
     BlockStatesCodec.GetPackedLongCount(count, paletteSize) -> int
 
+    VoxelPicker.TryPick(document, origin, direction, maxDistance) -> bool + VoxelHit
+    VoxelPicker.TryPick(region, origin, direction, maxDistance)   -> bool + VoxelHit
+    VoxelFaces.NormalOf(face)                                     -> Vector3I
+
 `LoadResult` 是返回值而不是异常：调用方要给用户看一个文件，路径写错和文件损坏都只是
 "这个文件打不开"。`Error` 取值 `FileNotFound` / `IoFailure` / `NotNbt` / `Truncated` /
 `Malformed` / `RegionDecodeFailed`。区域级的损坏进 `Issues`，不影响整体加载。
@@ -31,6 +35,48 @@ Poly.NBT 的唯一目标是 `net10.0`，与本仓库一致。它自带零压缩�
 `Deflate` 在它的程序集里零出现，所以 `.litematic` 的 gzip 外壳由 `NbtContainerReader` 自己解。
 按首字节嗅探 gzip / zlib / 裸 NBT，zlib 用 FCHECK 判定（首字节低半字节为 8 且前两字节大端
 值是 31 的倍数），不枚举 `78 01` / `78 9C` / `78 DA`。
+
+## 拾取
+
+射线与体素网格求交放在 Core，因为它不需要 GL、也不需要相机。整条链路是两半：
+
+    屏幕上的点 ──[相机：Position/Yaw/Pitch/Fov]──> 世界空间射线 ──[Core]──> 方块 + 面 + 距离
+
+右半在这里，左半在 Previewer，依赖 `CameraState`（Phase D 才定义）。所以本阶段
+Previewer 侧的鼠标拾取还接不上，Core 侧已经可以直接调。
+
+`VoxelPicker.TryPick` 给 document 时取多区域里最近的那个，命中区域也一并返回；
+给 region 时只走那一个。方向不必预先归一化，`Distance` 的语义是沿射线的世界单位长度。
+
+用 Amanatides & Woo 逐格步进，不用等步长采样：
+
+- 步长给小了，350 万体积的区域上每次点击要走几百万步。
+- 步长给大了，在格子角上掠射时会整格跳过去，而跳过的那一格表现为"明明点到方块却说没命中"。
+- 一格被完整穿过时，参数长度至少是 1（要离开一格必须整面跨出去）。这是逐格步进的
+  终止性来源，也是"等步长采样漏掉的一定是被截出来的碎片，不会是完整的一格"这句话的依据。
+
+### 实测的浮点事实
+
+`VoxelHit.BlockPosition` 来自整数步进，精确。`VoxelHit.Distance` 不然：它是
+`entry` 加上一串 `tDelta` 累加出来的，实测在 10～20 的坐标量级下漂移有 1e-4。
+拿 `Distance` 重算命中点，会落在格子边界的任意一侧。要判"这一格是不是在射线经过的位置上"，
+得取命中点前后各 1e-3 的窗口，不能只往一侧取样。
+
+进入点落在格子边界上时要沿射线方向挪 1e-4 再 `floor`。轴对齐射线的进入点必然落在边界上，
+不挪就会挑到盒外那一格——而轴对齐恰好是 Litematica 里最常见的射线。
+
+### 与统计口径对齐
+
+越出调色板的下标在拾取里当空气跳过，跟 `CountNonAirBlocks` 一致。换成 `GetStateAt`
+会回退到 `palette[0]`，于是"统计说这里没有方块"的地方反而能拾取出一个方块，两边对不上账。
+这是本阶段第二次遇到同一个回退带来的口径分歧，`GetState` 那个宽松回退保留给渲染用。
+
+### 面的朝向
+
+`VoxelFace` 的顺序照抄 Minecraft 的 `Direction` 并整体后移一位给 `None` 让位，
+将来按面取方块模型贴图可以直接用 `(byte)Face - 1`。North 是 -Z，与直觉相反。
+射线起点在方块内部时 `Face` 是 `None`，不是硬凑一个方向——凑出来的方向会让
+`AdjacentPosition` 返回一个并不相邻的坐标。
 
 ## 实测的格式事实
 
@@ -80,17 +126,22 @@ Debug 配置下的 Core 是可执行程序，直接在终端跑：
 
     dotnet run --project src/LitematicaViewer.Core -- <文件路径...>
 
-`Tests/CoreSmoke.cs` 里 71 项检查，代码内断言在夹具上的不变量，再对传入的每个真实文件
-比对头部声明。三个真实文件的结果：
+`Tests/CoreSmoke.cs` 里 100 项夹具检查，再对传入的每个真实文件比对头部声明与拾取。
+三个真实文件的结果：
 
-| 文件 | 区域 | 体积 | 重算非空气方块 | 头部声明 |
-|---|---|---|---|---|
-| 1959款法拉利250GT | 1 | 135 | 76 | 76 |
-| 水上树屋 | 1 | 126225 | 13563 | 13563 |
-| 全部的热气球 | 1 | 3498908 | 349941 | 349941 |
+| 文件 | 区域 | 体积 | 重算非空气方块 | 头部声明 | 瞄准首个非空气方块拾取 |
+|---|---|---|---|---|---|
+| 1959款法拉利250GT | 1 | 135 | 76 | 76 | (-1,-1,-1) grass_block |
+| 水上树屋 | 1 | 126225 | 13563 | 13563 | (0,0,0) water |
+| 全部的热气球 | 1 | 3498908 | 349941 | 349941 | (6,0,8) chain |
 
 重算值与头部声明逐项相等。这是位解包、负 Size 归一化、空气集合三件事同时正确的强证据：
 任何一处错了，方块数都会偏，而且不会以异常的形式暴露。
+
+拾取另有一个独立对拍基准 `Tests/PickingReference.cs`：沿射线等步长采样，用
+`Bounds.Contains` + `GetState` 判断，与逐格步进除了"射线是哪条"之外不共享任何逻辑。
+8×6×4 的稀疏夹具上 128 条随机射线，逐格步进与基准给出同一格、距离差在一个采样步长内。
+三个真实文件上再各瞄一个已知存在的方块横向打进去，两边同样给出同一格。
 
 `TotalBlocks` 对外只暴露重算值。头部那份也读进来放进 `Metadata`，差异只报不判——
 将来遇到别的工具生成的文件，两者可能不等。
@@ -109,6 +160,11 @@ Debug 配置下的 Core 是可执行程序，直接在终端跑：
     document         总区域数、整体包围盒、重算方块数 vs 头部声明
     document.region  每个区域的体积、索引数、非空气数、越出调色板的下标数
     load             失败时的错误分类与消息
+    pick.hit         区域名、方块坐标、进入面、距离、步数、调色板下标、方块状态
+    pick.miss        跳过该区域的原因（射线不合法 / 区域尺寸退化 / 盒外 / 走出盒外）与步数
+    pick.document    区域数、是否命中、最终距离——多区域时用来确认取的是最近的
+    pick.real        真实文件上瞄的那一格与实际命中的那一格，两者不等时说明中间有遮挡
+    pick.cross.FAIL  对拍不一致的两组坐标与距离，附射线起点与方向
 
 `CodeSmoke.Main` 挂了 `TextWriterTraceListener(Console.Out)`。不挂的话 `Debug.WriteLine`
 只写进调试器的输出窗口，从终端跑什么都看不到。
@@ -125,6 +181,10 @@ Debug 配置下的 Core 是可执行程序，直接在终端跑：
   本轮 499 个文件的区域体积都远小于此。
 - `NbtSerializer` 的预设 `NbtOptions.JavaEdition` 是**静态只读字段**而不是属性，
   与常见文档描述不同。
+- `VoxelHit.Distance` 有 1e-4 量级的浮点漂移（累加出来的），`BlockPosition` 是精确的。
+  要用距离就得记住这一点：拿它当坐标反算会落在格子边界的任意一侧。
+- 拾取每次调用都会新建 `Vector3` 临时量并按区域重新归一化方向，没有做批量化。
+  一次点击几微秒，不值得为它引一套射线批处理。
 - 仓库根下的 `tools/*.py` 是本机用来反查格式的临时脚本，已 gitignore，不进仓库。
 
 ## 未解决
@@ -134,3 +194,8 @@ Debug 配置下的 Core 是可执行程序，直接在终端跑：
   验证过。等 Phase C 能画出方块之后，用负 Size 的文件目视确认一次。
 - 区域里的 `Entities` / `TileEntities` / `PendingBlockTicks` / `PendingFluidTicks` 只统计长度，
   不解析内容。预览器当前不需要它们。
+- 拾取只有 CPU 那一半。屏幕上的点换成世界空间射线要相机参数，而 `CameraState` 要到
+  Phase D 才定义，所以鼠标拾取在 Previewer 侧还接不上，也没有验证过。等 Phase D 之后
+  用一条已知的相机姿态反推，确认射线方向与目视一致。
+- 拾取只认"第一个非空气方块"。水、玻璃这类非固体方块当前一律算实心，点到水面会停在水上。
+  等中间层定了哪些方块要参与渲染，再决定拾取要不要跟着那套规则走。
