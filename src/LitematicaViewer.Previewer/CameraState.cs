@@ -25,12 +25,16 @@ public readonly record struct CameraState(
     float Near,
     float Far)
 {
-    // pitch 夹在 ±89.9 度。到 ±90 度时 forward 与 up 共线，CreateLookAt 退化，
+    // pitch 夹在 ±89 度。到 ±90 度时 forward 与 up 共线，CreateLookAt 退化，
     // 画面整块消失而 GL 一声不吭——相机控制里最经典的那个 bug。
+    //
+    // 取 89 而不是贴着 90 的 89.9：留 1 度是为了「方向感」。顶到 89.9 时画面上已经
+    // 完全没有地平线的迹象，抬头低头都只剩一片颜色，而那正是自由转头之后最容易迷路的地方；
+    // 差这 0.9 度对视图矩阵没有任何区别（cos(1°)=0.99985），对手感却是「还知道哪边是上」。
     //
     // 夹在取用点（ForwardOf）而不是构造点：CameraState 是纯数据，控制器往里塞什么都不该被悄悄改掉；
     // 而夹在取用点意味着读 Forward 的每一处（视图矩阵、将来的屏幕射线）拿到的是同一个方向。
-    public const float MaxPitch = 89.9f;
+    public const float MaxPitch = 89f;
 
     private const float DefaultFov = 45f;
     private const float DefaultNear = 0.1f;
@@ -136,8 +140,9 @@ public readonly record struct CameraState(
             IsClose(minusX, -Vector3.UnitX),
             $"[PREVIEWER][camera.convention] yaw=90 应朝 -X got={minusX}");
 
-        // pitch=90 会被夹到 89.9，所以不是精确的 -Y，而是偏出 0.1 度——这正是夹取该有的样子：
-        // 差一点点朝下，而不是退化成共线。
+        // pitch=90 会被夹到 89，所以不是精确的 -Y，而是偏出 1 度——这正是夹取该有的样子：
+        // 差一点点朝下，而不是退化成共线。0.9995 这个门槛等价于「夹取至少留到 88.2 度」，
+        // 既是夹取的守卫，也把「视角锁是哪一档」钉在这里：改成 88 度以下立刻红。
         float downward = Vector3.Dot(down, -Vector3.UnitY);
         Debug.Assert(
             downward > 0.9995f,
@@ -168,7 +173,7 @@ public readonly record struct CameraState(
         }
 
         Debug.WriteLine(
-            "[PREVIEWER][camera.convention] yaw=0→+Z yaw=90→-X pitch=90→近似 -Y（夹到 89.9）；" +
+            "[PREVIEWER][camera.convention] yaw=0→+Z yaw=90→-X pitch=90→近似 -Y（夹到 89）；" +
             "LookAt/Forward 往返 64 次全通过");
     }
 

@@ -49,7 +49,7 @@ internal sealed partial class CameraModel
 
         Vector3 groundForward = new(forward.X, 0f, forward.Z);
 
-        // pitch 被夹在 ±89.9 度，水平分量至少有 cos(89.9°)≈1.7e-3，归一化不会退化；
+        // pitch 被夹在 ±89 度，水平分量至少有 cos(89°)≈1.7e-2，归一化不会退化；
         // 真退化到 0 就说明俯角顶到了 ±90，那时「正前方」本来就没有水平定义。
         Debug.Assert(
             groundForward.LengthSquared() > 1e-6f,
