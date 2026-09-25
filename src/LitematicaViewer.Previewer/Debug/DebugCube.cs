@@ -16,6 +16,19 @@ internal static class DebugCube
 
     private const int SquaredTolerance = 3 * ChannelTolerance * ChannelTolerance;
 
+    // 一个朝向相机的面，实际像素数允许比几何期望少到这个比例。
+    //
+    // 期望值只有一个数是算出来的（面心到相机的距离、面法线与视线的夹角），而一个面横跨
+    // 一段深度、掠射时更明显，加上共边像素的归属不唯一（GL_LESS 严格小于，先画的留下），
+    // 实际值在这个期望的上下浮动两三成是正常的。留到 0.35 是为了只抓「数量级不对」——
+    // 渲染器没在用当前这个相机时，观测到的面要么整个消失（0 像素），要么是一整块别的面，
+    // 与期望差的是数量级，不是两三成。
+    private const float MinFacePixelRatio = 0.35f;
+
+    // 期望像素低于这个数就不再断言。几个像素的差别里，光栅化的量化误差比信号还大：
+    // 相机掠过某个面的平面时那个面本来就只有十几个像素。
+    private const int RasterNoiseFloor = 8;
+
     public static void CheckGeometry(float[] vertices, int[] indices, int faceCount)
     {
         int vertexCount = faceCount * 4;
@@ -103,9 +116,9 @@ internal static class DebugCube
     //
     // 两条前提：
     // 一、相机看向立方体中心（原点）。轮廓关于投影中心对称只在看向中心时成立，
-    //     而那正是「质心落在画面中心」那条断言的全部依据。平移之后立方体本来就会离开画面中央，
-    //     那不是 bug。用视线方向当判据不会把检查架空：ForwardOf 的三个轴向由
-    //     CameraState.VerifyConvention 单独钉着，这里不承担那个职责。
+    //     而那正是「质心落在画面中心」那条断言的全部依据。相机现在可以转头、可以平移，
+    //     转头之后立方体本来就会离开画面中央，那不是 bug。用视线方向当判据不会把检查架空：
+    //     ForwardOf 的三个轴向由 CameraState.VerifyConvention 单独钉着，这里不承担那个职责。
     // 二、立方体完整落在视口里，而且不能小到只剩几十个像素。判据用外接球在画面里的占比：
     //     「轮廓被视口切掉一部分」与「覆盖率落在 2%~50%」都是像素计数断言的隐含前提，
     //     凑到半屏、或者远到只剩几个像素时，那些断言就不再说明任何事。
@@ -131,7 +144,7 @@ internal static class DebugCube
         float alignment = Vector3.Dot(camera.Forward, toCenter / distance);
         if (alignment < 0.9999f)
         {
-            reason = $"相机没看向立方体中心 alignment={alignment:F6}（平移之后属于预期）";
+            reason = $"相机没看向立方体中心 alignment={alignment:F6}（自由转头之后属于预期）";
             return false;
         }
 
@@ -231,47 +244,81 @@ internal static class DebugCube
         int pixelCount = width * height;
         int visibleFaces = 0;
         int backFacePixels = 0;
-        int smallestVisibleFace = int.MaxValue;
         int loggedBackFacePixels = 0;
+
+        // 背向相机的面最多允许漏出多少像素。这一条判的是「深度测试还在不在」，
+        // 而漏出来的机理是共边处两个三角形深度相等、GL_LESS 让先画的留下，
+        // 所以它与轮廓的周长同量级，与面积无关。实测正常时恰好 1 个；
+        // 给个绝对下限是因为小窗口下 pixelCount/10000 会掉到个位数，那时它比周长还小。
+        int backFaceAllowance = Math.Max(16, pixelCount / 10000);
+
+        // 投影的尺度。半高等于 depth * tan(fov/2)，半宽再乘宽高比；
+        // 于是距离 depth 处的可见世界面积是 4 * halfHeight * halfWidth。
+        float tanHalfFov = MathF.Tan(float.DegreesToRadians(camera.Fov) / 2f);
+        float aspect = height == 0 ? 1f : width / (float)height;
 
         for (int face = 0; face < faceCount; face++)
         {
+            Vector3 normal = faceNormals[face];
+
             // 一个面能不能被看到，取决于相机在不在它所在平面的外侧。判据是
             // dot(normal, camera - faceCenter)，不是 dot(normal, camera)：
             // 后者漏掉了面心到原点的 0.5，相机贴近时会把已经侧转过去的面也算成可见。
-            bool expectedVisible =
-                Vector3.Dot(faceNormals[face], camera.Position - (faceNormals[face] * 0.5f)) > 0f;
+            Vector3 toFace = camera.Position - (normal * 0.5f);
+            float incidence = Vector3.Dot(normal, toFace);
+            bool expectedVisible = incidence > 0f;
+
+            // 这一面在画面上该有多少像素：单位立方体的面面积是 1，投影后的面积是
+            // incidence / |toFace|（入射角的余弦），除以该深度处可见的世界面积再乘总像素数。
+            //
+            // 为什么不能用一个写死的门槛（原来写的是「至少占画面万分之一」，1024x768 下是 78 个像素）：
+            // 相机掠过某个面的平面时，那个面与视线的夹角趋近 90 度，投影面积连续地趋近 0——
+            // 它确实朝向相机（上面的判据成立），但只剩几十个像素是几何的必然，不是画错了。
+            // Phase F 之前相机只能沿一条固定的体对角线推拉，永远碰不到掠射姿态，所以那个门槛
+            // 一直没暴露；相机能自由转之后，任意一张面扫过镜头都会触发它，而 Debug.Assert
+            // 失败是直接终止进程——表现成「Debug 下转着转着就崩了」。
+            float expectedPixels = 0f;
+            if (expectedVisible)
+            {
+                float depth = toFace.Length();
+                float halfHeight = depth * tanHalfFov;
+                float halfWidth = halfHeight * aspect;
+                expectedPixels = pixelCount * (incidence / depth) / (4f * halfHeight * halfWidth);
+            }
 
             Debug.WriteLine(
-                $"[PREVIEWER][gl.cube.face] face={face} normal={faceNormals[face]} " +
+                $"[PREVIEWER][gl.cube.face] face={face} normal={normal} " +
                 $"color={Byte(faceColors[face].R)},{Byte(faceColors[face].G)},{Byte(faceColors[face].B)} " +
-                $"pixels={facePixels[face]} expectedVisible={expectedVisible}");
+                $"pixels={facePixels[face]} expected={expectedPixels:F0} expectedVisible={expectedVisible}");
 
             // 观测到的可见面必须与相机推出来的集合完全一致。这条是「SetCamera 真的驱动了渲染」的证据：
             // 渲染器若还在用某个写死的相机，观测集合就会和当前相机算出来的对不上。
-            // 两边都留 pixelCount/10000 的余量，理由同下：共边处的像素归属不唯一。
             if (expectedVisible)
             {
                 visibleFaces++;
-                smallestVisibleFace = Math.Min(smallestVisibleFace, facePixels[face]);
-                Debug.Assert(
-                    facePixels[face] > pixelCount / 10000,
-                    $"[PREVIEWER][gl.cube] 朝向相机的面几乎没画出来 face={face} pixels={facePixels[face]} " +
-                    $"expected=>{pixelCount / 10000}");
+
+                if (expectedPixels >= RasterNoiseFloor)
+                {
+                    Debug.Assert(
+                        facePixels[face] >= expectedPixels * MinFacePixelRatio,
+                        $"[PREVIEWER][gl.cube] 朝向相机的面画得比几何期望少太多 face={face} " +
+                        $"normal={normal} pixels={facePixels[face]} expected={expectedPixels:F1} " +
+                        $"ratio={MinFacePixelRatio} note=渲染器可能没在用当前这个相机");
+                }
             }
             else
             {
                 backFacePixels += facePixels[face];
                 Debug.Assert(
-                    facePixels[face] <= pixelCount / 10000,
-                    $"[PREVIEWER][gl.cube] 背向相机的面画出来了 face={face} normal={faceNormals[face]} " +
-                    $"pixels={facePixels[face]} of {pixelCount}，深度测试或者相机没接上");
+                    facePixels[face] <= backFaceAllowance,
+                    $"[PREVIEWER][gl.cube] 背向相机的面画出来了 face={face} normal={normal} " +
+                    $"pixels={facePixels[face]} allowed={backFaceAllowance}，深度测试或者相机没接上");
 
                 if (facePixels[face] > 0 && loggedBackFacePixels < 8)
                 {
                     loggedBackFacePixels++;
                     Debug.WriteLine(
-                        $"[PREVIEWER][gl.cube.back] face={face} normal={faceNormals[face]} pixels={facePixels[face]} " +
+                        $"[PREVIEWER][gl.cube.back] face={face} normal={normal} pixels={facePixels[face]} " +
                         $"note=共边像素的归属，GL_LESS 严格小于的语义让先画的留下");
                 }
             }
@@ -290,9 +337,11 @@ internal static class DebugCube
 
         Debug.Assert(solidPixels > 0, "[PREVIEWER][gl.cube] 画面里没有立方体，全是背景色");
         Debug.Assert(visibleFaces > 0, "[PREVIEWER][gl.cube] 一个朝向相机的面都没有");
-        Debug.Assert(
-            smallestVisibleFace > solidPixels / 20,
-            $"[PREVIEWER][gl.cube] 有可见面几乎没占到像素 smallest={smallestVisibleFace} solid={solidPixels}");
+
+        // 这里原本还有一条「最小的可见面至少占固体的 5%」。它和上面那条写死的门槛是同一个前提
+        // 的两种写法：都在假设「几个可见面的面积是同一个量级」——那只在相机沿固定体对角线看时成立。
+        // 相机能自由转之后，一个掠射面的合法面积可以比旁边正对着的面小三个数量级，
+        // 这条断言就会把正确的画面判成错的。逐面的几何期望已经覆盖了它想抓的东西。
 
         // 背向相机的面只允许漏出极少量像素（逐面判据在上面，这里只兜总数）。
         // 真正会出错的是「一个都不许漏」这条判据本身：相邻两面共边，落在边上的像素中心
@@ -300,8 +349,8 @@ internal static class DebugCube
         // 共边处先画的是背向面时，就漏出一个像素。实测恰好 1 个。深度测试真失效的样子是
         // 整个轮廓只剩一种颜色（几万个），量级差着五个数量级。要做到一个不漏得上多边形偏移。
         Debug.Assert(
-            backFacePixels <= pixelCount / 10000,
-            $"[PREVIEWER][gl.cube] 背向相机的面漏出过多 pixels={backFacePixels} of {pixelCount}");
+            backFacePixels <= backFaceAllowance,
+            $"[PREVIEWER][gl.cube] 背向相机的面漏出过多 pixels={backFacePixels} allowed={backFaceAllowance}");
 
         // 认不出来的像素只应该出现在三角形边缘，超过 1% 就不像是抗锯齿了。
         Debug.Assert(
