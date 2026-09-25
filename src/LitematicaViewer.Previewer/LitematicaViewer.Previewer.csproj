@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>LitematicaViewer.Previewer</RootNamespace>
+    <AssemblyName>LitematicaViewer.Previewer</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 只要 Avalonia：Avalonia.OpenGL 就在这个包里，OpenGlControlBase 与 GlInterface 都由它提供。 -->
+    <PackageReference Include="Avalonia" Version="12.1.3" />
+  </ItemGroup>
+
+</Project>
