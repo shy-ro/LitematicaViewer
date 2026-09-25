@@ -1,6 +1,13 @@
 using System.Diagnostics;
 using System.Numerics;
+using System.Text;
+using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.Media;
+using Avalonia.Threading;
+using Avalonia.VisualTree;
 
 namespace LitematicaViewer.Previewer.Sample;
 
@@ -40,8 +47,221 @@ public partial class MainWindow : Window
         // 客户端尺寸与 RenderScaling 是「视口算得对不对」的参照系：
         // 视口错了的时候，第一眼要拿来的对的就是这两个数，而不是去猜 DPI。
         Opened += OnOpened;
+        Activated += OnActivated;
+        Deactivated += OnDeactivated;
         Closed += OnClosed;
+
+#if DEBUG
+        // 指针的窗口层探针。控件那一层在 Previewer.AttachInputProbe 里，两层分开才有分辨力。
+        //
+        // 这里必须显式按 Tunnel 订阅：+= 的默认策略是 Direct|Bubble，而指针事件是
+        // 「先隧道下来、再冒泡上去」，命中测试发生在两者之间。隧道那一次在命中之前就到达窗口，
+        // 所以「隧道有、控件没有」把范围缩到命中测试；「隧道也没有」说明消息根本没进 Avalonia
+        // （或者光标不在窗口上）。用 += 订阅反而会把这两种情况混成同一种安静。
+        AddHandler(PointerWheelChangedEvent, OnWindowWheelTunnel, RoutingStrategies.Tunnel);
+        AddHandler(PointerMovedEvent, OnWindowMovedTunnel, RoutingStrategies.Tunnel);
+        AddHandler(PointerPressedEvent, OnWindowPressedTunnel, RoutingStrategies.Tunnel);
+        AddHandler(PointerEnteredEvent, OnWindowEnteredTunnel, RoutingStrategies.Tunnel);
+#endif
     }
+
+#if DEBUG
+    private int _windowPointerMoves;
+
+    // source 是命中测试找到的那个元素，而「命中到了谁」是这条链路的第一个未知数：
+    // 隧道层收到事件只说明消息进了 Avalonia，落在哪个元素上要靠这一栏。
+    // 落在 Previewer 上才是对的；落在别的元素上说明控件没被命中，
+    // 而那条路接下来会一路安静——滚轮照滚、日志里只有更前面那几层有动静，相机永远不动。
+    //
+    // 打父链而不只打类型名：「Panel」这种基类名有两个完全不同的可能——
+    // 它是 Previewer 的祖先（控件没进布局或没被命中），还是盖在 Previewer 之上的另一层（控件被挡住）。
+    // 一眼分得开的只有链本身。
+    private static string Describe(object? source)
+    {
+        StringBuilder text = new();
+        Visual? current = source as Visual;
+
+        while (current is not null)
+        {
+            text.Append(current.GetType().Name);
+
+            // 名字是模板里写死的那个（PART_xxx）：只有它能把「一个匿名 Panel」
+            // 和「模板里那个有职责的 Panel」分开，否则所有 Panel 看起来都一样。
+            if (current is StyledElement styled && !string.IsNullOrEmpty(styled.Name))
+            {
+                text.Append('#').Append(styled.Name);
+            }
+
+            current = current.GetVisualParent();
+
+            if (current is not null)
+            {
+                text.Append(" < ");
+            }
+        }
+
+        return text.Length == 0 ? "null" : text.ToString();
+    }
+
+    // 只打完整链一次，之后退化成类型名：滚轮一来就是几十条，逐条打父链会把终端冲掉。
+    private bool _sourceChainDumped;
+
+    private string SourceOf(object? source)
+    {
+        if (_sourceChainDumped)
+        {
+            return source?.GetType().Name ?? "null";
+        }
+
+        _sourceChainDumped = true;
+        return Describe(source);
+    }
+
+    private void OnWindowWheelTunnel(object? sender, PointerWheelEventArgs e) =>
+        Debug.WriteLine(
+            $"[SAMPLE][input.probe.window] tunnel wheel delta=({e.Delta.X},{e.Delta.Y}) source={SourceOf(e.Source)}");
+
+    private void OnWindowEnteredTunnel(object? sender, PointerEventArgs e) =>
+        Debug.WriteLine($"[SAMPLE][input.probe.window] tunnel pointer.entered source={SourceOf(e.Source)}");
+
+    private void OnWindowPressedTunnel(object? sender, PointerPressedEventArgs e) =>
+        Debug.WriteLine(
+            $"[SAMPLE][input.probe.window] tunnel pointer.pressed kind=" +
+            $"{e.GetCurrentPoint(this).Properties.PointerUpdateKind} source={SourceOf(e.Source)}");
+
+    // 移动一秒几百条，逐条打会把终端冲掉。首条加每 200 条一条，只回答「到没到」这一个是非题。
+    private void OnWindowMovedTunnel(object? sender, PointerEventArgs e)
+    {
+        _windowPointerMoves++;
+        if (_windowPointerMoves == 1 || _windowPointerMoves % 200 == 0)
+        {
+            Point position = e.GetPosition(this);
+            Debug.WriteLine(
+                $"[SAMPLE][input.probe.window] tunnel pointer.moved count={_windowPointerMoves} " +
+                $"pos=({position.X:F0},{position.Y:F0}) source={SourceOf(e.Source)}");
+        }
+    }
+
+    // 命中测试是整条链路里唯一看不见的一段：消息进没进来有探针，事件发没发有探针，
+    // 而「系统认为光标下面是哪个元素」只能主动问。控件被别的层盖住、或者没进布局时，
+    // 表现就是输入一路安静——和「消息根本没来」长得一模一样。
+    //
+    // 从 Opened 往后放半秒：早一点布局还没稳，Bounds 还是 0x0，探针会给出假答案。
+    // 取三个点而不只取中心：控件只盖住一部分时，中心可能恰好在外面。
+    private void ProbeHitTest()
+    {
+        Debug.WriteLine($"[SAMPLE][input.hittest] client={ClientSize} scaling={RenderScaling}");
+
+        // 控件的自身状态先打出来：命中测试把它整个跳过时，原因只有几种可能——
+        // 尺寸没算出来、可见性没生效、或者从可视树上掉了下去——而这三条一眼就能排除。
+        Debug.WriteLine(
+            $"[SAMPLE][input.hittest] previewer bounds={Viewport.Bounds} " +
+            $"visible={Viewport.IsVisible} effectiveVisible={Viewport.IsEffectivelyVisible} " +
+            $"hitTestVisible={Viewport.IsHitTestVisible} topLevel={TopLevel.GetTopLevel(Viewport)?.GetType().Name ?? "null"} " +
+            $"parent={Describe(Viewport.GetVisualParent())}");
+
+        Point[] points =
+        [
+            new(ClientSize.Width / 2, ClientSize.Height / 2),
+            new(10, 10),
+            new(ClientSize.Width - 10, ClientSize.Height - 10),
+        ];
+
+        foreach (Point point in points)
+        {
+            // 两个 API 都问一遍。GetVisualsAt 走的是合成层，InputHitTest 是输入系统自己用的那条，
+            // 两者不一致时，问题就在合成器看不到这个控件——而不是控件被谁挡住。
+            IInputElement? inputHit = this.InputHitTest(point);
+            Debug.WriteLine(
+                $"[SAMPLE][input.hittest] point=({point.X:F0},{point.Y:F0}) " +
+                $"inputHitTest={Describe(inputHit)}");
+
+            // 这条断言是 ICustomHitTest 那个修复的守卫，也是唯一能守住它的一条：
+            // 合成事件走 RaiseEvent，根本不经过命中测试，所以整个自检剧本对这一类故障是全绿的。
+            // 命中失败时输入会一路安静——和「消息没进程序」长得一模一样，人手排查要花掉一整天。
+            Debug.Assert(
+                ReferenceEquals(inputHit, Viewport),
+                $"[SAMPLE][input.hittest] 指针没命中控件 point=({point.X:F0},{point.Y:F0}) " +
+                $"hit={Describe(inputHit)} expected=Viewport#Viewport。命中落在别的元素上时，" +
+                $"滚轮和按键都到不了控件，而日志里看起来只是「没反应」");
+
+            int index = 0;
+            foreach (Visual visual in this.GetVisualsAt(point))
+            {
+                Debug.WriteLine(
+                    $"[SAMPLE][input.hittest] point=({point.X:F0},{point.Y:F0}) hit[{index++}] " +
+                    $"{Describe(visual)}");
+            }
+
+            if (index == 0)
+            {
+                Debug.WriteLine($"[SAMPLE][input.hittest] point=({point.X:F0},{point.Y:F0}) 一个都没命中");
+            }
+        }
+
+        // 命中列表里冒出几个匿名元素时，唯一能回答「它是谁」的就是树本身：
+        // 兄弟顺序给出层级，名字给出模板里的职责，bounds 给出它盖住了多大。
+        //
+        // 控件自己在窗口坐标里的位置也要问一次：命中测试用的是变换之后的矩形，
+        // 变换链断掉（TranslatePoint 返回 null）时 Bounds 看着是对的，而命中永远落不到它身上。
+        Point? topLeft = Viewport.TranslatePoint(default, this);
+        Point? bottomRight = Viewport.TranslatePoint(new Point(Viewport.Bounds.Width, Viewport.Bounds.Height), this);
+        Debug.WriteLine(
+            $"[SAMPLE][input.hittest] previewerInWindow topLeft={Format(topLeft)} bottomRight={Format(bottomRight)}");
+
+        StringBuilder tree = new();
+        DumpTree(this, 0, tree);
+        Debug.WriteLine($"[SAMPLE][input.hittest.tree]\n{tree}");
+    }
+
+    private static string Format(Point? point) =>
+        point is { } value ? $"({value.X:F0},{value.Y:F0})" : "null";
+
+    private static void DumpTree(Visual visual, int depth, StringBuilder text)
+    {
+        if (depth > 6)
+        {
+            text.Append(' ', depth * 2).Append("…\n");
+            return;
+        }
+
+        text.Append(' ', depth * 2).Append(visual.GetType().Name);
+
+        if (visual is StyledElement styled && !string.IsNullOrEmpty(styled.Name))
+        {
+            text.Append('#').Append(styled.Name);
+        }
+
+        text.Append(" bounds=").Append(visual.Bounds);
+
+        // 有没有 Background 决定 Panel / Border 这类容器参不参与命中：
+        // 没有背景的容器是「空的」，指针会穿过去；有背景的才是实心的一块。
+        IBrush? background = visual switch
+        {
+            Border border => border.Background,
+            Panel panel => panel.Background,
+            _ => null,
+        };
+
+        text.Append(" background=").Append(background is null ? "null" : "set");
+
+        // ZIndex 而不是兄弟顺序：兄弟顺序只说明默认的绘制次序，
+        // 而 ZIndex 能让后加的那个压到前面来——「谁在上面」和「谁是后加的孩子」是两件事。
+        text.Append(" z=").Append(visual.ZIndex);
+
+        if (visual is InputElement input && !input.IsHitTestVisible)
+        {
+            text.Append(" hitTestVisible=false");
+        }
+
+        text.Append('\n');
+
+        foreach (Visual child in visual.GetVisualChildren())
+        {
+            DumpTree(child, depth + 1, text);
+        }
+    }
+#endif
 
     private void OnOpened(object? sender, EventArgs e)
     {
@@ -51,7 +271,28 @@ public partial class MainWindow : Window
         // 先按几下键发现没反应，再去猜是代码的问题——而焦点不在时的表现和事件没接上一模一样。
         bool focused = Viewport.Focus();
         Debug.WriteLine($"[SAMPLE][window.opened] viewportFocus={focused} expected=True");
+
+        // Focus() 返回 true 只说明「请求被接受了」。真正决定键盘听到没听到的是
+        // 焦点管理器此刻记着谁——两者不一致时前者会骗人。
+        IInputElement? focusedElement = TopLevel.GetTopLevel(Viewport)?.FocusManager?.GetFocusedElement();
+        Debug.WriteLine(
+            $"[SAMPLE][window.opened] focusedElement={focusedElement?.GetType().Name ?? "null"} expected=Previewer");
+
+#if DEBUG
+        // 布局要几帧才稳：早一点控件 Bounds 还是 0x0，命中测试会给出假答案。
+        DispatcherTimer.RunOnce(ProbeHitTest, TimeSpan.FromMilliseconds(500));
+#endif
     }
+
+    // 滚轮在 Win32 上是发给「焦点窗口」的，不是光标底下的窗口（光标只在算坐标时用得上）。
+    // 所以窗口没激活时收不到滚轮是正常的，而这一条在日志里必须留下痕迹——
+    // 否则「窗口在后台」和「事件没接上」看起来完全一样。
+    private void OnActivated(object? sender, EventArgs e) =>
+        Debug.WriteLine($"[SAMPLE][window.activated] client={ClientSize}");
+
+    private void OnDeactivated(object? sender, EventArgs e) =>
+        Debug.WriteLine(
+            "[SAMPLE][window.deactivated] note=此时滚轮收不到属于预期，不是接线问题");
 
     private void OnClosed(object? sender, EventArgs e)
     {
