@@ -5,6 +5,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.OpenGL;
 using Avalonia.OpenGL.Controls;
+using Avalonia.Rendering;
 using LitematicaViewer.Previewer.Diagnostics;
 
 namespace LitematicaViewer.Previewer;
@@ -15,7 +16,9 @@ namespace LitematicaViewer.Previewer;
 // 顺带记一条后面会咬人的事：基类的 GlVersion 只有 getter，没法要求 3.3 core 之类的具体版本。
 // 上下文版本由 Avalonia 按平台后端决定，所以着色器要按拿到的版本来写指令
 // （实测 ANGLE 给的是 GLES，指令得是 `#version 300 es` 那一套），不能照抄桌面 GL 的写法。
-public partial class Previewer : OpenGlControlBase
+//
+// ICustomHitTest 不是可选项，见下面 HitTest 的注释：不实现它，这个控件对指针完全隐形。
+public partial class Previewer : OpenGlControlBase, ICustomHitTest
 {
     // 背景取蓝不取白：立方体的六个面按法线着色，全是浅色，白底上会糊成一片。
     // 也不取纯黑：纯黑与「这一帧什么都没画出来」在截图里分不开。
@@ -40,6 +43,33 @@ public partial class Previewer : OpenGlControlBase
     private int _viewportWidth;
     private int _viewportHeight;
     private GlCubeRenderer? _cube;
+
+    // 指针能不能选中本控件，由这一条说了算，而默认答案是「不能」。
+    //
+    // Avalonia 12 的命中测试走合成层（CompositingRenderer.HitTest / CompositionTarget.TryHitTest）：
+    // 只有产生了合成视觉的元素才在命中范围里。别的控件靠 Border / Background 产生绘制内容，
+    // 而本控件的画面是 GL 直接画到窗口上的，合成器那边它是空的——于是指针事件
+    // 全部落到它下面那层容器（窗口模板里一个匿名 Panel）上，滚轮和按键在控件上永远不触发。
+    //
+    // 这个故障极具迷惑性：窗口激活、控件 Focusable、宿主调了 Focus()、
+    // 事件订阅一个不少、探针格式全对，日志里却一路安静，看起来像「输入根本没进程序」。
+    // 实际上真实输入进得来——隧道层收得到——只是命中的不是这个控件。
+    // （合成事件不走命中测试，所以自检剧本永远是绿的，这也是它没被更早发现的原因。）
+    //
+    // ICustomHitTest 是给「自己画自己」的控件留的口子：命中范围由它说了算。
+    // 判据用 Bounds 而不是「有没有画东西」：这个控件的画面盖满自己的整个矩形，
+    // 让指针穿过去点它背后的东西本来就没有意义。
+    bool ICustomHitTest.HitTest(Point point)
+    {
+        // 入参是 TopLevel 坐标，先转回自己的坐标系再跟 Bounds 比。
+        if (TopLevel.GetTopLevel(this) is not { } root)
+        {
+            return false;
+        }
+
+        Point? local = root.TranslatePoint(point, this);
+        return local is { } value && new Rect(Bounds.Size).Contains(value);
+    }
 
 #if DEBUG
     // 整张 framebuffer 读回来会强制 GPU 同步，逐帧读会把帧率打到地板上，
@@ -207,6 +237,64 @@ public partial class Previewer : OpenGlControlBase
         }
 
         DebugCube.CheckRendered(GlCubeRenderer.Vertices, pixels, width, height, _camera, ClearColor);
+    }
+
+    private int _pointerMoves;
+
+    // 输入探针：把「控件本身收到了什么」和「链路把它翻成了什么」分成两段来记。
+    // 两段断掉在日志里的样子一模一样（都是安静），但原因差着十万八千里——
+    // 前一段断是命中测试、焦点、或者平台后端没把消息送上来；后一段断是订阅漏了或者映射写错了。
+    // 只查后一段（input.wheel / event.scrolled）会让人一直在适配器里找，而问题在更前面。
+    //
+    // 它不转发、不处理，只记录。挂载点选在输入适配器的构造函数里：那一行的意思是
+    // 「有人打算处理输入了」，此时才需要知道输入有没有来。
+    internal void AttachInputProbe()
+    {
+        Debug.WriteLine(
+            $"[PREVIEWER][input.probe] attach hitTestVisible={IsHitTestVisible} focusable={Focusable} " +
+            $"enabled={IsEnabled} bounds={Bounds.Width}x{Bounds.Height}");
+
+        PointerEntered += (_, _) => Debug.WriteLine("[PREVIEWER][input.probe] pointer.entered");
+        PointerExited += (_, _) => Debug.WriteLine("[PREVIEWER][input.probe] pointer.exited");
+        GotFocus += (_, _) => Debug.WriteLine("[PREVIEWER][input.probe] focus.got");
+        LostFocus += (_, _) => Debug.WriteLine("[PREVIEWER][input.probe] focus.lost");
+
+        PointerPressed += (_, e) =>
+        {
+            Point position = e.GetPosition(this);
+            Debug.WriteLine(
+                $"[PREVIEWER][input.probe] pointer.pressed kind=" +
+                $"{e.GetCurrentPoint(this).Properties.PointerUpdateKind} pos=({position.X:F0},{position.Y:F0})");
+        };
+
+        PointerReleased += (_, e) =>
+        {
+            Point position = e.GetPosition(this);
+            Debug.WriteLine(
+                $"[PREVIEWER][input.probe] pointer.released pos=({position.X:F0},{position.Y:F0})");
+        };
+
+        PointerWheelChanged += (_, e) =>
+        {
+            Point position = e.GetPosition(this);
+            Debug.WriteLine(
+                $"[PREVIEWER][input.probe] pointer.wheel delta=({e.Delta.X},{e.Delta.Y}) " +
+                $"pos=({position.X:F0},{position.Y:F0}) handled={e.Handled}");
+        };
+
+        // 移动一秒能来几百条，逐条打会把终端冲掉。首条加每 60 条一条，
+        // 足以回答「移动到底到没到控件」这一个是非题。
+        PointerMoved += (_, e) =>
+        {
+            _pointerMoves++;
+            if (_pointerMoves == 1 || _pointerMoves % 60 == 0)
+            {
+                Point position = e.GetPosition(this);
+                Debug.WriteLine(
+                    $"[PREVIEWER][input.probe] pointer.moved count={_pointerMoves} " +
+                    $"pos=({position.X:F0},{position.Y:F0})");
+            }
+        };
     }
 
     // 整张 framebuffer 读回来。宽高用物理像素，与视口一致。
