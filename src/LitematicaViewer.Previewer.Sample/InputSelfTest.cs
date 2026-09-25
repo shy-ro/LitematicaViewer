@@ -162,6 +162,7 @@ internal sealed class InputSelfTest
     private float _showcaseYawAtRelease;
     private float _showcaseYawAtInertia;
     private int _showcaseForeignBaseline;
+    private bool _showcaseSkipped;
     private float _spinIdleDelayBefore;
     private float _spinDampingBefore;
     private bool _showcaseChecked;
@@ -277,9 +278,9 @@ internal sealed class InputSelfTest
             $"[SAMPLE][selftest] 剧本摆视角的次数不对 cameraSets={_cameraSets} expected=3");
 
         Debug.Assert(
-            _showcaseChecked,
+            _showcaseChecked || _showcaseSkipped,
             $"[SAMPLE][selftest] 展台那一段没走完 note=窗口开得太短，最后一步还没轮到就关了 " +
-            $"ticks={_ticks} elapsed={_elapsed:F2}s");
+            $"ticks={_ticks} elapsed={_elapsed:F2}s（skipped={_showcaseSkipped} 表示因外部输入整段跳过）");
 
         Debug.WriteLine(
             "[SAMPLE][selftest.summary] 四个事件都至少走通一次，滚轮/转视角/走动各自经由控制器改了相机；" +
@@ -732,7 +733,20 @@ internal sealed class InputSelfTest
         {
             _showcaseReleaseTick = 0;
 
+            // 松手是剧本自己发的，所以「松手之前手势就已经不在了」只可能是外部干的：
+            // 真人的鼠标动了（一个不带按键的移动被兜底逻辑当成抬起）、或者窗口失活。
+            // 这两种都不产生 LookMoved，外部输入计数看不见它们——而拖动一旦提前收掉，
+            // 甩、自转、滚轮三段结论全部失去前提，只能整段跳过，不能硬验。
+            bool endedEarly = _lookEnded != _showcaseEndedBefore;
             RaisePointerReleased(MouseButton.Left);
+            if (endedEarly)
+            {
+                _showcaseSkipped = true;
+                Debug.WriteLine(
+                    "[SAMPLE][selftest.showcase] 跳过甩/自转/滚轮结论 " +
+                    "note=松手之前手势就被外部收掉了（真鼠标移动或窗口失活），这一段的环境不干净");
+                return;
+            }
             Debug.Assert(
                 _lookEnded == _showcaseEndedBefore + 1,
                 $"[SAMPLE][selftest.showcase] 松开左键没有收手势 ended=+{_lookEnded - _showcaseEndedBefore} expected=+1");
@@ -768,16 +782,34 @@ internal sealed class InputSelfTest
     //
     // 判据只用 yaw 的增量，不用别的：这一段时间里自转是关着的（延时 5 秒），
     // 也没有别的输入，所以这一段 yaw 只可能来自惯性。往右拖是 yaw 增大，惯性也就该是正的。
+    //
+    // 「没有别的输入」是前提不是事实——真人在旁边动一下鼠标，一个不带按键的移动
+    // 就把拖动手势提前收掉了（适配器那条兜底是正常工作），惯性自然验成零。
+    // 所以这里和 CheckWalk / CheckIdle / CheckShowcase 一样先数外部输入，插了就跳过结论；
+    // 基线是松手那一刻记下的（_showcaseForeignBaseline），与 CheckShowcase 同一份。
     private void CheckInertia()
     {
         _showcaseYawAtInertia = _camera.Camera.Yaw;
         float carried = YawDelta(_showcaseYawAtRelease, _showcaseYawAtInertia);
 
-        Debug.Assert(
-            carried > InertiaMinDegrees,
-            $"[SAMPLE][selftest.showcase] 松手之后没有惯性 carried={carried:F3} 度 " +
-            $"expected>{InertiaMinDegrees} note=手速是在 Tick 里按「一帧攒了多少角度」估的，" +
-            "按下与抬起落在同一帧里的话那个估计永远是零");
+        int interference = ForeignInputCount() - _showcaseForeignBaseline;
+        if (interference != 0)
+        {
+            Debug.WriteLine(
+                $"[SAMPLE][selftest.showcase] 跳过惯性结论 note=松手到现在的窗口里外部输入插了 {interference} 条，" +
+                $"yaw={carried:F3} 度里混着别人的；自转那一段另有基线，继续");
+        }
+        else
+        {
+            Debug.Assert(
+                carried > InertiaMinDegrees,
+                $"[SAMPLE][selftest.showcase] 松手之后没有惯性 carried={carried:F3} 度 " +
+                $"expected>{InertiaMinDegrees} note=手速是在 Tick 里按「一帧攒了多少角度」估的，" +
+                "按下与抬起落在同一帧里的话那个估计永远是零");
+
+            Debug.WriteLine(
+                $"[SAMPLE][selftest.showcase] 松手之后又转了 {carried:F3} 度（同向）");
+        }
 
         // 到这里才把自转放出来。改的是控件属性，而控制器每帧重新读它——
         // 在构造时缓存下来的话这一步会原地不动，而那正是「松手之后画面就死了」这个 bug 的样子。
@@ -785,8 +817,7 @@ internal sealed class InputSelfTest
         _showcaseSettleAt = _elapsed + ShowcaseSettleSeconds;
 
         Debug.WriteLine(
-            $"[SAMPLE][selftest.showcase] 松手之后又转了 {carried:F3} 度（同向），" +
-            $"现在把自转延时改到 0，{ShowcaseSettleSeconds}s 之后看方向");
+            $"[SAMPLE][selftest.showcase] 现在把自转延时改到 0，{ShowcaseSettleSeconds}s 之后看方向");
     }
 
     // 自转与滚轮。两条都是「展台」这个模式的要求，而且都只有这里能验。
