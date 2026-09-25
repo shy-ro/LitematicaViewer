@@ -26,6 +26,17 @@ internal static class GlRaw
     internal const int GL_ZERO = 0x0000;
     internal const int GL_ONE = 0x0001;
 
+    // 半透明绘制需要的两件事：开混合、把因子设成 srcAlpha / oneMinusSrcAlpha。
+    //
+    // 抽成一个入口是因为用它的人不止一个（轴线、展台光环），而「谁先建谁顺手设一下」是隐式依赖：
+    // 顺序一变，后来者拿到的就是默认的 (ONE, ZERO)，画出来只是「颜色偏实」——
+    // 不报错、不崩，看着像颜色选错了。两次调用同样的值是幂等的，谁调都不亏。
+    internal static bool EnableAlphaBlend(GlInterface gl)
+    {
+        gl.Enable(GL_BLEND);
+        return BlendFuncSeparate(gl, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+    }
+
     // void glBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha)
     //
     // 用分离的那个而不是 glBlendFunc：颜色要按 src 的 alpha 混，而 alpha 通道必须原样留下。

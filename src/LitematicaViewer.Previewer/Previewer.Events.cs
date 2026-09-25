@@ -4,8 +4,9 @@ using Avalonia.Input;
 
 namespace LitematicaViewer.Previewer;
 
-// 本文件是 Previewer 的对外公开面：七个事件、SetCamera、以及两个导航设置（MoveSpeed /
-// LookSensitivity）。Phase D 的清单里这个文件叫 Previewer.Events.cs，后两者一并放这儿——
+// 本文件是 Previewer 的对外公开面：七个事件、SetCamera、四个手感的导航设置（MoveSpeed /
+// LookSensitivity / DragSensitivity / Spin*）、以及展台光环那一组（SetPedestal）。
+// Phase D 的清单里这个文件叫 Previewer.Events.cs，后来加的一并放这儿——
 // 它们都是同一个东西：Previewer 允许外界碰的表面。
 //
 // 没有 GetCamera，也没有任何读回相机状态的口子：外部想跟踪当前相机，自己在控制器里维护。
@@ -84,6 +85,79 @@ public partial class Previewer
         get => GetValue(LookSensitivityProperty);
         set => SetValue(LookSensitivityProperty, value);
     }
+
+    // 展台模式：按住指针每移过一个 DIP 转多少度。比自由视角大，因为拖动是「一次有头有尾的手势」——
+    // 自由视角下光标被钉在中心、手可以一直划，所以灵敏度要压小（0.10）；拖动的行程受屏幕限制，
+    // 0.20 下横扫 1024 DIP 约 205 度，甩半圈是一个手势的事。
+    public static readonly StyledProperty<float> DragSensitivityProperty =
+        AvaloniaProperty.Register<Previewer, float>(nameof(DragSensitivity), defaultValue: 0.20f);
+
+    // 甩出去之后角速度衰减的时间常数（秒）。一阶滞后的时间常数，0.35 秒下大约一秒停稳。
+    public static readonly StyledProperty<float> SpinDampingProperty =
+        AvaloniaProperty.Register<Previewer, float>(nameof(SpinDamping), defaultValue: 0.35f);
+
+    // 松手之后过多少秒开始自转（秒）。不是「到点突然起步」：角速度的衰减目标从 0 换成自转速度，
+    // 速度本身是连续的，所以衔接处只有加速度跳一下。
+    public static readonly StyledProperty<float> SpinIdleDelayProperty =
+        AvaloniaProperty.Register<Previewer, float>(nameof(SpinIdleDelay), defaultValue: 1.5f);
+
+    // 自转速度（度/秒），逆时针。8 度下转一圈 45 秒——足够慢，能看清模型的每一面而不晕。
+    public static readonly StyledProperty<float> SpinIdleSpeedProperty =
+        AvaloniaProperty.Register<Previewer, float>(nameof(SpinIdleSpeed), defaultValue: 8f);
+
+    public float DragSensitivity
+    {
+        get => GetValue(DragSensitivityProperty);
+        set => SetValue(DragSensitivityProperty, value);
+    }
+
+    public float SpinDamping
+    {
+        get => GetValue(SpinDampingProperty);
+        set => SetValue(SpinDampingProperty, value);
+    }
+
+    public float SpinIdleDelay
+    {
+        get => GetValue(SpinIdleDelayProperty);
+        set => SetValue(SpinIdleDelayProperty, value);
+    }
+
+    public float SpinIdleSpeed
+    {
+        get => GetValue(SpinIdleSpeedProperty);
+        set => SetValue(SpinIdleSpeedProperty, value);
+    }
+
+    // 展台底面那个光环。三个参数一组（画不画、半径、底面高度），所以是一次调用而不是三个属性：
+    // 半径与底面高度都来自「当前展示的目标」，分开设会出现「半径已经换了、高度还是上一个目标的」
+    // 那一帧——而那一帧看起来只是「光环陷进去了」。
+    //
+    // 它不碰 GPU 资源：光环的网格是半径为 1 的那一份，缩放与抬升走矩阵，
+    // 于是换目标不重建任何东西（R5）。
+    public void SetPedestal(bool visible, float radius, float baseY)
+    {
+        Debug.Assert(
+            !visible || (float.IsFinite(radius) && radius > 0f && float.IsFinite(baseY)),
+            $"[PREVIEWER][gl.pedestal] 光环参数不合法 visible={visible} radius={radius} baseY={baseY}");
+
+        // 同一个值重复设不打桩：宿主可能在每帧的末尾都推一次，而这里要的是「变没变」这件事。
+        if (_pedestalVisible == visible && _pedestalRadius == radius && _pedestalBaseY == baseY)
+        {
+            return;
+        }
+
+        _pedestalVisible = visible;
+        _pedestalRadius = radius;
+        _pedestalBaseY = baseY;
+
+        Debug.WriteLine(
+            $"[PREVIEWER][gl.pedestal.set] visible={visible} radius={radius:F3} baseY={baseY:F3}");
+    }
+
+    private bool _pedestalVisible;
+    private float _pedestalRadius = 1f;
+    private float _pedestalBaseY;
 
     private CameraState _camera = CameraState.Default;
 

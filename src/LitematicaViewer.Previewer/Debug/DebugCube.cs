@@ -175,7 +175,8 @@ internal static class DebugCube
         int width,
         int height,
         CameraState camera,
-        Vector3 clearColor)
+        Vector3 clearColor,
+        bool pedestalVisible)
     {
         int faceCount = vertices.Length / (GlCubeRenderer.FloatsPerVertex * 4);
         (float R, float G, float B)[] faceColors = new (float, float, float)[faceCount];
@@ -211,6 +212,16 @@ internal static class DebugCube
         // 为什么非认出来不可：轴线是真的改了像素的，而认不出色的像素有一个 1% 的预算。
         // 几条线当然吃得下，但那样一来那条断言的余量就取决于线有多长，而不是取决于画得对不对——
         // 「判据的强度被一个无关参数悄悄带走」正是要避免的。
+        // 展台光环也改像素，而且改的比轴线多两个数量级（它是一整圈半透明的带子），
+        // 但它的 alpha 是连续插值出来的，进不了这张表——理由见下。
+        // 展台光环不进这张表。它的 alpha 是顶点插值出来的**连续**值（内带 0.14→0.42、
+        // 中带 0.42、外带 0.42→0.14），而枚举一个连续统需要无穷多个候选色。
+        //
+        // 曾经按「两档 alpha」列进表里，结果真机上一跑就红：unmatched=10751（1.18%）。
+        // 根因是那张表的注释写错了——「相邻两圈同值于是带内是常量」只对中带成立，
+        // 内外两个带的两端分别是 0.14 与 0.42，插值出来是一整段渐变，只有贴到端点的那几行像素才认得出。
+        // 所以光环走另一条判据（见 TryPedestalAlpha）：像素落在「底色 → 不透明光环色」这条线段上，
+        // 落点参数就是它的 alpha，再要求这个 alpha 落在声明的区间里。
         int candidateCount = baseCount + (baseCount * axisCount);
         (float R, float G, float B)[] candidates = new (float, float, float)[candidateCount];
         int[] candidateAxis = new int[candidateCount];
@@ -227,7 +238,10 @@ internal static class DebugCube
             {
                 Vector3 axisColor = GlAxesRenderer.Axes[axis].Color;
                 int index = baseCount + (baseIndex * axisCount) + axis;
-                candidates[index] = DebugAxes.Blend((axisColor.X, axisColor.Y, axisColor.Z), baseColors[baseIndex]);
+                candidates[index] = PixelBlend.Over(
+                    (axisColor.X, axisColor.Y, axisColor.Z),
+                    baseColors[baseIndex],
+                    GlAxesRenderer.Alpha);
                 candidateAxis[index] = axis;
             }
         }
@@ -237,6 +251,9 @@ internal static class DebugCube
         int clearPixels = 0;
         int solidPixels = 0;
         int unmatched = 0;
+        int pedestalPixels = 0;
+        float minPedestalAlpha = float.MaxValue;
+        float maxPedestalAlpha = float.MinValue;
         long centroidX = 0;
         long centroidY = 0;
 
@@ -267,7 +284,24 @@ internal static class DebugCube
                 // 于是「认不出的颜色」那条断言永远不会有东西可报。
                 if (bestDistance > SquaredTolerance)
                 {
-                    unmatched++;
+                    // 底色与轴线都认不出来，才轮到光环。放这么后面是有意的：
+                    // 光环那条判据是「离一条线段足够近」，比「离一个点足够近」宽松得多——
+                    // 先让它试的话，正好落在那条线段附近的背景色或面色会被它抢走，
+                    // 于是面像素少几块、光环像素多几块，而两条断言都看不出异常。
+                    if (pedestalVisible
+                        && TryPedestalAlpha(r, g, b, candidates, out float alpha))
+                    {
+                        // 光环像素不进 solidPixels，也不进质心：它落在底面上、围着方块，
+                        // 按面积算比轮廓的一部分还大，混进去会让覆盖率和质心两条
+                        // 一起变成「光环有多大」的函数。
+                        pedestalPixels++;
+                        minPedestalAlpha = MathF.Min(minPedestalAlpha, alpha);
+                        maxPedestalAlpha = MathF.Max(maxPedestalAlpha, alpha);
+                    }
+                    else
+                    {
+                        unmatched++;
+                    }
                 }
                 else if (candidateAxis[best] >= 0)
                 {
@@ -385,8 +419,43 @@ internal static class DebugCube
         Debug.WriteLine(
             $"[PREVIEWER][gl.cube.render] solid={solidPixels} clear={clearPixels} unmatched={unmatched} " +
             $"coverage={(float)solidPixels / pixelCount:P1} visibleFaces={visibleFaces} " +
-            $"backFacePixels={backFacePixels} axisPixels={axisTotal} " +
+            $"backFacePixels={backFacePixels} axisPixels={axisTotal} pedestalPixels={pedestalPixels} " +
             $"pos=({camera.Position}) yaw={camera.Yaw:F2} pitch={camera.Pitch:F2}");
+
+        if (pedestalVisible)
+        {
+            // 认出来的 alpha 区间是这条判据的核心证据：像素的颜色决定了它落在
+            // 「底色 → 不透明光环色」那条线上的哪个位置，而那个位置就是这一点上的 alpha。
+            Debug.WriteLine(
+                $"[PREVIEWER][gl.pedestal.band] pixels={pedestalPixels} " +
+                $"alphaObserved=[{Bound(minPedestalAlpha)},{Bound(maxPedestalAlpha)}] " +
+                $"alphaDeclared=[{Bound(PedestalAlphaMin)},{Bound(PedestalAlphaMax)}] " +
+                $"color={Byte(GlPedestalRenderer.Color.X)},{Byte(GlPedestalRenderer.Color.Y)}," +
+                $"{Byte(GlPedestalRenderer.Color.Z)}");
+        }
+
+        if (pedestalVisible)
+        {
+            // 这条只在展台模式下判：自由视角下光环根本不画，认不出它是正常的。
+            // 门槛取「大于零」而不是估出来的面积：光环投影出来的面积随俯仰角从几万像素掉到几千，
+            // 拿一个数去卡它等于把断言绑在相机的姿态上；而「画没画」是个是非题。
+            Debug.Assert(
+                pedestalPixels > 0,
+                $"[PREVIEWER][gl.cube] 展台光环一个像素都没认出来 pedestalVisible=True " +
+                $"pos=({camera.Position}) pitch={camera.Pitch:F2} " +
+                $"note=要么没画，要么被整个盖住了，要么颜色与声明的 alpha 区间对不上");
+
+            // 两端都要够到。这一条判的是「软边还在不在」：顶点 alpha 写成常量（整圈一样亮）
+            // 或者把内外两圈写反的时候，像素数照样是几万，「画出来了」那条全绿，
+            // 只有观测到的区间会缩到一点上。
+            Debug.Assert(
+                minPedestalAlpha <= PedestalAlphaMin + AlphaReachSlack
+                && maxPedestalAlpha >= PedestalAlphaMax - AlphaReachSlack,
+                $"[PREVIEWER][gl.cube] 光环的 alpha 没铺满声明的区间 " +
+                $"observed=[{Bound(minPedestalAlpha)},{Bound(maxPedestalAlpha)}] " +
+                $"declared=[{Bound(PedestalAlphaMin)},{Bound(PedestalAlphaMax)}] " +
+                $"note=内缘与外缘那两个 0.14 的两端都要有像素；只观测到一个值说明软边没了");
+        }
 
         // 逐轴打一遍：三条线的像素数差着量级是正常的（正对着镜头的那根投影成一段，
         // 与视线垂直的那根投影成一个点），所以这里只记不判——
@@ -458,6 +527,127 @@ internal static class DebugCube
     }
 
     private static byte Byte(float value) => (byte)Math.Clamp(MathF.Round(value * 255f), 0f, 255f);
+
+    private static string Bound(float value) =>
+        value == float.MaxValue || value == float.MinValue ? "无" : value.ToString("F3");
+
+    // 声明的 alpha 区间：光环顶点上那组 alpha 的最小与最大。
+    private static float PedestalAlphaMin => MinAlpha();
+
+    private static float PedestalAlphaMax => MaxAlpha();
+
+    // 把「离一个点足够近」换成「离一条线段足够近」时要放宽的那一点余量，两处各用一份：
+    //
+    // 一是判据本身：alpha 是顶点插值出来的，混完再取整成 8 位，所以反推回来的那个参数
+    // 会带上千分之几的抖动，落在声明的区间外面一点点是正常的。
+    //
+    // 二是「两端都要够到」那条：贴到内缘的那一行像素，alpha 比 0.14 大一点点（渐变是从这里起步的），
+    // 所以断言不能要求恰好等于 0.14。
+    private const float AlphaSlack = 0.05f;
+
+    private const float AlphaReachSlack = 0.06f;
+
+    private static float MinAlpha()
+    {
+        float min = float.MaxValue;
+        foreach (float alpha in GlPedestalRenderer.RingAlphas)
+        {
+            min = MathF.Min(min, alpha);
+        }
+
+        return min;
+    }
+
+    private static float MaxAlpha()
+    {
+        float max = float.MinValue;
+        foreach (float alpha in GlPedestalRenderer.RingAlphas)
+        {
+            max = MathF.Max(max, alpha);
+        }
+
+        return max;
+    }
+
+    // 这个像素是不是光环画出来的，如果是，它的 alpha 是多少。
+    //
+    // 光环的顶点 alpha 从 0.14 渐变到 0.42，混出来的颜色因此是一条**线段**上的点：
+    // 从「这个像素底下的那个颜色」出发，指向不透明光环色。落在线上哪个位置，就是那一点的 alpha
+    // （Over 那条式子在 alpha 上是线性的）。所以判据是：
+    // 到这条线段足够近，而且落点参数落在声明的 alpha 区间里。
+    //
+    // 用参数而不是枚举颜色：枚举是一张有限表，而渐变是连续统——表上差一点就是「认不出来」，
+    // 而那几万个像素会把「认不出的颜色」的预算整个吃掉。参数化之后判据是精确的，
+    // 而且顺带把 alpha 本身也量出来了（画成不透明时落点是 1，立刻出界）。
+    //
+    // 根（线段的起点）就是底色那张表：背景、六个面、以及轴线压在它们上面的那二十一种结果。
+    // 光环压在轴线上时底色正是后者，所以这一份表天然覆盖了「光环压着轴线」的那些像素。
+    private static bool TryPedestalAlpha(
+        byte r,
+        byte g,
+        byte b,
+        (float R, float G, float B)[] roots,
+        out float alpha)
+    {
+        float px = r;
+        float py = g;
+        float pz = b;
+
+        // 线段的终点：alpha = 1，也就是光环色本身。
+        float endR = Byte(GlPedestalRenderer.Color.X);
+        float endG = Byte(GlPedestalRenderer.Color.Y);
+        float endB = Byte(GlPedestalRenderer.Color.Z);
+
+        float minAlpha = PedestalAlphaMin - AlphaSlack;
+        float maxAlpha = PedestalAlphaMax + AlphaSlack;
+
+        int bestError = SquaredTolerance + 1;
+        alpha = 0f;
+
+        foreach ((float R, float G, float B) root in roots)
+        {
+            float startR = Byte(root.R);
+            float startG = Byte(root.G);
+            float startB = Byte(root.B);
+
+            float dx = endR - startR;
+            float dy = endG - startG;
+            float dz = endB - startB;
+
+            float lengthSquared = (dx * dx) + (dy * dy) + (dz * dz);
+
+            // 底色和不透明光环色几乎重合时这条线段退化了：投影出来除不了一个有效的长度，
+            // 而且这种底色本来也认不出「上面是不是压着光环」——跳过它。
+            if (lengthSquared < 1f)
+            {
+                continue;
+            }
+
+            float t = ((((px - startR) * dx) + ((py - startG) * dy) + ((pz - startB) * dz)) / lengthSquared);
+
+            if (t < minAlpha || t > maxAlpha)
+            {
+                continue;
+            }
+
+            float cr = startR + (t * dx);
+            float cg = startG + (t * dy);
+            float cb = startB + (t * dz);
+
+            float dr = px - cr;
+            float dg = py - cg;
+            float db = pz - cb;
+            int error = (int)((dr * dr) + (dg * dg) + (db * db));
+
+            if (error < bestError)
+            {
+                bestError = error;
+                alpha = t;
+            }
+        }
+
+        return bestError <= SquaredTolerance;
+    }
 
     private static bool IsAxisAligned(Vector3 normal)
     {

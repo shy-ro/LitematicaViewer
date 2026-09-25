@@ -91,22 +91,8 @@ internal static class DebugAxes
         // 换句话说，这里不必再写一条注定恒真的检查。
     }
 
-    // 轴线压在某个底色上时的混合结果，与 GL 的 SRC_ALPHA / ONE_MINUS_SRC_ALPHA 同一个算式。
-    //
-    // 为什么画面校验需要它：轴线画在立方体前面（或者旁边）的那几段是真的改了像素的，
-    // 而按颜色反推的那套分类只认识背景色和六个面色，多出来的线会被算成「认不出的颜色」。
-    // 认不出的像素本来有 1% 的预算，够盖住几条线——但那意味着「线一长就把预算吃光」，
-    // 于是那条断言什么时候开始失效取决于线的长度，而不是取决于画得对不对。
-    public static (float R, float G, float B) Blend(
-        (float R, float G, float B) axisColor,
-        (float R, float G, float B) background)
-    {
-        float alpha = GlAxesRenderer.Alpha;
-        return (
-            (alpha * axisColor.R) + ((1f - alpha) * background.R),
-            (alpha * axisColor.G) + ((1f - alpha) * background.G),
-            (alpha * axisColor.B) + ((1f - alpha) * background.B));
-    }
+    // 轴线压在某个底色上时的混合结果在 PixelBlend.Over：画面校验需要它这件事不止轴线一家
+    // （展台光环也要），所以算式与那个理由一并挪到了那儿。
 
     private static Vector3 ReadPosition(float[] vertices, int vertex)
     {

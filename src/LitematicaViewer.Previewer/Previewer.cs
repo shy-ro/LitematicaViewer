@@ -44,6 +44,7 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
     private int _viewportHeight;
     private GlCubeRenderer? _cube;
     private GlAxesRenderer? _axes;
+    private GlPedestalRenderer? _pedestal;
 
     // 指针能不能选中本控件，由这一条说了算，而默认答案是「不能」。
     //
@@ -128,6 +129,9 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         // 顺序只影响日志先后的可读性。轴线后建是因为它画在立方体之后——
         // 深度相等的那几个像素（轴线正好从面心穿出去的地方）归先画的那个。
         _axes = GlAxesRenderer.Create(gl);
+
+        // 光环和另外两个一起建、常驻，只在展台模式下画：模式切换不该创建或销毁 GPU 资源（R5）。
+        _pedestal = GlPedestalRenderer.Create(gl);
     }
 
     protected override void OnOpenGlRender(GlInterface gl, int fb)
@@ -176,6 +180,15 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         // 轴线接着画：落在立方体里的那一段被深度测试挡住，露在外面的是从方块里伸出来的三根轴。
         _axes?.Render(_camera, width, height);
 
+        // 光环最后画。半透明的三个东西（轴线、光环）只有按「从远到近」画才对得上，
+        // 而光环压在底面上、比它绕着的那块模型更靠前，所以它在轴线之后。
+        // 反过来时，光环与轴线交叠的那几百个像素会先被光环写一遍、再被轴线混一遍，
+        // 深度上就成了「轴线在光环前面」——两处都是半透明，画面看起来只是「有点怪」。
+        if (_pedestalVisible)
+        {
+            _pedestal?.Render(_camera, width, height, _pedestalRadius, _pedestalBaseY);
+        }
+
         // 自驱动渲染循环：这一帧的末尾换来下一帧，节流交给 Avalonia 的合成器（实测就是显示刷新率）。
         // 不改成「只在相机变化时才请求」是因为 Tick 是控制器的时间来源：一旦没有输入就不出帧，
         // 靠时间推进的东西（惯性、缩放动画）会直接停住。代价是空闲时也按刷新率出帧。
@@ -218,6 +231,8 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
             $"[PREVIEWER][gl.deinit] 挂上去了却一帧没画 frames={_framesRendered}");
 
         // 上下文还在，可以正常走 GL 的删除路径。
+        _pedestal?.Dispose();
+        _pedestal = null;
         _axes?.Dispose();
         _axes = null;
         _cube?.Dispose();
@@ -231,6 +246,8 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         // 上下文丢了，GPU 侧的对象随之消失，此时再发 Delete* 就是对着失效的函数指针发号施令。
         // 所以只丢引用、不发 GL 调用，等下一次 Init 重建。
         Debug.WriteLine($"[PREVIEWER][gl.lost] frames={_framesRendered} expected=之后会再来一次 gl.init");
+        _pedestal?.Abandon();
+        _pedestal = null;
         _axes?.Abandon();
         _axes = null;
         _cube?.Abandon();
@@ -296,7 +313,14 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         // 后者一次同步都不产生，却会把名额吃掉，于是真正换相机的那些帧反而没验。
         _cameraVerifications++;
         _skipLogs = 0;
-        DebugCube.CheckRendered(GlCubeRenderer.Vertices, pixels, width, height, _camera, ClearColor);
+        DebugCube.CheckRendered(
+            GlCubeRenderer.Vertices,
+            pixels,
+            width,
+            height,
+            _camera,
+            ClearColor,
+            _pedestalVisible);
     }
 
     private int _pointerMoves;

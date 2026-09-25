@@ -12,9 +12,10 @@ namespace LitematicaViewer.Previewer;
 //
 // 它不碰 GL，也不碰相机：R2 要求使用层函数不创建、不销毁 GPU 资源，这里连 GL 上下文都拿不到。
 //
-// 转视角这一条从 Phase F 起是「固定鼠标」：指针一动就起手势，同时把光标钉在视口中心
-// （游戏里的做法），于是手可以一直朝一个方向划、视角一直转，撞不到屏幕边。
-// 代价是光标被夺走了，所以按住右键把它们还回去——见下面 OnPointerPressed。
+// 转视角这一条有两种手势（见 LookGesture）：自由视角下指针一动就转，同时把光标钉在视口中心
+// （游戏里的做法），于是手可以一直朝一个方向划、视角一直转，撞不到屏幕边——代价是光标被夺走了，
+// 所以按住右键把它们还回去（见 OnPointerPressed）。展台下按住左键拖才转，不钉不藏，
+// 因为拖动是有头有尾的手势，而且拖的时候得看得见光标。
 public sealed class PreviewerInputAdapter : IDisposable
 {
     private readonly Previewer _previewer;
@@ -28,6 +29,9 @@ public sealed class PreviewerInputAdapter : IDisposable
 
     // 能不能钉光标。宿主可以关掉（验收剧本就要关），平台不支持时也自动是关的。
     private bool _confine = true;
+
+    // 转视角的手势。见 LookGesture：自由视角与展台只差这一件事。
+    private LookGesture _gesture = LookGesture.FollowPointer;
 
     // 钉不住之后的降级标志。窗口有一部分在屏幕外时 SetCursorPos 会落到别处，
     // 而那时每次都按请求点算增量会让画面自己转起来——所以一旦发现钉不住就整段放弃，
@@ -109,6 +113,27 @@ public sealed class PreviewerInputAdapter : IDisposable
         }
     }
 
+    // 转视角的手势。宿主切模式时设它。
+    public LookGesture Gesture
+    {
+        get => _gesture;
+
+        set
+        {
+            if (_gesture == value)
+            {
+                return;
+            }
+
+            _gesture = value;
+
+            // 切模式时把进行中的手势收掉：两种手势的起止条件不一样（一个靠指针进出，
+            // 一个靠按键），留着会让新模式的第一次移动带着旧模式的参照点走一段凭空的位移。
+            ReleaseLook();
+            Debug.WriteLine($"[PREVIEWER][input.gesture] gesture={value}");
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -141,6 +166,12 @@ public sealed class PreviewerInputAdapter : IDisposable
     // 硬算出来的会是「从上次留下的位置到这里」那一段凭空的跳转。
     private void OnPointerMoved(object? sender, PointerEventArgs e)
     {
+        if (_gesture == LookGesture.DragPrimaryButton)
+        {
+            OnDragMoved(e);
+            return;
+        }
+
         // 右键按着的那一段完全不接管：转视角、钉光标、藏光标全停，指针归用户。
         if (_suspended)
         {
@@ -194,7 +225,69 @@ public sealed class PreviewerInputAdapter : IDisposable
 
     // 指针离开控件就结束这一段。钉住光标时它几乎是不会发生的（指针被钉在控件中心），
     // 所以它管的是「钉不住」那条降级路径。
-    private void OnPointerExited(object? sender, PointerEventArgs e) => EndLook();
+    //
+    // 展台模式下它一次都不能结束手势：拖动是可以拖到控件外面去的（捕获还在，事件照来），
+    // 拖出去就断的表现是「甩到一半没了」，而甩本来就是要求之一。
+    private void OnPointerExited(object? sender, PointerEventArgs e)
+    {
+        if (_gesture == LookGesture.FollowPointer)
+        {
+            EndLook();
+        }
+    }
+
+    // 展台：按住左键拖着转。不钉光标、不藏光标——拖动本来就要看得见光标。
+    //
+    // 起手那一次只定参照、不产生增量（和自由视角同一件道理）：只有一次位置就没有「差」。
+    private void BeginDrag(PointerPressedEventArgs e)
+    {
+        // 只认左键。右键在展台里没有含义（自由视角下它是「把指针还回去」，而这里指针本来就是自由的）。
+        if (_looking || !e.GetCurrentPoint(_previewer).Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+
+        _looking = true;
+        _pointer = e.Pointer;
+        _reference = e.GetPosition(_previewer);
+
+        // 捕获：拖出控件、甚至拖出窗口时移动事件仍然送得到。不捕获的话手一出界画面就不动了，
+        // 而那看起来像卡死——实际是「没有后续事件」，不是「控制器没处理」。
+        e.Pointer.Capture(_previewer);
+
+        Debug.WriteLine($"[PREVIEWER][input.drag] 按下 position=({_reference.X:F0},{_reference.Y:F0})");
+        _previewer.RaiseLookStarted();
+    }
+
+    // 展台：拖动中的每一次移动。
+    private void OnDragMoved(PointerEventArgs e)
+    {
+        if (!_looking)
+        {
+            // 没按着左键时的移动只是路过。这里的安静是对的——而「一动就转」那套必须整个不生效，
+            // 否则展台里光标一进画面视角就开始转。
+            return;
+        }
+
+        // 抬起事件可能落在别处（拖出控件再松手），所以这里按指针状态兜一次。
+        // 与右键挂起那一段同一个理由：不信一个可能永远不来的事件。
+        if (!e.GetCurrentPoint(_previewer).Properties.IsLeftButtonPressed)
+        {
+            Debug.WriteLine("[PREVIEWER][input.drag] 抬起落在别处，从指针状态补上 looking=False");
+            EndLook();
+            return;
+        }
+
+        Point position = e.GetPosition(_previewer);
+        Vector delta = position - _reference;
+        _reference = position;
+
+        // 零增量放过：拖动中手停一下就会产生零增量，喂给控制器只会留下一条没意义的记录。
+        if (delta != default)
+        {
+            _previewer.RaiseLookMoved(delta);
+        }
+    }
 
     // 捕获被抢走（点到别的窗口、被别的元素抢了捕获）时手势到此为止。
     // 少了这一条，参照点会一直停在旧位置，下次移进来的第一帧就是一段凭空的跳转。
@@ -207,6 +300,12 @@ public sealed class PreviewerInputAdapter : IDisposable
     // 抬起右键之后下一次移动会重新起一段手势（重新钉住）。
     private void OnPointerPressed(object? sender, PointerPressedEventArgs e)
     {
+        if (_gesture == LookGesture.DragPrimaryButton)
+        {
+            BeginDrag(e);
+            return;
+        }
+
         if (!e.GetCurrentPoint(_previewer).Properties.IsRightButtonPressed)
         {
             return;
@@ -228,6 +327,19 @@ public sealed class PreviewerInputAdapter : IDisposable
     // 拖出窗口）时这个事件不会来，补上它的是 OnPointerMoved 里那次「按键状态已经放开了」的检查。
     private void OnPointerReleased(object? sender, PointerReleasedEventArgs e)
     {
+        if (_gesture == LookGesture.DragPrimaryButton)
+        {
+            if (!_looking ||
+                e.GetCurrentPoint(_previewer).Properties.PointerUpdateKind is not PointerUpdateKind.LeftButtonReleased)
+            {
+                return;
+            }
+
+            Debug.WriteLine("[PREVIEWER][input.drag] 抬起（事件）looking=False");
+            EndLook();
+            return;
+        }
+
         if (e.GetCurrentPoint(_previewer).Properties.PointerUpdateKind is not PointerUpdateKind.RightButtonReleased)
         {
             return;

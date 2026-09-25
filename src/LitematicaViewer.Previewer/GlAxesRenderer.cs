@@ -73,13 +73,7 @@ internal sealed class GlAxesRenderer : IDisposable
         // 混合是渲染器自己的状态，和资源一样只在 Initialize 里设一次。
         // 不开混合的话 alpha 只是被写进帧缓冲的一个数，屏幕上看不出半透明——
         // 表现成「线比想要的实」，而那看起来像是颜色选错了。
-        gl.Enable(GlRaw.GL_BLEND);
-        bool blended = GlRaw.BlendFuncSeparate(
-            gl,
-            GlRaw.GL_SRC_ALPHA,
-            GlRaw.GL_ONE_MINUS_SRC_ALPHA,
-            GlRaw.GL_ZERO,
-            GlRaw.GL_ONE);
+        bool blended = GlRaw.EnableAlphaBlend(gl);
 
         // 入口找不到时它什么都不做，而 GL_BLEND 此时配的是默认的 (ONE, ZERO)，也就是原样覆盖——
         // 症状是三条线全是不透明的纯色。那个错法不报错、不崩，只在画面上「看着不太对」，
