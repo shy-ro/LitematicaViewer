@@ -18,6 +18,7 @@ public partial class MainWindow : Window
     private readonly ScrollZoomController _scroll;
     private readonly MouseLookController _look;
     private readonly WasdCameraController _wasd;
+    private readonly Sidebar _sidebar;
     private readonly InputSelfTest? _selfTest;
 
     public MainWindow()
@@ -47,6 +48,20 @@ public partial class MainWindow : Window
         _scroll = new ScrollZoomController(Viewport, _camera);
         _look = new MouseLookController(Viewport, _camera);
         _wasd = new WasdCameraController(Viewport, _camera);
+        _sidebar = new Sidebar(this, Viewport, _camera);
+
+        // 侧边栏上的任何一次按下都把焦点还回视口。滑块的 Focusable 已经是 false（拖它不该抢
+        // 键盘焦点），但「按一个不可聚焦的元素会不会把焦点清掉」由模板和焦点管理器决定——
+        // 而焦点一旦不在控件上，按键就送不到 Previewer，WASD 整个失效，日志里只是「没反应」。
+        //
+        // 订阅用 Tunnel：滑块的手柄在处理按下时会把事件标成已处理，冒泡那一趟到不了这里；
+        // handledEventsToo 也救不了，因为冒泡在源头上就停了。隧道这一趟是从窗口往下走的，
+        // 一定先经过侧边栏这一层。设备产生的真实点击才走路由，合成事件绕过它——
+        // 所以这一条与 ICustomHitTest 那条一样，只能靠真机的日志验。
+        SidebarPanel.AddHandler(
+            PointerPressedEvent,
+            OnSidebarPointerPressed,
+            RoutingStrategies.Tunnel);
 
         _selfTest = Program.SelfTestSeconds > 0 ? new InputSelfTest(this, Viewport, _camera, _input) : null;
         _selfTest?.Attach();
@@ -167,32 +182,40 @@ public partial class MainWindow : Window
             $"hitTestVisible={Viewport.IsHitTestVisible} topLevel={TopLevel.GetTopLevel(Viewport)?.GetType().Name ?? "null"} " +
             $"parent={Describe(Viewport.GetVisualParent())}");
 
+        // 取样点按**控件自己的坐标系**给，再转到窗口坐标去问那两个 API。按客户区给点不行了：
+        // 客户区里还有侧边栏那一块，取到的点会落在侧边栏上，于是下面那条断言红得莫名其妙
+        // （而 Debug 断言失败会直接杀掉进程）。
+        //
+        // 取三个点而不只取中心：控件只盖住一部分时，中心可能恰好在外面。
         Point[] points =
         [
-            new(ClientSize.Width / 2, ClientSize.Height / 2),
+            new(Viewport.Bounds.Width / 2, Viewport.Bounds.Height / 2),
             new(10, 10),
-            new(ClientSize.Width - 10, ClientSize.Height - 10),
+            new(Viewport.Bounds.Width - 10, Viewport.Bounds.Height - 10),
         ];
 
-        foreach (Point point in points)
+        foreach (Point local in points)
         {
+            // 转换失败本身就是一条要报的故障：变换链断掉时 Bounds 看着是对的，
+            // 而命中永远落不到控件身上——那时这两个数（bounds 与命中点）只有一起看才说得清。
+            Point? translated = Viewport.TranslatePoint(local, this);
+            Debug.Assert(
+                translated is not null,
+                $"[SAMPLE][input.hittest] 控件里的点 ({local.X:F0},{local.Y:F0}) 转不到窗口坐标");
+            if (translated is not { } point)
+            {
+                continue;
+            }
+
             // 两个 API 都问一遍。它们走的是同一条合成层命中路径，正常时结果一致；
             // 一起打出来是为了在结果异常时能立刻分辨「命中的是谁、它挂在哪」——
             // 只打一个的话，拿到一个陌生的元素名仍然不知道它是谁。
             IInputElement? inputHit = this.InputHitTest(point);
             Debug.WriteLine(
-                $"[SAMPLE][input.hittest] point=({point.X:F0},{point.Y:F0}) " +
+                $"[SAMPLE][input.hittest] point=({point.X:F0},{point.Y:F0}) local=({local.X:F0},{local.Y:F0}) " +
                 $"inputHitTest={Describe(inputHit)}");
 
-            // 这条断言是 ICustomHitTest 那个修复的守卫，也是唯一能守住它的一条：
-            // 合成事件走 RaiseEvent，根本不经过命中测试，所以整个自检剧本对这一类故障是全绿的。
-            // 命中失败时输入会一路安静——和「消息没进程序」长得一模一样，人手排查要花掉一整天。
-            Debug.Assert(
-                ReferenceEquals(inputHit, Viewport),
-                $"[SAMPLE][input.hittest] 指针没命中控件 point=({point.X:F0},{point.Y:F0}) " +
-                $"hit={Describe(inputHit)} expected=Viewport#Viewport。命中落在别的元素上时，" +
-                $"滚轮和按键都到不了控件，而日志里看起来只是「没反应」");
-
+            // 证据先打完再断言：断言失败会直接杀掉进程，而那时这一条正是唯一说得清「命中的是谁」的东西。
             int index = 0;
             foreach (Visual visual in this.GetVisualsAt(point))
             {
@@ -205,6 +228,15 @@ public partial class MainWindow : Window
             {
                 Debug.WriteLine($"[SAMPLE][input.hittest] point=({point.X:F0},{point.Y:F0}) 一个都没命中");
             }
+
+            // 这条断言是 ICustomHitTest 那个修复的守卫，也是唯一能守住它的一条：
+            // 合成事件走 RaiseEvent，根本不经过命中测试，所以整个自检剧本对这一类故障是全绿的。
+            // 命中失败时输入会一路安静——和「消息没进程序」长得一模一样，人手排查要花掉一整天。
+            Debug.Assert(
+                ReferenceEquals(inputHit, Viewport),
+                $"[SAMPLE][input.hittest] 指针没命中控件 point=({point.X:F0},{point.Y:F0}) " +
+                $"local=({local.X:F0},{local.Y:F0}) hit={Describe(inputHit)} expected=Viewport#Viewport。" +
+                $"命中落在别的元素上时，滚轮和按键都到不了控件，而日志里看起来只是「没反应」");
         }
 
         // 命中列表里冒出几个匿名元素时，唯一能回答「它是谁」的就是树本身：
@@ -271,6 +303,18 @@ public partial class MainWindow : Window
     }
 #endif
 
+    // 订阅它的理由见构造函数里那一段。这里只记录、不追加断言：窗口没激活时第一次点击
+    // 只负责把窗口激活，聚焦落空是系统行为而不是接线错了——而那与真正的焦点问题
+    // 在日志里长得一样，所以两者都要打出来。
+    private void OnSidebarPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        bool focused = Viewport.Focus();
+        IInputElement? focusedElement = TopLevel.GetTopLevel(Viewport)?.FocusManager?.GetFocusedElement();
+        Debug.WriteLine(
+            $"[SAMPLE][sidebar.focus] 侧边栏被按下，焦点还给视口 focused={focused} " +
+            $"focusedElement={focusedElement?.GetType().Name ?? "null"} expected=Previewer");
+    }
+
     private void OnOpened(object? sender, EventArgs e)
     {
         Debug.WriteLine($"[SAMPLE][window.opened] client={ClientSize} scaling={RenderScaling}");
@@ -324,6 +368,7 @@ public partial class MainWindow : Window
         // 先出验收结论再拆零件：拆完事件就不触发了，
         // 而验收要的正是「到这一刻为止，每个事件都至少走通过一次」。
         _selfTest?.Report();
+        _sidebar.Dispose();
         _wasd.Dispose();
         _look.Dispose();
         _scroll.Dispose();
