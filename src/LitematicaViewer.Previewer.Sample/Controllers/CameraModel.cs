@@ -144,7 +144,7 @@ internal sealed partial class CameraModel
     // 这些都是纯计算，跟 GL、跟窗口都无关，所以走模型而不是走合成事件：
     // 混进渲染里去验，算错了和画错了就分不开了。
     // 由 Sample 在建模型的时候跑一次（不是 Previewer 初始化时——模型在 Sample 这一侧）。
-    internal static void VerifyZoom()
+    internal static void VerifyCameraMath()
     {
         VerifyZoomArithmetic();
         VerifyPanAndOrbit();

@@ -36,7 +36,7 @@ public partial class MainWindow : Window
         _camera = new CameraModel(CameraState.Default, Vector3.Zero);
 
 #if DEBUG
-        CameraModel.VerifyZoom();
+        CameraModel.VerifyCameraMath();
 #endif
 
         // 先把模型的相机推给控件一次。这一步不是多余的：Previewer 内部那份默认值只是占位，
