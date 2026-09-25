@@ -1,12 +1,12 @@
 using System.Diagnostics;
 using System.Numerics;
-using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.OpenGL;
 using Avalonia.OpenGL.Controls;
 using Avalonia.Rendering;
 using LitematicaViewer.Previewer.Diagnostics;
+using LitematicaViewer.Previewer.Gpu;
 
 namespace LitematicaViewer.Previewer;
 
@@ -43,6 +43,8 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
     private int _viewportWidth;
     private int _viewportHeight;
     private GlCubeRenderer? _cube;
+    private GlAxesRenderer? _axes;
+    private GlPedestalRenderer? _pedestal;
 
     // 指针能不能选中本控件，由这一条说了算，而默认答案是「不能」。
     //
@@ -59,26 +61,30 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
     // ICustomHitTest 是给「自己画自己」的控件留的口子：命中范围由它说了算。
     // 判据用 Bounds 而不是「有没有画东西」：这个控件的画面盖满自己的整个矩形，
     // 让指针穿过去点它背后的东西本来就没有意义。
-    bool ICustomHitTest.HitTest(Point point)
-    {
-        // 入参是 TopLevel 坐标，先转回自己的坐标系再跟 Bounds 比。
-        if (TopLevel.GetTopLevel(this) is not { } root)
-        {
-            return false;
-        }
-
-        Point? local = root.TranslatePoint(point, this);
-        return local is { } value && new Rect(Bounds.Size).Contains(value);
-    }
+    //
+    // 入参是**控件自己的坐标**。这一条到 Phase F 才确定：那时控件从窗口左上角挪到了侧边栏右边，
+    // 而原来这里按「入参是 TopLevel 坐标」又转了一次（root.TranslatePoint(point, this)），
+    // 于是左边缘那 300 个像素的命中被整个减没了——真实输入落在那一段时控件收不到任何东西。
+    //
+    // 它一直是错的，只是控件在原点时「转一次」正好等于不转（偏移是 0,0），
+    // 所以从外观上验不出差别；换个布局才暴露。实测那一行的入参：探针在窗口坐标 (790,400) 提问，
+    // 这里收到 (490,400)，正好差控件左边界的 300。
+    bool ICustomHitTest.HitTest(Point point) => new Rect(Bounds.Size).Contains(point);
 
 #if DEBUG
     // 整张 framebuffer 读回来会强制 GPU 同步，逐帧读会把帧率打到地板上，
     // 所以只在相机变化时读，且总数封顶。换了相机就是换了一张画面，值得验一次；
     // 相机没变时同一张画面验两遍不给新信息。
-    private const int MaxCameraVerifications = 6;
+    //
+    // 6 改 24：Phase F 起每帧都可能换相机（按住 W 时就是），6 次在第一秒就被一个走动花光了，
+    // 之后整个会话都不再抽样。24 仍然是「一次会话」的预算而不是每秒的——
+    // 每次读回是几 MB 加一次同步，二十几次摊在一个会话里可以忽略，而摊不了帧率。
+    private const int MaxCameraVerifications = 24;
 
     private int _verifiedCameraVersion = -1;
     private int _cameraVerifications;
+    private bool _budgetExhaustedLogged;
+    private int _skipLogs;
 #endif
 
     protected override void OnOpenGlInit(GlInterface gl)
@@ -118,6 +124,14 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
 #endif
 
         _cube = GlCubeRenderer.Create(gl);
+
+        // 两个渲染器各自设自己需要的 GL 状态（立方体开深度测试，轴线开混合），都在这里设一次，
+        // 顺序只影响日志先后的可读性。轴线后建是因为它画在立方体之后——
+        // 深度相等的那几个像素（轴线正好从面心穿出去的地方）归先画的那个。
+        _axes = GlAxesRenderer.Create(gl);
+
+        // 光环和另外两个一起建、常驻，只在展台模式下画：模式切换不该创建或销毁 GPU 资源（R5）。
+        _pedestal = GlPedestalRenderer.Create(gl);
     }
 
     protected override void OnOpenGlRender(GlInterface gl, int fb)
@@ -163,6 +177,18 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
 
         _cube?.Render(_camera, width, height);
 
+        // 轴线接着画：落在立方体里的那一段被深度测试挡住，露在外面的是从方块里伸出来的三根轴。
+        _axes?.Render(_camera, width, height);
+
+        // 光环最后画。半透明的三个东西（轴线、光环）只有按「从远到近」画才对得上，
+        // 而光环压在底面上、比它绕着的那块模型更靠前，所以它在轴线之后。
+        // 反过来时，光环与轴线交叠的那几百个像素会先被光环写一遍、再被轴线混一遍，
+        // 深度上就成了「轴线在光环前面」——两处都是半透明，画面看起来只是「有点怪」。
+        if (_pedestalVisible)
+        {
+            _pedestal?.Render(_camera, width, height, _pedestalRadius, _pedestalBaseY);
+        }
+
         // 自驱动渲染循环：这一帧的末尾换来下一帧，节流交给 Avalonia 的合成器（实测就是显示刷新率）。
         // 不改成「只在相机变化时才请求」是因为 Tick 是控制器的时间来源：一旦没有输入就不出帧，
         // 靠时间推进的东西（惯性、缩放动画）会直接停住。代价是空闲时也按刷新率出帧。
@@ -183,10 +209,10 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         // 这一段是约定里说的例外：断言本身在 Release 下会消失，但读回那一下 GPU 同步不会，
         // 所以连调用点一起包掉。其余探针都不需要 #if DEBUG。
 #if DEBUG
-        if (_cameraVersion != _verifiedCameraVersion && _cameraVerifications < MaxCameraVerifications)
+        if (_cameraVersion != _verifiedCameraVersion)
         {
+            // 同一个姿态只判一次：没换相机时重算是白算，而读回那一下是强制 GPU 同步。
             _verifiedCameraVersion = _cameraVersion;
-            _cameraVerifications++;
             VerifyFrame(gl, width, height);
         }
 #endif
@@ -205,6 +231,10 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
             $"[PREVIEWER][gl.deinit] 挂上去了却一帧没画 frames={_framesRendered}");
 
         // 上下文还在，可以正常走 GL 的删除路径。
+        _pedestal?.Dispose();
+        _pedestal = null;
+        _axes?.Dispose();
+        _axes = null;
         _cube?.Dispose();
         _cube = null;
 
@@ -216,6 +246,10 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         // 上下文丢了，GPU 侧的对象随之消失，此时再发 Delete* 就是对着失效的函数指针发号施令。
         // 所以只丢引用、不发 GL 调用，等下一次 Init 重建。
         Debug.WriteLine($"[PREVIEWER][gl.lost] frames={_framesRendered} expected=之后会再来一次 gl.init");
+        _pedestal?.Abandon();
+        _pedestal = null;
+        _axes?.Abandon();
+        _axes = null;
         _cube?.Abandon();
         _cube = null;
 
@@ -225,18 +259,68 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
 #if DEBUG
     private void VerifyFrame(GlInterface gl, int width, int height)
     {
-        int error = ReadGlError(gl);
+        int error = GlRaw.GetError(gl);
         Debug.WriteLine(
             $"[PREVIEWER][gl.error] code=0x{error:X} expected=0x0 cameraVersion={_cameraVersion}");
         Debug.Assert(error == 0, $"[PREVIEWER][gl.error] 有残留的 GL 错误 code=0x{error:X}");
 
-        byte[]? pixels = ReadFrameBuffer(gl, width, height);
+        // 预算得真的在这里拦一道，而且必须在读回**之前**——读回才是贵的那一步
+        // （强制 GPU 同步加拷几 MB 回来，后面还跟着每帧五百多万次像素距离计算）。
+        //
+        // 这个常量一度只声明、只自增、从没被判断过，于是注释里写的「一次会话封顶 24 次」
+        // 实际是「相机每变一次读回一帧」——转视角和按住 W 时相机每帧都在变，那就是每秒六十次读回。
+        // 症状是「一动鼠标就卡」，而它看起来像渲染慢，不像校验慢。
+        if (_cameraVerifications >= MaxCameraVerifications)
+        {
+            // 只说一次。用尽之后每个可验的帧都打一条的话，日志反而比没预算之前更长。
+            if (!_budgetExhaustedLogged)
+            {
+                _budgetExhaustedLogged = true;
+                Debug.WriteLine(
+                    $"[PREVIEWER][gl.readback] 读回预算用尽 {MaxCameraVerifications} 次，" +
+                    $"本次会话不再做画面校验 cameraVersion={_cameraVersion}");
+            }
+
+            return;
+        }
+
+        // 姿态不在校验适用的范围内就跳过，并且明说跳过了。
+        // 「跳过」和「通过」在日志里必须是两句不同的话：相机可以自由转向、可以平移、可以无界缩放，
+        // 有相当一部分姿态本来就验不了，把两者混成一片安静等于把这条检查整个作废。
+        if (!DebugCube.IsVerifiable(_camera, width, height, out string reason))
+        {
+            // 跳过这件事在自由导航里是**连续**发生的：按住 W 走一秒就是几十帧，帧帧都跳。
+            // 逐帧打的话这几行会把真正有用的东西挤出去（Phase F 之前相机只能沿一条固定的
+            // 体对角线推拉，几乎不会跳过，所以没暴露）。计数在真读回那里清零，
+            // 于是「上一次校验之后的第一跳」一定会打出来，那正是要看的那一条。
+            if (_skipLogs++ % CameraSetLogInterval == 0)
+            {
+                Debug.WriteLine(
+                    $"[PREVIEWER][gl.readback] 跳过画面校验 cameraVersion={_cameraVersion} " +
+                    $"原因={reason} note=每{CameraSetLogInterval}条一条");
+            }
+
+            return;
+        }
+
+        byte[]? pixels = GlRaw.ReadPixels(gl, 0, 0, width, height);
         if (pixels is null)
         {
             return;
         }
 
-        DebugCube.CheckRendered(GlCubeRenderer.Vertices, pixels, width, height, _camera, ClearColor);
+        // 读了才算一次。预算花在真读回上，而不是花在「判了一下但跳过了」上——
+        // 后者一次同步都不产生，却会把名额吃掉，于是真正换相机的那些帧反而没验。
+        _cameraVerifications++;
+        _skipLogs = 0;
+        DebugCube.CheckRendered(
+            GlCubeRenderer.Vertices,
+            pixels,
+            width,
+            height,
+            _camera,
+            ClearColor,
+            _pedestalVisible);
     }
 
     private int _pointerMoves;
@@ -297,52 +381,9 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         };
     }
 
-    // 整张 framebuffer 读回来。宽高用物理像素，与视口一致。
-    private static byte[]? ReadFrameBuffer(GlInterface gl, int width, int height)
-    {
-        IntPtr entry = gl.GetProcAddress("glReadPixels");
-        if (entry == IntPtr.Zero)
-        {
-            Debug.WriteLine("[PREVIEWER][gl.readback] glReadPixels 取不到，跳过");
-            return null;
-        }
-
-        ReadPixels readPixels = Marshal.GetDelegateForFunctionPointer<ReadPixels>(entry);
-        int byteCount = width * height * 4;
-        IntPtr buffer = Marshal.AllocHGlobal(byteCount);
-        try
-        {
-            readPixels(0, 0, width, height, GlConsts.GL_RGBA, GlConsts.GL_UNSIGNED_BYTE, buffer);
-
-            byte[] pixels = new byte[byteCount];
-            Marshal.Copy(buffer, pixels, 0, byteCount);
-            return pixels;
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
-    }
-
-    // GlInterface 没有包 glGetError。读一次只能知道「出过某种错」，给不出位置，
-    // 但 GL 的错误状态会一直累积到被读走为止，所以一次读等于给整条绘制路径兜了一次底。
-    private static int ReadGlError(GlInterface gl)
-    {
-        IntPtr entry = gl.GetProcAddress("glGetError");
-        if (entry == IntPtr.Zero)
-        {
-            return 0;
-        }
-
-        GetError getError = Marshal.GetDelegateForFunctionPointer<GetError>(entry);
-        return getError();
-    }
-
-    // GlInterface 没有包这两个，只能自己从上下文里取函数地址。
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate void ReadPixels(int x, int y, int width, int height, int format, int type, IntPtr pixels);
-
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate int GetError();
+    // 这里原本还有 ReadFrameBuffer 与 ReadGlError：GlInterface 没有包 glReadPixels 与 glGetError，
+    // 那两条自己从上下文取函数地址、自己配委托。轴线渲染器也要用同一条路（混合与线宽），
+    // 于是这类入口统一挪到了 Gpu/GlRaw.cs——同一件事有两个写法时，签名写错的那一份
+    // 要等到运行期把栈搅乱才暴露，而它长得跟另一份一模一样。
 #endif
 }

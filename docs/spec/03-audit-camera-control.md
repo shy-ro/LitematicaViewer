@@ -4,13 +4,24 @@ Phase E：滚轮缩放。相机第一次由控制器驱动，`Sample/Controllers
 
 这一相位不碰 Core，也不碰 Previewer 的 GL 路径——它接的是 Phase D 立起来的那四个事件。
 
+**Phase F 改动过本篇的四处**，改动与理由见 05：
+
+- 距离上下界从编译期常量变成可选入参，默认不设（下面「公开面」与「距离的上下界」两节按当时的写法保留）。
+- `VerifyZoom` 改名为 `VerifyCameraMath`：它现在把绕转与平移一起验。
+- `CameraModel` 拆成两个 partial 文件，加了 `Look` / `Pan`（当时叫 `Orbit`——那是第一版
+  的 orbit 相机，后来整个改成了第一视角，见 05）。
+- 转视角**已经做**，而且是**指针一动就转**、不需要按任何键（本篇「未解决」里说「不做」的那条已过时）。
+- 走动速度是 5 方块/秒、鼠标灵敏度 0.25 度/DIP；两者都是手感参数，在控制器里。
+  （Phase F 第三次返工之后灵敏度是 0.10，而且两个数都搬到了 `Previewer` 的**控件属性**上——
+  侧边栏能直接拖，见 05「控件属性与侧边栏」。）
+
 ## 文件与职责
 
     Controllers/CameraModel.cs           相机状态的权威持有者 + 缩放 + 距离夹取
     Controllers/ScrollZoomController.cs  滚轮 -> 模型 -> SetCamera
     InputSelfTest.cs                     从「自己改相机」退到「旁观控制器改相机」
 
-`WasdCameraController.cs` 属 Phase F，这一相位没有创建。
+`WasdCameraController.cs` 这一相位没有创建（属 Phase F，见 05）。
 
 **期间发现并修掉了一个输入故障**：真实鼠标滚轮在窗口上完全没有反应。根因不在这一相位的
 代码里——控件的画面由 GL 直接画到窗口上，Avalonia 12 的合成层命中测试看不到它，
@@ -33,11 +44,11 @@ Phase E：滚轮缩放。相机第一次由控制器驱动，`Sample/Controllers
     void Reset(CameraState camera)
     void Zoom(float steps)
 
-    MinDistance = 2.4f
+    MinDistance = 2.4f                 // Phase F 起是构造函数的可选入参，默认不给
     MaxDistance = 7.0f
     ZoomRatioPerStep = 0.8f
 
-    static void VerifyZoom()           // #if DEBUG
+    static void VerifyZoom()           // #if DEBUG（Phase F 改名为 VerifyCameraMath）
 
 `ScrollZoomController`（`internal sealed class`，`IDisposable`）
 
@@ -58,9 +69,9 @@ orbit 相机通常存 `(target, distance, yaw, pitch)` 四个数。这里只存 
 
 存 `CameraState` 就没有这一趟往返：`Reset` 是赋值，`Zoom` 只改 `Position` 一个分量。
 
-代价是模型里没有 `Yaw` / `Pitch` 的独立字段，Phase F 的 `WasdCameraController`
-若要「平移 target」，得自己往 `CameraState` 上写。到时候再说——那时会有真实的用例，
-现在加只是猜。
+代价是模型里没有 `Yaw` / `Pitch` 的独立字段。这一条在 Phase F 有了答案：
+`Pan` 要挪 `Target`，而它挪的方式是**从当前 `Camera.Forward` 现取方向**，
+不是读一份存下来的朝向——存两份正是上面那个分叉的来源。见 05。
 
 ## 缩放只动一个自由度
 
@@ -84,12 +95,17 @@ orbit 相机通常存 `(target, distance, yaw, pitch)` 四个数。这里只存 
                          → 0.866 / tan(22.5°) = 2.09，再近就该被近裁剪面切到了
     MaxDistance = 7.0    轮廓覆盖率约 3%（默认距离 4.7244 时是 8.3%），再远画面里只剩几个像素
 
+（Phase F 起这两个数不再是模型的默认值，而是构造时可选的入参——上面这一组是
+「为画面里那一个单位立方体量身定」的取值，现在由宿主决定要不要。见 05。）
+
 夹取放在**模型**里而不是等画面校验去发现：把相机推到看不见东西的位置本就不该是一次合法操作。
 `VerifyZoom` 连滚 50 档（0.8^50 ≈ 1.4e-5，早就把 `Pow` 推进溢出区了）之后断言距离
-**就是** 2.4 / 7.0（容差 1e-3），而不是「大致接近」。
+**就是** 2.4 / 7.0（容差 1e-3），而不是「大致接近」。这条验的是「夹取存在且到位」，
+所以自检里显式把界传给构造函数；默认无界那一条另有一条断言守着。
 
-`Pow` 溢出到 `Inf` 或下溢到 `0` 在这里是良性的：两者被 `Clamp` 夹到上下界恰好就是想要的语义。
-只有 `NaN` 会让 `Clamp` 失效，而 `steps` 有限、`current` 有限各有一条断言守着。
+`Pow` 溢出到 `Inf` 或下溢到 `0` 在有界的模型里是良性的：两者被夹到上下界恰好就是想要的语义。
+无界之后它们会真的把相机推出去，所以那里加了一条数值兜底（距离算不出有限正数就不动），
+理由见 05。
 
 ## 比例而不是步长
 
@@ -105,8 +121,9 @@ Avalonia 的 `delta` 是浮点（触控板能给出小数档位），所以用�
 两条路都成立。选直接调是因为少一层订阅-退订的簿记，而事件那一层的失败模式（订阅了但没退订、
 退订了但还持有引用）在这里换不来任何好处——控制器本来就持有 `Previewer` 和模型的引用。
 
-代价是 Phase F 的 `WasdCameraController` 会在这里之外多一个 `SetCamera` 调用点。
-两处都在 UI 线程上、都在改完模型之后立刻推，顺序上没有分歧：谁后改谁的结果就是最终画面。
+代价是 Phase F 会在这里之外多出 `SetCamera` 调用点。已经发生了：`MouseLookController`
+与 `WasdCameraController` 各有一处（见 05）。而三处都在 UI 线程上、都在改完模型之后立刻推，
+顺序上没有分歧：谁后改谁的结果就是最终画面。
 
 ## 验收结果
 
@@ -157,9 +174,9 @@ Avalonia 的 `delta` 是浮点（触控板能给出小数档位），所以用�
 | Sample.dll | `camera.zoom` | 有 | 无 |
 | Sample.dll | `selftest.summary` | 有 | 无 |
 
-`Zoom` 里的 `Debug.WriteLine` 自带 `[Conditional("DEBUG")]`；`VerifyZoom` 整段连同
-`MainWindow` 里的调用点一起包在 `#if DEBUG` 里——那段有 100 次循环的计算，
-不包的话 Release 也要白跑一遍。
+`Zoom` 里的 `Debug.WriteLine` 自带 `[Conditional("DEBUG")]`；`VerifyZoom`（现名
+`VerifyCameraMath`）整段连同 `MainWindow` 里的调用点一起包在 `#if DEBUG` 里——那段有
+100 次循环的计算，不包的话 Release 也要白跑一遍。
 
 `ZoomCore`（真正的计算）**不**在 `#if DEBUG` 里：`Zoom` 无条件调它，
 把它包掉 Release 就编译不过了。
@@ -202,8 +219,10 @@ Phase D 的剧本里，`OnScrolled` 自己改相机。Phase E 把它改成「只
   要反过来改的是模型里那个比例，不是控制器。
 - 缩放一步到位，没有惯性、没有缓动。`Tick` 已经在发 dt 了，加平滑的钩子现成，
   但那是手感问题，等有人真的滚过再说。
-- `MinDistance` / `MaxDistance` 是编译期常量，不是配置。场景换成真实建筑之后
-  这两个数必然要跟着目标尺寸走，那时它会变成模型的一个可写属性。
+- `MinDistance` / `MaxDistance` 是编译期常量，不是配置。这一条在 Phase F 落了地：
+  它们变成了构造函数上的可选入参，默认不设（见 05）。当时的判断是「场景换成真实建筑之后
+  这两个数必然要跟着目标尺寸走」，而实际发生得更早——「目标尺寸」不再是唯一的原因，
+  「能走能转的相机没有唯一的被看对象」才是。
 - `ScrollZoomController` 只有十来行。它会变厚的地方是灵敏度档位、平滑、反向选项——
   那些都是手感，不是现在。
 - `Reset` 目前只有验收剧本在用。它不是一个「为测试而开的口子」：
@@ -217,7 +236,8 @@ Phase D 的剧本里，`OnScrolled` 自己改相机。Phase E 把它改成「只
 - 滚轮的**方向**只验了「正 delta 让距离变小」，没验过真实鼠标上滚到底给的是正还是负。
   合成事件里 `delta=+1` 是剧本自己写的。真机上滚一下就能确认。
 - 触控板的小数档位没有实测。`Pow(ratio, steps)` 支持它，但没在设备上跑过。
-- 拖拽转视角不做（规范明确排除），所以 `CameraModel` 没有任何改朝向的入口。
-  屏幕射线拾取要接的话，缺的正是「转视角」和「屏幕点 → 世界射线」两件。
-- 距离夹取的上界 7.0 是按单位立方体定的。换成真实建筑之后，
-  「覆盖率不低于几个百分点」这条判据要重新推一遍。
+- 转视角这一相位不做。**Phase F 已经做了**（`MouseLookController` + `LookStarted/LookMoved/LookEnded`，
+  指针移动即转、不用按键，见 05），
+  所以 `CameraModel` 现在有改朝向的入口。屏幕射线拾取缺的只剩「屏幕点 → 世界射线」。
+- 距离夹取的上界 7.0 是按单位立方体定的，只在「宿主显式设了界」时才生效——
+  Phase F 起 `Sample` 一个界都不设（见 05）。

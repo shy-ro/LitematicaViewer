@@ -11,27 +11,42 @@ using Avalonia.VisualTree;
 
 namespace LitematicaViewer.Previewer.Sample;
 
-public partial class MainWindow : Window
+public partial class MainWindow : Window, IViewModeHost
 {
     private readonly PreviewerInputAdapter _input;
     private readonly CameraModel _camera;
-    private readonly ScrollZoomController _scroll;
+    private readonly Sidebar _sidebar;
     private readonly InputSelfTest? _selfTest;
+
+    // 自由视角的三个控制器只在那个模式下存在。可空是这层设计的全部代价，而它换来的是
+    // 「不该在这个模式下响应的事件根本没接上」——比每个控制器里加一个 Enabled 短路更结实，
+    // 因为短路要写在每一条处理函数里，漏掉一条的表现是「某个模式下偶尔不该动却动了」。
+    private ScrollZoomController? _scroll;
+    private MouseLookController? _look;
+    private WasdCameraController? _wasd;
+
+    // 展台那一个。它自己在构造时就把相机摆好、把光环点起来，所以「装」和「卸」就是全部的模式切换。
+    private TurntableController? _turntable;
+
+    private ViewMode _mode = ViewMode.FreeLook;
 
     public MainWindow()
     {
         InitializeComponent();
 
-        // 输入适配器接上，但窗口自己不订阅 Scrolled / KeyChanged：没人订阅时事件照常触发，
+        // 输入适配器接上，但窗口自己不订阅 Scrolled / KeyChanged / Look*：没人订阅时事件照常触发，
         // 只是什么都不发生。谁在意它们是控制器的事，窗口只负责把零件装到一起。
         _input = new PreviewerInputAdapter(Viewport);
 
         // 相机的权威从这一行开始就在模型手里。锚点取原点，因为立方体在原点——
         // 而 Phase C 起「轮廓质心落在画面中心」那条校验，正是靠「相机看向原点」才成立的。
+        //
+        // 距离的上下界不设：默认就没有，谁要谁在构造时给。模型在这里替人定一个「最近 2.4」，
+        // 就等于替人决定「凑近看一块砖是不允许的」，而那是个尺度上的偏好。
         _camera = new CameraModel(CameraState.Default, Vector3.Zero);
 
 #if DEBUG
-        CameraModel.VerifyZoom();
+        CameraModel.VerifyCameraMath();
 #endif
 
         // 先把模型的相机推给控件一次。这一步不是多余的：Previewer 内部那份默认值只是占位，
@@ -39,9 +54,32 @@ public partial class MainWindow : Window
         // 而那是两处各自都「对」的默认值，从任何一处都看不出问题。
         Viewport.SetCamera(_camera.Camera);
 
+        // 开窗这一份就是自由视角：三个控制器直接装好，不绕 ToggleMode。
+        // 绕一遍的话，「初始状态」和「从展台切回来」走的是同一条路，而那条路里有一半
+        // （拆展台）在第一次跑的时候没有东西可拆——一个只在启动时走的空分支。
         _scroll = new ScrollZoomController(Viewport, _camera);
+        _look = new MouseLookController(Viewport, _camera);
+        _wasd = new WasdCameraController(Viewport, _camera);
+        _sidebar = new Sidebar(this, this, Viewport, _camera);
 
-        _selfTest = Program.SelfTestSeconds > 0 ? new InputSelfTest(this, Viewport, _camera) : null;
+        // 数字键 1/2 切模式。挂在控件的事件上而不是窗口的 KeyDown 上：按键只发给有焦点的元素，
+        // 而这个焦点是宿主自己还给视口的（见 OnSidebarPointerPressed），所以它在这一层看得见。
+        Viewport.KeyChanged += OnViewportKeyChanged;
+
+        // 侧边栏上的任何一次按下都把焦点还回视口。滑块的 Focusable 已经是 false（拖它不该抢
+        // 键盘焦点），但「按一个不可聚焦的元素会不会把焦点清掉」由模板和焦点管理器决定——
+        // 而焦点一旦不在控件上，按键就送不到 Previewer，WASD 整个失效，日志里只是「没反应」。
+        //
+        // 订阅用 Tunnel：滑块的手柄在处理按下时会把事件标成已处理，冒泡那一趟到不了这里；
+        // handledEventsToo 也救不了，因为冒泡在源头上就停了。隧道这一趟是从窗口往下走的，
+        // 一定先经过侧边栏这一层。设备产生的真实点击才走路由，合成事件绕过它——
+        // 所以这一条与 ICustomHitTest 那条一样，只能靠真机的日志验。
+        SidebarPanel.AddHandler(
+            PointerPressedEvent,
+            OnSidebarPointerPressed,
+            RoutingStrategies.Tunnel);
+
+        _selfTest = Program.SelfTestSeconds > 0 ? new InputSelfTest(this, Viewport, _camera, _input) : null;
         _selfTest?.Attach();
 
         // 客户端尺寸与 RenderScaling 是「视口算得对不对」的参照系：
@@ -63,6 +101,158 @@ public partial class MainWindow : Window
         AddHandler(PointerPressedEvent, OnWindowPressedTunnel, RoutingStrategies.Tunnel);
         AddHandler(PointerEnteredEvent, OnWindowEnteredTunnel, RoutingStrategies.Tunnel);
 #endif
+    }
+
+    // IViewModeHost 走显式实现。接口是 internal 的，而 MainWindow 是 public 的：
+    // 隐式实现要求这几个成员也是 public，于是 Mode 的类型 ViewMode 会被一起拖成 public
+    // （CS0053：属性类型比属性更不可访问）。显式实现把这几个成员留在 private，
+    // 「模式」这件事就仍然只在这个程序集里。代价是从窗口内部调要用私有那几个名字。
+    ViewMode IViewModeHost.Mode => _mode;
+
+    string IViewModeHost.ShowcaseTargetCaption =>
+        _turntable is { } turntable
+            ? $"{turntable.Current.Name}  {turntable.Index + 1}/{turntable.Count}"
+            : "—";
+
+    void IViewModeHost.ToggleMode() => ToggleMode();
+
+    void IViewModeHost.StepTarget(int step) => StepTarget(step);
+
+    // 模式切换是「把那两个模式各自要的零件装上去、把另一个的拆下来」。没有第三态，
+    // 所以一个 Toggle 就够，而它同时是侧边栏那个按钮和数字键 1/2 的唯一入口。
+    private void ToggleMode()
+    {
+        // 自检剧本跑着的时候不切。剧本里那几段断言是按自由视角的换算算出来的，
+        // 中途换了模式它们会全部对不上——而 Debug 下断言失败是直接杀进程，
+        // 于是现象会是「跑 --selftest 时点了一下侧边栏，程序没了」。这是有意拒绝，不是漏做。
+        if (_selfTest is not null)
+        {
+            Debug.WriteLine(
+                "[SAMPLE][mode] 自检剧本正在进行，拒绝切模式 " +
+                "note=切了之后剧本后面的步骤会全部对不上，而断言失败会直接杀进程");
+            return;
+        }
+
+        if (_mode == ViewMode.FreeLook)
+        {
+            EnterShowcase();
+        }
+        else
+        {
+            EnterFreeLook();
+        }
+    }
+
+    private void StepTarget(int step)
+    {
+        if (_turntable is not { } turntable)
+        {
+            // 自由视角下侧边栏那一组是隐藏的，所以这条正常打不出来；打出来说明显隐那一处漏了，
+            // 而那种情况下按钮点得下去、只是什么都不发生。
+            Debug.WriteLine($"[SAMPLE][showcase.step] 不在展台模式，忽略 step={step} mode={_mode}");
+            return;
+        }
+
+        Debug.WriteLine($"[SAMPLE][showcase.step] step={step} from={turntable.Index + 1}/{turntable.Count}");
+
+        if (step > 0)
+        {
+            turntable.Next();
+        }
+        else
+        {
+            turntable.Previous();
+        }
+    }
+
+    // 进自由视角。三个控制器重新装：它们的状态（按住的键、挂着的手势）在拆的时候就作废了，
+    // 而那是要的——Alt+Tab 走一圈回来，不该有一个还按着的 W 在推相机。
+    private void EnterFreeLook()
+    {
+        Debug.WriteLine($"[SAMPLE][mode] 切到自由视角 from={_mode} 装上 WASD / 指针转视角 / 滚轮");
+
+        _turntable?.Dispose();
+        _turntable = null;
+
+        // 手势先恢复成「指针一动就转」再装控制器：反过来的话，装上的那一瞬间
+        // 指针在窗口里、手势还是拖动的，第一下移动会落到展台那条路上——而那个模式已经拆了。
+        _input.Gesture = LookGesture.FollowPointer;
+
+        _mode = ViewMode.FreeLook;
+
+        _scroll = new ScrollZoomController(Viewport, _camera);
+        _look = new MouseLookController(Viewport, _camera);
+        _wasd = new WasdCameraController(Viewport, _camera);
+        _sidebar.SetMode(_mode);
+    }
+
+    // 进展台。三个都拆掉，一个都不留：位置不许动（WASD 要停）、朝向只由公转给
+    // （指针移动不能自己转，否则两种来源抢同一个 yaw）、滚轮由展台自己夹取
+    // （自由视角那份不夹，留着它推出去的远近就没有界）。留着任何一个的表现都是
+    // 「同一帧里相机被写了两遍」，而两处各自看着都对。
+    //
+    // internal 而不是 private：验收剧本走这一个入口。它绕开 ToggleMode 里那道闸门，
+    // 而那正是要的——那道闸门挡的是人手在剧本跑的时候点按钮。
+    internal void EnterShowcase()
+    {
+        Debug.WriteLine($"[SAMPLE][mode] 切到展台 from={_mode} 拆掉三个控制器 gesture=DragPrimaryButton");
+
+        _wasd?.Dispose();
+        _wasd = null;
+        _look?.Dispose();
+        _look = null;
+        _scroll?.Dispose();
+        _scroll = null;
+
+        // 展台靠按住左键拖，所以光标既不钉住也不藏起来：钉住之后拖到画面边上光标就不动了，
+        // 而「拖多远」正是这个模式唯一的输入。
+        _input.Gesture = LookGesture.DragPrimaryButton;
+
+        _mode = ViewMode.Showcase;
+
+        // 构造里就把相机摆到展台上（俯仰归 25 度、距离按目标尺寸反解），并把光环点起来，
+        // 所以这一行之后画面已经对了，不需要再来一次 SetCamera。
+        _turntable = new TurntableController(Viewport, _camera, ShowcaseTargets.All);
+        _sidebar.SetMode(_mode);
+    }
+
+    private void OnViewportKeyChanged(Key key, bool isDown)
+    {
+        if (!isDown)
+        {
+            return;
+        }
+
+        switch (key)
+        {
+            case Key.D1 or Key.NumPad1:
+                Debug.WriteLine("[SAMPLE][mode] 数字键 1 -> 自由视角");
+                if (_mode != ViewMode.FreeLook)
+                {
+                    ToggleMode();
+                }
+
+                break;
+
+            case Key.D2 or Key.NumPad2:
+                Debug.WriteLine("[SAMPLE][mode] 数字键 2 -> 展台");
+                if (_mode != ViewMode.Showcase)
+                {
+                    ToggleMode();
+                }
+
+                break;
+
+            // 左右键切页。只在展台模式里用得上（自由视角那边没有「当前目标」这回事），
+            // 而 WASD 用的是 WASD，两不打扰。
+            case Key.Left when _mode == ViewMode.Showcase:
+                StepTarget(-1);
+                break;
+
+            case Key.Right when _mode == ViewMode.Showcase:
+                StepTarget(+1);
+                break;
+        }
     }
 
 #if DEBUG
@@ -160,32 +350,40 @@ public partial class MainWindow : Window
             $"hitTestVisible={Viewport.IsHitTestVisible} topLevel={TopLevel.GetTopLevel(Viewport)?.GetType().Name ?? "null"} " +
             $"parent={Describe(Viewport.GetVisualParent())}");
 
+        // 取样点按**控件自己的坐标系**给，再转到窗口坐标去问那两个 API。按客户区给点不行了：
+        // 客户区里还有侧边栏那一块，取到的点会落在侧边栏上，于是下面那条断言红得莫名其妙
+        // （而 Debug 断言失败会直接杀掉进程）。
+        //
+        // 取三个点而不只取中心：控件只盖住一部分时，中心可能恰好在外面。
         Point[] points =
         [
-            new(ClientSize.Width / 2, ClientSize.Height / 2),
+            new(Viewport.Bounds.Width / 2, Viewport.Bounds.Height / 2),
             new(10, 10),
-            new(ClientSize.Width - 10, ClientSize.Height - 10),
+            new(Viewport.Bounds.Width - 10, Viewport.Bounds.Height - 10),
         ];
 
-        foreach (Point point in points)
+        foreach (Point local in points)
         {
+            // 转换失败本身就是一条要报的故障：变换链断掉时 Bounds 看着是对的，
+            // 而命中永远落不到控件身上——那时这两个数（bounds 与命中点）只有一起看才说得清。
+            Point? translated = Viewport.TranslatePoint(local, this);
+            Debug.Assert(
+                translated is not null,
+                $"[SAMPLE][input.hittest] 控件里的点 ({local.X:F0},{local.Y:F0}) 转不到窗口坐标");
+            if (translated is not { } point)
+            {
+                continue;
+            }
+
             // 两个 API 都问一遍。它们走的是同一条合成层命中路径，正常时结果一致；
             // 一起打出来是为了在结果异常时能立刻分辨「命中的是谁、它挂在哪」——
             // 只打一个的话，拿到一个陌生的元素名仍然不知道它是谁。
             IInputElement? inputHit = this.InputHitTest(point);
             Debug.WriteLine(
-                $"[SAMPLE][input.hittest] point=({point.X:F0},{point.Y:F0}) " +
+                $"[SAMPLE][input.hittest] point=({point.X:F0},{point.Y:F0}) local=({local.X:F0},{local.Y:F0}) " +
                 $"inputHitTest={Describe(inputHit)}");
 
-            // 这条断言是 ICustomHitTest 那个修复的守卫，也是唯一能守住它的一条：
-            // 合成事件走 RaiseEvent，根本不经过命中测试，所以整个自检剧本对这一类故障是全绿的。
-            // 命中失败时输入会一路安静——和「消息没进程序」长得一模一样，人手排查要花掉一整天。
-            Debug.Assert(
-                ReferenceEquals(inputHit, Viewport),
-                $"[SAMPLE][input.hittest] 指针没命中控件 point=({point.X:F0},{point.Y:F0}) " +
-                $"hit={Describe(inputHit)} expected=Viewport#Viewport。命中落在别的元素上时，" +
-                $"滚轮和按键都到不了控件，而日志里看起来只是「没反应」");
-
+            // 证据先打完再断言：断言失败会直接杀掉进程，而那时这一条正是唯一说得清「命中的是谁」的东西。
             int index = 0;
             foreach (Visual visual in this.GetVisualsAt(point))
             {
@@ -198,6 +396,15 @@ public partial class MainWindow : Window
             {
                 Debug.WriteLine($"[SAMPLE][input.hittest] point=({point.X:F0},{point.Y:F0}) 一个都没命中");
             }
+
+            // 这条断言是 ICustomHitTest 那个修复的守卫，也是唯一能守住它的一条：
+            // 合成事件走 RaiseEvent，根本不经过命中测试，所以整个自检剧本对这一类故障是全绿的。
+            // 命中失败时输入会一路安静——和「消息没进程序」长得一模一样，人手排查要花掉一整天。
+            Debug.Assert(
+                ReferenceEquals(inputHit, Viewport),
+                $"[SAMPLE][input.hittest] 指针没命中控件 point=({point.X:F0},{point.Y:F0}) " +
+                $"local=({local.X:F0},{local.Y:F0}) hit={Describe(inputHit)} expected=Viewport#Viewport。" +
+                $"命中落在别的元素上时，滚轮和按键都到不了控件，而日志里看起来只是「没反应」");
         }
 
         // 命中列表里冒出几个匿名元素时，唯一能回答「它是谁」的就是树本身：
@@ -264,6 +471,18 @@ public partial class MainWindow : Window
     }
 #endif
 
+    // 订阅它的理由见构造函数里那一段。这里只记录、不追加断言：窗口没激活时第一次点击
+    // 只负责把窗口激活，聚焦落空是系统行为而不是接线错了——而那与真正的焦点问题
+    // 在日志里长得一样，所以两者都要打出来。
+    private void OnSidebarPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        bool focused = Viewport.Focus();
+        IInputElement? focusedElement = TopLevel.GetTopLevel(Viewport)?.FocusManager?.GetFocusedElement();
+        Debug.WriteLine(
+            $"[SAMPLE][sidebar.focus] 侧边栏被按下，焦点还给视口 focused={focused} " +
+            $"focusedElement={focusedElement?.GetType().Name ?? "null"} expected=Previewer");
+    }
+
     private void OnOpened(object? sender, EventArgs e)
     {
         Debug.WriteLine($"[SAMPLE][window.opened] client={ClientSize} scaling={RenderScaling}");
@@ -291,18 +510,43 @@ public partial class MainWindow : Window
     private void OnActivated(object? sender, EventArgs e) =>
         Debug.WriteLine($"[SAMPLE][window.activated] client={ClientSize}");
 
-    private void OnDeactivated(object? sender, EventArgs e) =>
+    // 失活时把「按住的键」和「进行中的看向手势」清掉。Alt+Tab 走了之后，抬起的按键与
+    // 指针的进出/捕获丢失都送到别的窗口去了，这里不会收到：还按着的 W 会让相机一直往前走，
+    // 挂着的看向手势会让光标回来的第一帧跳一下——两种表现都像鼠标键盘坏了，
+    // 而不是像有个状态没清。
+    //
+    // 两者清在不同的地方，因为它们记的状态在谁手里不同：按键记在控制器里（它自己维护那份集合），
+    // 而手势记在输入适配器里（只有它拿得到指针与捕获）。所以这里一个调控制器、一个调适配器。
+    //
+    // 挂在窗口这一层而不是控件的 LostFocus 上：Win32 下 WM_KILLFOCUS 会不会让元素收到
+    // LostFocus 由后端决定，而「失活必须清干净」这件事不该依赖那个细节。
+    private void OnDeactivated(object? sender, EventArgs e)
+    {
         Debug.WriteLine(
-            "[SAMPLE][window.deactivated] note=此时滚轮收不到属于预期，不是接线问题");
+            "[SAMPLE][window.deactivated] note=此时滚轮收不到属于预期，不是接线问题；" +
+            "按键与看向手势一并作废，否则抬起与进出事件不会来");
+        _wasd?.ReleaseKeys();
+        _input.ReleaseLook();
+
+        // 展台那边也要收尾。它的「手势进行中」记在适配器里（上面那一行已经清了），
+        // 但速度是记在控制器里的：失活时不清的话，切回来第一帧会带着走之前那一下的速度开始转，
+        // 而那只手早就松开了。
+        _turntable?.ReleaseDrag();
+    }
 
     private void OnClosed(object? sender, EventArgs e)
     {
-        Debug.WriteLine($"[SAMPLE][window.closed] client={ClientSize} scaling={RenderScaling}");
+        Debug.WriteLine($"[SAMPLE][window.closed] client={ClientSize} scaling={RenderScaling} mode={_mode}");
 
         // 先出验收结论再拆零件：拆完事件就不触发了，
         // 而验收要的正是「到这一刻为止，每个事件都至少走通过一次」。
         _selfTest?.Report();
-        _scroll.Dispose();
+        _sidebar.Dispose();
+        Viewport.KeyChanged -= OnViewportKeyChanged;
+        _turntable?.Dispose();
+        _wasd?.Dispose();
+        _look?.Dispose();
+        _scroll?.Dispose();
         _input.Dispose();
     }
 }

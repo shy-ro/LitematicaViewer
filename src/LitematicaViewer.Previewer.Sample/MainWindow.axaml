@@ -3,9 +3,81 @@
         xmlns:pv="clr-namespace:LitematicaViewer.Previewer;assembly=LitematicaViewer.Previewer"
         x:Class="LitematicaViewer.Previewer.Sample.MainWindow"
         Title="Litematica Viewer — Previewer"
-        Width="1024"
-        Height="768">
-  <!-- 起名是为了让代码里能拿到实例去接输入：宿主是唯一知道「输入从哪来」的一层，
-       输入适配器和验收剧本都要挂在同一个控件上。 -->
-  <pv:Previewer x:Name="Viewport" />
+        Width="1280"
+        Height="800">
+  <!-- 两列：左边侧边栏，右边视口。列宽写死 300 而不是按内容自适应——视口宽度一旦
+       跟着侧边栏里的数字变（fps 从 9.9 跳到 10.0 就会），视口每帧都在改尺寸，
+       而那会连带着把视口尺寸断言和画面校验的期望一起搅动。 -->
+  <Grid ColumnDefinitions="300,*">
+    <Border x:Name="SidebarPanel"
+            Grid.Column="0"
+            BorderBrush="#80808080"
+            BorderThickness="0,0,1,0">
+      <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="12" Spacing="4">
+          <!-- 滑块的 Focusable 一律 false：焦点必须在视口上，按键才送得到控件（见 PreviewerInputAdapter
+               的 KeyDown 订阅）。滑块抢走焦点之后 WASD 整个失效，而日志上只是「没反应」。
+               代价是滑块没有键盘操作，这个取舍对一个调试用的侧边栏是可以接受的。
+
+               按钮也是 Focusable=False，理由相同，而且它更危险：按钮会主动抢焦点。 -->
+          <Button x:Name="ModeButton"
+                  Focusable="False"
+                  HorizontalAlignment="Stretch"
+                  HorizontalContentAlignment="Center" />
+
+          <!-- 两组按模式整块隐藏，而不是把每一条单独显隐：一条一条漏掉的话，
+               表现是「自由视角里冒出一个展台用的滑块」，拖它不会报错、只是什么都不影响。 -->
+          <StackPanel x:Name="FreeLookGroup" Spacing="4">
+            <TextBlock Text="自由视角" FontWeight="SemiBold" />
+            <TextBlock Text="移速（方块/秒）" FontSize="12" />
+            <Slider x:Name="MoveSpeedSlider" Minimum="0.1" Maximum="8" Focusable="False" />
+            <TextBlock x:Name="MoveSpeedText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" />
+
+            <TextBlock Text="灵敏度（度/DIP）" FontSize="12" Margin="0,8,0,0" />
+            <Slider x:Name="LookSensitivitySlider" Minimum="0.01" Maximum="0.6" Focusable="False" />
+            <TextBlock x:Name="LookSensitivityText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" />
+          </StackPanel>
+
+          <StackPanel x:Name="ShowcaseGroup" Spacing="4" IsVisible="False">
+            <TextBlock Text="展台" FontWeight="SemiBold" />
+            <TextBlock x:Name="ShowcaseTargetText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Button x:Name="PreviousTargetButton" Content="上一件" Focusable="False" />
+              <Button x:Name="NextTargetButton" Content="下一件" Focusable="False" />
+            </StackPanel>
+
+            <TextBlock Text="拖动灵敏度（度/DIP）" FontSize="12" Margin="0,8,0,0" />
+            <Slider x:Name="DragSensitivitySlider" Minimum="0.05" Maximum="0.8" Focusable="False" />
+            <TextBlock x:Name="DragSensitivityText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" />
+
+            <TextBlock Text="惯性阻尼（秒）" FontSize="12" Margin="0,8,0,0" />
+            <Slider x:Name="SpinDampingSlider" Minimum="0.05" Maximum="1.5" Focusable="False" />
+            <TextBlock x:Name="SpinDampingText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" />
+
+            <TextBlock Text="自转延时（秒）" FontSize="12" Margin="0,8,0,0" />
+            <Slider x:Name="SpinIdleDelaySlider" Minimum="0" Maximum="5" Focusable="False" />
+            <TextBlock x:Name="SpinIdleDelayText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" />
+
+            <TextBlock Text="自转速度（度/秒）" FontSize="12" Margin="0,8,0,0" />
+            <Slider x:Name="SpinIdleSpeedSlider" Minimum="0" Maximum="30" Focusable="False" />
+            <TextBlock x:Name="SpinIdleSpeedText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" />
+          </StackPanel>
+
+          <Separator Margin="0,8,0,0" />
+
+          <TextBlock Text="运行数据" FontWeight="SemiBold" />
+          <TextBlock x:Name="FpsText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" />
+          <TextBlock x:Name="ViewportText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" />
+          <TextBlock x:Name="PositionText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" />
+          <TextBlock x:Name="LookText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" />
+          <TextBlock x:Name="ForwardText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" />
+          <TextBlock x:Name="DistanceText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" />
+        </StackPanel>
+      </ScrollViewer>
+    </Border>
+
+    <!-- 起名是为了让代码里能拿到实例去接输入：宿主是唯一知道「输入从哪来」的一层，
+         输入适配器和验收剧本都要挂在同一个控件上。 -->
+    <pv:Previewer x:Name="Viewport" Grid.Column="1" />
+  </Grid>
 </Window>
