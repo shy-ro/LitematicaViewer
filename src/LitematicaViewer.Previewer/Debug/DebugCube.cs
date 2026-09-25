@@ -190,7 +190,50 @@ internal static class DebugCube
         // 背景色不走着色器，是 clear 直接写进 framebuffer 的，所以不能套法线那一套变换。
         (float R, float G, float B) clear = (clearColor.X, clearColor.Y, clearColor.Z);
 
+        int axisCount = GlAxesRenderer.Axes.Length;
+
+        // 底色：0 是背景，往后依次是六个面。
+        int baseCount = faceCount + 1;
+        (float R, float G, float B)[] baseColors = new (float, float, float)[baseCount];
+        baseColors[0] = clear;
+        for (int face = 0; face < faceCount; face++)
+        {
+            baseColors[face + 1] = faceColors[face];
+        }
+
+        // 候选颜色一次备齐：七种底色，加上「每根轴压在每种底色上」的二十一种混合结果。
+        //
+        // 为什么不能分成两趟（先认底色、再看是不是某根轴压在上面）：混过的像素离底色已经很远，
+        // 而它往往更接近另一个**面色**——黄色压在背景上得到的那个颜色，离「Y 面那个黄」比离背景近。
+        // 于是第一步就把底色认错了，第二步在错的底色上怎么混都对不上。
+        // 二十八种候选放在一起取最近的，就没有这个先后问题。
+        //
+        // 为什么非认出来不可：轴线是真的改了像素的，而认不出色的像素有一个 1% 的预算。
+        // 几条线当然吃得下，但那样一来那条断言的余量就取决于线有多长，而不是取决于画得对不对——
+        // 「判据的强度被一个无关参数悄悄带走」正是要避免的。
+        int candidateCount = baseCount + (baseCount * axisCount);
+        (float R, float G, float B)[] candidates = new (float, float, float)[candidateCount];
+        int[] candidateAxis = new int[candidateCount];
+
+        for (int baseIndex = 0; baseIndex < baseCount; baseIndex++)
+        {
+            candidates[baseIndex] = baseColors[baseIndex];
+            candidateAxis[baseIndex] = -1;
+        }
+
+        for (int baseIndex = 0; baseIndex < baseCount; baseIndex++)
+        {
+            for (int axis = 0; axis < axisCount; axis++)
+            {
+                Vector3 axisColor = GlAxesRenderer.Axes[axis].Color;
+                int index = baseCount + (baseIndex * axisCount) + axis;
+                candidates[index] = DebugAxes.Blend((axisColor.X, axisColor.Y, axisColor.Z), baseColors[baseIndex]);
+                candidateAxis[index] = axis;
+            }
+        }
+
         int[] facePixels = new int[faceCount];
+        int[] axisPixels = new int[axisCount];
         int clearPixels = 0;
         int solidPixels = 0;
         int unmatched = 0;
@@ -206,34 +249,40 @@ internal static class DebugCube
                 byte g = rgba[offset + 1];
                 byte b = rgba[offset + 2];
 
-                int best = -2;
-                int bestDistance = Distance(r, g, b, clear);
-                if (bestDistance <= SquaredTolerance)
-                {
-                    best = -1;
-                }
+                int best = -1;
+                int bestDistance = int.MaxValue;
 
-                for (int face = 0; face < faceCount; face++)
+                for (int candidate = 0; candidate < candidateCount; candidate++)
                 {
-                    int distance = Distance(r, g, b, faceColors[face]);
+                    int distance = Distance(r, g, b, candidates[candidate]);
                     if (distance < bestDistance)
                     {
                         bestDistance = distance;
-                        best = face;
+                        best = candidate;
                     }
                 }
 
+                // 顺序要紧：先判「认不出来」，再判认出来的是谁。
+                // 反过来的话，一个既不像底色也不像任何混合色的像素会被就近归给某根轴，
+                // 于是「认不出的颜色」那条断言永远不会有东西可报。
                 if (bestDistance > SquaredTolerance)
                 {
                     unmatched++;
                 }
-                else if (best == -1)
+                else if (candidateAxis[best] >= 0)
+                {
+                    // 轴线像素不进 solidPixels，也不进质心：那两条断言问的是立方体，
+                    // 而线是画在方块前面（或者旁边）的东西，跟轮廓对称性没关系。
+                    axisPixels[candidateAxis[best]]++;
+                }
+                else if (best == 0)
                 {
                     clearPixels++;
                 }
                 else
                 {
-                    facePixels[best]++;
+                    int face = best - 1;
+                    facePixels[face]++;
                     solidPixels++;
                     centroidX += x;
                     centroidY += y;
@@ -327,10 +376,29 @@ internal static class DebugCube
         float centroidPixelX = solidPixels == 0 ? 0f : (float)centroidX / solidPixels;
         float centroidPixelY = solidPixels == 0 ? 0f : (float)centroidY / solidPixels;
 
+        int axisTotal = 0;
+        foreach (int count in axisPixels)
+        {
+            axisTotal += count;
+        }
+
         Debug.WriteLine(
             $"[PREVIEWER][gl.cube.render] solid={solidPixels} clear={clearPixels} unmatched={unmatched} " +
             $"coverage={(float)solidPixels / pixelCount:P1} visibleFaces={visibleFaces} " +
-            $"backFacePixels={backFacePixels} pos=({camera.Position}) yaw={camera.Yaw:F2} pitch={camera.Pitch:F2}");
+            $"backFacePixels={backFacePixels} axisPixels={axisTotal} " +
+            $"pos=({camera.Position}) yaw={camera.Yaw:F2} pitch={camera.Pitch:F2}");
+
+        // 逐轴打一遍：三条线的像素数差着量级是正常的（正对着镜头的那根投影成一段，
+        // 与视线垂直的那根投影成一个点），所以这里只记不判——
+        // 「轴线到底画出来没有」在屏幕上是一眼的事，而数据对不对由 DebugAxes 在初始化时守着。
+        for (int axis = 0; axis < axisCount; axis++)
+        {
+            Vector3 axisColor = GlAxesRenderer.Axes[axis].Color;
+            Debug.WriteLine(
+                $"[PREVIEWER][gl.axes.axis] axis={axis} color=" +
+                $"{Byte(axisColor.X)},{Byte(axisColor.Y)},{Byte(axisColor.Z)} pixels={axisPixels[axis]}");
+        }
+
         Debug.WriteLine(
             $"[PREVIEWER][gl.cube.render] centroid=({centroidPixelX:F1},{centroidPixelY:F1}) " +
             $"expected=({width / 2f:F1},{height / 2f:F1}) 前提=相机看向立方体中心，轮廓关于中心对称");
@@ -352,10 +420,14 @@ internal static class DebugCube
             backFacePixels <= backFaceAllowance,
             $"[PREVIEWER][gl.cube] 背向相机的面漏出过多 pixels={backFacePixels} allowed={backFaceAllowance}");
 
-        // 认不出来的像素只应该出现在三角形边缘，超过 1% 就不像是抗锯齿了。
+        // 认不出来的像素只应该出现在三角形边缘（轴线像素上面单独认走了，不算在内），
+        // 超过 1% 就不像是抗锯齿了。
+        // 余量留在 1% 而不是贴着零：边是硬切的，但两个三角形共边那一行像素的归属
+        // 会在 GL_LESS 的严格小于语义下随机落到哪一边，而那种像素的颜色是混合出来的。
         Debug.Assert(
             unmatched < pixelCount / 100,
-            $"[PREVIEWER][gl.cube] 认不出的颜色过多 unmatched={unmatched} of {pixelCount}");
+            $"[PREVIEWER][gl.cube] 认不出的颜色过多 unmatched={unmatched} of {pixelCount} " +
+            $"note=按颜色反推的这套只认识背景、六个面和轴线");
 
         // 立方体关于中心对称，轮廓的质心必然落在投影中心上。
         // 投影矩阵漏了转置、或者宽高比算错，这条就会偏出去。

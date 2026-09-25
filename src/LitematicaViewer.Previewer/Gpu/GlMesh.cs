@@ -15,26 +15,39 @@ internal sealed class GlMesh : IDisposable
     private readonly int _vertexArray;
     private readonly int _vertexBuffer;
     private readonly int _indexBuffer;
+    private readonly int _primitiveMode;
     private bool _disposed;
 
     public int IndexCount { get; }
 
-    private GlMesh(GlInterface gl, int vertexArray, int vertexBuffer, int indexBuffer, int indexCount)
+    private GlMesh(
+        GlInterface gl,
+        int vertexArray,
+        int vertexBuffer,
+        int indexBuffer,
+        int indexCount,
+        int primitiveMode)
     {
         _gl = gl;
         _vertexArray = vertexArray;
         _vertexBuffer = vertexBuffer;
         _indexBuffer = indexBuffer;
+        _primitiveMode = primitiveMode;
         IndexCount = indexCount;
     }
 
     // 交错顶点缓冲 + 独立索引缓冲。属性尺寸按顺序给出，偏移量从头累加。
+    //
+    // 图元类型是入参而默认三角形：GL 的绘制模式属于网格本身（索引的含义由它决定），
+    // 放在 Create 里一次定下来，绘制处就不必每次再想「这一把该传什么」。
+    // GlConsts 里没有 GL_LINES（同样是「后端用不上就不收」），所以由调用方给数值。
     public static GlMesh Create(
         GlInterface gl,
         float[] interleaved,
         int vertexCount,
         int[] indices,
-        ReadOnlySpan<int> attributeSizes)
+        ReadOnlySpan<int> attributeSizes,
+        int primitiveMode = GlConsts.GL_TRIANGLES)
     {
         int floatsPerVertex = 0;
         foreach (int size in attributeSizes)
@@ -76,13 +89,13 @@ internal sealed class GlMesh : IDisposable
         UploadInts(gl, GlConsts.GL_ELEMENT_ARRAY_BUFFER, indices, GlConsts.GL_STATIC_DRAW);
 
         gl.BindVertexArray(0);
-        return new GlMesh(gl, vertexArray, vertexBuffer, indexBuffer, indices.Length);
+        return new GlMesh(gl, vertexArray, vertexBuffer, indexBuffer, indices.Length, primitiveMode);
     }
 
     public void Draw()
     {
         _gl.BindVertexArray(_vertexArray);
-        _gl.DrawElements(GlConsts.GL_TRIANGLES, IndexCount, UnsignedInt, IntPtr.Zero);
+        _gl.DrawElements(_primitiveMode, IndexCount, UnsignedInt, IntPtr.Zero);
 
         // 画完解绑，别把 VAO 留给 Avalonia 自己的绘制流程。
         _gl.BindVertexArray(0);

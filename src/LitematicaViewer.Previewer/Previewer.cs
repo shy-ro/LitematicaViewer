@@ -1,12 +1,12 @@
 using System.Diagnostics;
 using System.Numerics;
-using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.OpenGL;
 using Avalonia.OpenGL.Controls;
 using Avalonia.Rendering;
 using LitematicaViewer.Previewer.Diagnostics;
+using LitematicaViewer.Previewer.Gpu;
 
 namespace LitematicaViewer.Previewer;
 
@@ -43,6 +43,7 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
     private int _viewportWidth;
     private int _viewportHeight;
     private GlCubeRenderer? _cube;
+    private GlAxesRenderer? _axes;
 
     // 指针能不能选中本控件，由这一条说了算，而默认答案是「不能」。
     //
@@ -124,6 +125,11 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
 #endif
 
         _cube = GlCubeRenderer.Create(gl);
+
+        // 两个渲染器各自设自己需要的 GL 状态（立方体开深度测试，轴线开混合），都在这里设一次，
+        // 顺序只影响日志先后的可读性。轴线后建是因为它画在立方体之后——
+        // 深度相等的那几个像素（轴线正好从面心穿出去的地方）归先画的那个。
+        _axes = GlAxesRenderer.Create(gl);
     }
 
     protected override void OnOpenGlRender(GlInterface gl, int fb)
@@ -169,6 +175,9 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
 
         _cube?.Render(_camera, width, height);
 
+        // 轴线接着画：落在立方体里的那一段被深度测试挡住，露在外面的是从方块里伸出来的三根轴。
+        _axes?.Render(_camera, width, height);
+
         // 自驱动渲染循环：这一帧的末尾换来下一帧，节流交给 Avalonia 的合成器（实测就是显示刷新率）。
         // 不改成「只在相机变化时才请求」是因为 Tick 是控制器的时间来源：一旦没有输入就不出帧，
         // 靠时间推进的东西（惯性、缩放动画）会直接停住。代价是空闲时也按刷新率出帧。
@@ -211,6 +220,8 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
             $"[PREVIEWER][gl.deinit] 挂上去了却一帧没画 frames={_framesRendered}");
 
         // 上下文还在，可以正常走 GL 的删除路径。
+        _axes?.Dispose();
+        _axes = null;
         _cube?.Dispose();
         _cube = null;
 
@@ -222,6 +233,8 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         // 上下文丢了，GPU 侧的对象随之消失，此时再发 Delete* 就是对着失效的函数指针发号施令。
         // 所以只丢引用、不发 GL 调用，等下一次 Init 重建。
         Debug.WriteLine($"[PREVIEWER][gl.lost] frames={_framesRendered} expected=之后会再来一次 gl.init");
+        _axes?.Abandon();
+        _axes = null;
         _cube?.Abandon();
         _cube = null;
 
@@ -231,7 +244,7 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
 #if DEBUG
     private void VerifyFrame(GlInterface gl, int width, int height)
     {
-        int error = ReadGlError(gl);
+        int error = GlRaw.GetError(gl);
         Debug.WriteLine(
             $"[PREVIEWER][gl.error] code=0x{error:X} expected=0x0 cameraVersion={_cameraVersion}");
         Debug.Assert(error == 0, $"[PREVIEWER][gl.error] 有残留的 GL 错误 code=0x{error:X}");
@@ -275,7 +288,7 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
             return;
         }
 
-        byte[]? pixels = ReadFrameBuffer(gl, width, height);
+        byte[]? pixels = GlRaw.ReadPixels(gl, 0, 0, width, height);
         if (pixels is null)
         {
             return;
@@ -346,52 +359,9 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         };
     }
 
-    // 整张 framebuffer 读回来。宽高用物理像素，与视口一致。
-    private static byte[]? ReadFrameBuffer(GlInterface gl, int width, int height)
-    {
-        IntPtr entry = gl.GetProcAddress("glReadPixels");
-        if (entry == IntPtr.Zero)
-        {
-            Debug.WriteLine("[PREVIEWER][gl.readback] glReadPixels 取不到，跳过");
-            return null;
-        }
-
-        ReadPixels readPixels = Marshal.GetDelegateForFunctionPointer<ReadPixels>(entry);
-        int byteCount = width * height * 4;
-        IntPtr buffer = Marshal.AllocHGlobal(byteCount);
-        try
-        {
-            readPixels(0, 0, width, height, GlConsts.GL_RGBA, GlConsts.GL_UNSIGNED_BYTE, buffer);
-
-            byte[] pixels = new byte[byteCount];
-            Marshal.Copy(buffer, pixels, 0, byteCount);
-            return pixels;
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
-    }
-
-    // GlInterface 没有包 glGetError。读一次只能知道「出过某种错」，给不出位置，
-    // 但 GL 的错误状态会一直累积到被读走为止，所以一次读等于给整条绘制路径兜了一次底。
-    private static int ReadGlError(GlInterface gl)
-    {
-        IntPtr entry = gl.GetProcAddress("glGetError");
-        if (entry == IntPtr.Zero)
-        {
-            return 0;
-        }
-
-        GetError getError = Marshal.GetDelegateForFunctionPointer<GetError>(entry);
-        return getError();
-    }
-
-    // GlInterface 没有包这两个，只能自己从上下文里取函数地址。
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate void ReadPixels(int x, int y, int width, int height, int format, int type, IntPtr pixels);
-
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate int GetError();
+    // 这里原本还有 ReadFrameBuffer 与 ReadGlError：GlInterface 没有包 glReadPixels 与 glGetError，
+    // 那两条自己从上下文取函数地址、自己配委托。轴线渲染器也要用同一条路（混合与线宽），
+    // 于是这类入口统一挪到了 Gpu/GlRaw.cs——同一件事有两个写法时，签名写错的那一份
+    // 要等到运行期把栈搅乱才暴露，而它长得跟另一份一模一样。
 #endif
 }
