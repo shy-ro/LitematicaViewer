@@ -6,10 +6,15 @@ namespace LitematicaViewer.Previewer.Sample;
 // 相机状态的权威持有者。Previewer 只画不记（公开面里没有 GetCamera），
 // 想知道「相机现在在哪」的都得来这里问；控制器改了它，再把结果推给 Previewer。
 //
-// 缩放只动一个自由度：相机到 Target 的距离。朝向取自当前相机自己
-// （Position - Target 那条方向），模型不另存一份 yaw/pitch——
+// 它只提供三个动作：缩放（推拉距离）、绕 Target 转视角、沿自己的视角平移。
+// 三者都保持「相机看向 Target」这一条不变式——那正是 orbit 相机与自由飞行相机的分界，
+// 也是画面校验（轮廓质心落在画面中心）成立的前提。
+//
+// 三个动作都从当前相机状态出发算，模型不另存一份 yaw/pitch：
 // 存两份的话，「验收剧本摆了一个别的视角」与「模型以为的朝向」就会分叉，
 // 症状是滚轮一滚相机自己转回某个旧方向，而两次操作单看都各自正确。
+//
+// 绕转与平移在 CameraModel.Navigation.cs：它们由连续输入驱动，打桩与节流的落点不一样。
 internal sealed partial class CameraModel
 {
     // 一档滚轮的比例。用比例而不是固定步长：距离是尺度量，等比例推拉才符合手感，
@@ -142,6 +147,7 @@ internal sealed partial class CameraModel
     internal static void VerifyZoom()
     {
         VerifyZoomArithmetic();
+        VerifyPanAndOrbit();
     }
 
     private static void VerifyZoomArithmetic()
