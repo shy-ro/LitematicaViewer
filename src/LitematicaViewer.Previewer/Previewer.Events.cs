@@ -4,8 +4,9 @@ using Avalonia.Input;
 
 namespace LitematicaViewer.Previewer;
 
-// 本文件是 Previewer 的对外公开面：七个事件加 SetCamera。Phase D 的清单里这个文件叫
-// Previewer.Events.cs，相机入口一并放这儿——它们都是同一个东西：Previewer 允许外界碰的表面。
+// 本文件是 Previewer 的对外公开面：七个事件、SetCamera、以及两个导航设置（MoveSpeed /
+// LookSensitivity）。Phase D 的清单里这个文件叫 Previewer.Events.cs，后两者一并放这儿——
+// 它们都是同一个东西：Previewer 允许外界碰的表面。
 //
 // 没有 GetCamera，也没有任何读回相机状态的口子：外部想跟踪当前相机，自己在控制器里维护。
 // Previewer 负责画，不是状态的权威持有者，开了这个口子就会有人拿它当状态源，
@@ -17,17 +18,20 @@ public partial class Previewer
     public event Action<float>? Scrolled;
 
     // 看向手势：指针在控件上移动就是在转视角，不需要按任何键——第一人称的默认操作。
-    // 位置是控件坐标（DIP，不是物理像素）。
     //
-    // 为什么给的是「一段连续的移动」而不是裸露的 PointerMoved：差值要在能记住上一次位置的地方算，
-    // 那是控制器，只有它知道移动多少算转多少度。这里只把起点、过程和终点报出来。
+    // 报的是**增量**（控件坐标下的 DIP，不是物理像素），而不是指针位置。这一条是 Phase F 改的，
+    // 起因是固定鼠标：适配器把光标钉在视口中心，于是「指针在哪」这个信息在钉住的时候恒等于中心，
+    // 真正有意义的只剩两次之间的差。而那个差必须在**知道光标被挪到哪儿**的那一层算出来——
+    // 控制器不知道光标被挪走过，它按事件位置相减得到的会是「挪动 + 手移动」的混合，
+    // 表现是转一下画面就跳一段，而单看灵敏度、方向、符号全都是对的。
     //
-    // 起点的那个位置不产生旋转（只有一次位置就没有「差」），它的用处是定下参照点——
-    // 少了它，第一次移动会把「从上次手势留下的位置」到这里算成一段距离，画面上是一次凭空的跳转。
+    // 起点不带参数：它现在只表示「一段手势开始了」，没有任何数值是这一层知道的
+    // （参照点在适配器手里）。终点同样不带：这一程转了多少，由控制器自己汇总。
+    //
     // 它原来叫 DragStarted/DragMoved/DragEnded，改成默认转动之后「拖拽」是假话：没有键被按着。
-    public event Action<Point>? LookStarted;
+    public event Action? LookStarted;
 
-    public event Action<Point>? LookMoved;
+    public event Action<Vector>? LookMoved;
 
     public event Action? LookEnded;
 
@@ -43,6 +47,42 @@ public partial class Previewer
 
     // 每渲染一帧发一次，参数是距上一帧的秒数。控制器靠它推进与时间有关的东西（惯性、动画）。
     public event Action<double>? Tick;
+
+    // 两个手感参数。它们是 AvaloniaProperty 而不是控制器里的常量，理由是**一个系统里
+    // 能调同一个东西的地方只能有一个**：控制器是这个控件最亲近的几个对象，但控件才是它们
+    // 唯一的共同引用，而侧边栏、将来的设置面板拿到的也是控件。
+    //
+    // 做成 AvaloniaProperty 而不是普通属性，是为了让它能配在 XAML 里、能被滑块绑上：
+    // 普通属性在 UI 那一层没有可订立的通知，滑块就只能自己维护一份影子状态，
+    // 于是「滑块显示的值」与「控制器实际用的值」成了两处。
+    //
+    // 控件自己不读这两个值：它不移动相机，动相机是挂上来的导航控制器那一层的事。
+    public static readonly StyledProperty<float> MoveSpeedProperty =
+        AvaloniaProperty.Register<Previewer, float>(nameof(MoveSpeed), defaultValue: 1.5f);
+
+    public static readonly StyledProperty<float> LookSensitivityProperty =
+        AvaloniaProperty.Register<Previewer, float>(nameof(LookSensitivity), defaultValue: 0.10f);
+
+    // 每秒走多少世界单位（＝方块）。1.5 是每秒一个半方块：渲染器里那个单位立方体就是按
+    // 「一个 MC 方块 = 1×1×1 世界单位」画的（MC 里一方块也是一米）。
+    //
+    // 材质包的分辨率（16x16 / 256x256 / 2048x2048）不该配在这里：它决定一个方块贴多少纹素，
+    // 方块的世界尺寸始终是 1，要按材质包配的是贴图采样（mipmap、过滤）。
+    public float MoveSpeed
+    {
+        get => GetValue(MoveSpeedProperty);
+        set => SetValue(MoveSpeedProperty, value);
+    }
+
+    // 指针每移过一个 DIP 转多少度。0.10 下横着扫满 1024 DIP 宽的窗口约 102 度，转半圈要横移一千八百多个 DIP。
+    //
+    // 用 DIP 而不是物理像素：150% 缩放的显示器上同样的手部动作该转同样的角度，
+    // 按物理像素算的话那台机器上会快 1.5 倍，表现成「换了台显示器手感就变了」。
+    public float LookSensitivity
+    {
+        get => GetValue(LookSensitivityProperty);
+        set => SetValue(LookSensitivityProperty, value);
+    }
 
     private CameraState _camera = CameraState.Default;
 
@@ -105,16 +145,14 @@ public partial class Previewer
     }
 
     // 看向手势的三条只有起点和终点打桩，中间那条不打：转动一秒几百条，逐条打会把终端冲掉，
-    // 而「指针从哪到了哪」这类信息在两条日志之间本来就看得出来。
-    internal void RaiseLookStarted(Point position)
+    // 而「转了多少」这类信息由控制器在收尾时汇总，它才知道该怎么划段。
+    internal void RaiseLookStarted()
     {
-        Debug.WriteLine(
-            $"[PREVIEWER][event.look] started pos=({position.X:F0},{position.Y:F0}) " +
-            $"handlers={CountHandlers(LookStarted)}");
-        LookStarted?.Invoke(position);
+        Debug.WriteLine($"[PREVIEWER][event.look] started handlers={CountHandlers(LookStarted)}");
+        LookStarted?.Invoke();
     }
 
-    internal void RaiseLookMoved(Point position) => LookMoved?.Invoke(position);
+    internal void RaiseLookMoved(Vector delta) => LookMoved?.Invoke(delta);
 
     internal void RaiseLookEnded()
     {

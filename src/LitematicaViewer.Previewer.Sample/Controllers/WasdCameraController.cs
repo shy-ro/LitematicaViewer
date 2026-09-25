@@ -15,16 +15,6 @@ namespace LitematicaViewer.Previewer.Sample;
 // 而「按住一秒该走多远」只能由时间来定。这也顺带让走动快慢与键盘重复率无关。
 internal sealed class WasdCameraController : IDisposable
 {
-    // 每秒走多少世界单位。渲染器里那个单位立方体就是按「一个 MC 方块 = 1×1×1 世界单位」
-    // 画的（MC 里一方块也是一米），所以 1.5 就是每秒走过一个半方块。
-    //
-    // 材质包的分辨率（16x16 / 256x256 / 2048x2048）不影响这个数：它决定的是一个方块贴多少纹素，
-    // 也就是纹素密度，而方块的世界尺寸始终是 1。要按材质包配的是贴图采样（mipmap、过滤），不是速度。
-    //
-    // internal 是给验收剧本用的：它拿这个值算期望的位移。脚本引用它意味着改这个数不会红，
-    // 那是有意的——钉的是「按了多久走多远」这条积分关系，不是这个速度值本身。
-    internal const float UnitsPerSecond = 1.5f;
-
     private readonly Previewer _previewer;
     private readonly CameraModel _camera;
     private readonly HashSet<Key> _pressed = [];
@@ -34,6 +24,10 @@ internal sealed class WasdCameraController : IDisposable
     private bool _moving;
     private double _movingSeconds;
     private float _movedUnits;
+
+    // 这一段走动的速度，取按下那一刻的值。走动期间在侧边栏上拖滑块的话「按了多久走多远」
+    // 这条关系就不成立了——用当下的速度算会得到一个永远对不上的期望，而那看起来像积分错了。
+    private float _speedAtStart;
     private bool _disposed;
 
     internal WasdCameraController(Previewer previewer, CameraModel camera)
@@ -114,7 +108,10 @@ internal sealed class WasdCameraController : IDisposable
 
         // delta 已被 Previewer 夹在 0.25 秒以内，所以卡顿时最坏是走得慢一点，
         // 而不是一步跨出去很远。
-        float step = UnitsPerSecond * (float)delta;
+        //
+        // 速度每帧从控件属性读一次，不在构造时取一份存着：存下来之后侧边栏拖滑块就不会生效，
+        // 而症状是「改了速度没反应」——看起来像滑块没接上，不是像缓存。
+        float step = _previewer.MoveSpeed * (float)delta;
         if (step <= 0f)
         {
             // 首帧的 delta 是 0，也就没有位移要推出去。白推一次会让相机版本号 +
@@ -130,8 +127,9 @@ internal sealed class WasdCameraController : IDisposable
             _moving = true;
             _movingSeconds = 0;
             _movedUnits = 0f;
+            _speedAtStart = _previewer.MoveSpeed;
             Debug.WriteLine(
-                $"[SAMPLE][camera.wasd] 开始移动 axis=({axis.X:F2},{axis.Y:F2}) " +
+                $"[SAMPLE][camera.wasd] 开始移动 axis=({axis.X:F2},{axis.Y:F2}) speed={_speedAtStart} " +
                 $"pos=({_camera.Camera.Position}) target=({_camera.Target})");
         }
 
@@ -149,8 +147,8 @@ internal sealed class WasdCameraController : IDisposable
         _moving = false;
         Debug.WriteLine(
             $"[SAMPLE][camera.wasd] 移动结束 seconds={_movingSeconds:F3} units={_movedUnits:F4} " +
-            $"expected={UnitsPerSecond * _movingSeconds:F4} pos=({_camera.Camera.Position}) " +
-            $"target=({_camera.Target})");
+            $"expected={_speedAtStart * _movingSeconds:F4} speed={_speedAtStart} " +
+            $"pos=({_camera.Camera.Position}) target=({_camera.Target})");
     }
 
     private static float Axis(bool positive, bool negative) =>

@@ -26,6 +26,7 @@ internal sealed class InputSelfTest
     private const double KeyUpAt = 3.2;
     private const double ResizeAt = 3.6;
     private const double GrazingAt = 4.0;
+    private const double RightButtonAt = 4.4;
 
     // 每步按顺序编号，与 StepTimes 一一对应。
     private const int StepRotate = 0;
@@ -36,9 +37,10 @@ internal sealed class InputSelfTest
     private const int StepKeyUp = 5;
     private const int StepResize = 6;
     private const int StepGrazing = 7;
+    private const int StepRightButton = 8;
 
     private static readonly double[] StepTimes =
-        [RotateAt, RotateBackAt, WheelAt, LookAroundAt, KeyDownAt, KeyUpAt, ResizeAt, GrazingAt];
+        [RotateAt, RotateBackAt, WheelAt, LookAroundAt, KeyDownAt, KeyUpAt, ResizeAt, GrazingAt, RightButtonAt];
 
     // 掠射姿态：相机几乎贴着 +X 面的平面，x 只比面心出去 0.008，其余两个方向在几米开外。
     // 那一张面按判据确实朝向我们（0.508 > 0.5），但视线与它的法线夹着 89.9 度，
@@ -73,10 +75,12 @@ internal sealed class InputSelfTest
 
     private static readonly Pointer TestPointer = new(1, PointerType.Mouse, isPrimary: true);
 
-    // 合成的指针状态：一个键都不按。转视角现在不需要按键，这一栏是 PointerEventArgs 要求填的，
-    // 填「没按键」正是要验的那件事——适配器如果还在挑按键，这里就走不通。
-    private static readonly PointerPointProperties NoButtons =
-        new(RawInputModifiers.None, PointerUpdateKind.Other);
+    // 右键按着时的指针状态。移动事件里报的按键状态是适配器的判据之一（它靠这个补上
+    // 落在别处的那次抬起），所以按住期间合成的那几段移动必须如实带上右键——
+    // 不带的话剧本会走一条真机走不到的路，而那种「合成事件与真实事件不一致」的漏洞
+    // 正是这类剧本最容易放过去的东西。
+    private static readonly PointerPointProperties RightButtonHeld =
+        new(RawInputModifiers.RightMouseButton, PointerUpdateKind.Other);
 
     private readonly Window _window;
     private readonly Previewer _previewer;
@@ -114,6 +118,11 @@ internal sealed class InputSelfTest
     private double _moveStopElapsed;
     private CameraState _moveStartCamera;
     private float _moveStartDistance;
+
+    // 那一段用的速度，取按下那一刻的控件属性值。它是可调的（侧边栏），
+    // 所以期望不能写死一个数；取「按下时」而不是「松手时」是为了让这一段的期望是确定的——
+    // 走动期间有人改过速度的话，两边本来就不该对得上，而那是调整不是错。
+    private float _moveSpeed;
     private Vector3 _positionAtKeyUp;
     private int _idleCheckAt;
     private int _ownInputEvents;
@@ -131,6 +140,15 @@ internal sealed class InputSelfTest
         _camera = camera;
         _input = input;
         _startCamera = CameraState.Default;
+
+        // 关掉固定鼠标。剧本摆的是合成的指针位置，而钉住光标会把参照点换成「读回来的真实光标位置」——
+        // 于是脚本合成的那一段增量里会混进真实光标当时在哪，算出来的角度就不再是它自己给的那一段。
+        //
+        // 这是有意的取舍，不是漏测：钉住那一条的答案在系统里（光标被挪走之后落在哪），
+        // 剧本要么作弊（自己假定一个答案），要么就得有一套真鼠标。它能被验的部分是
+        // 「右键按住时不接管」——那一段完全不碰光标，所以合成事件说了算，下面单独有一步验它。
+        // 钉住本身由 input.confine / input.right 那几行日志记着每一次的请求点与读回来的点。
+        _input.ConfinePointer = false;
     }
 
     internal void Attach()
@@ -150,15 +168,20 @@ internal sealed class InputSelfTest
 
     internal void Report()
     {
+        // 期望尺寸按**视口**算，不按客户区：侧边栏也占客户区的一块，
+        // 两者相等只在「视口铺满窗口」的时候成立。（这个等式曾经是：视口 == 客户区。）
+        //
+        // 算式与 Previewer.OnOpenGlRender 里那一处逐字相同——视口的物理像素 = DIP × RenderScaling。
+        // 这里换一个算法就等于把「视口算得对不对」这条断言的前提换掉了。
         double scaling = _window.RenderScaling;
-        int expectedWidth = (int)Math.Round(_window.ClientSize.Width * scaling);
-        int expectedHeight = (int)Math.Round(_window.ClientSize.Height * scaling);
+        int expectedWidth = (int)Math.Round(_previewer.Bounds.Width * scaling);
+        int expectedHeight = (int)Math.Round(_previewer.Bounds.Height * scaling);
 
         Debug.WriteLine(
             $"[SAMPLE][selftest.summary] ticks={_ticks} scrolled={_scrolled} wheelIn={_wheelIn} wheelOut={_wheelOut} " +
             $"key={_keyEvents} keyDown={_sawKeyDown} keyUp={_sawKeyUp} resizes={_resizes} " +
             $"lastViewport={_lastViewport.Width}x{_lastViewport.Height} " +
-            $"expected={expectedWidth}x{expectedHeight} cameraSets={_cameraSets} " +
+            $"expected={expectedWidth}x{expectedHeight} client={_window.ClientSize} cameraSets={_cameraSets} " +
             $"look={_lookStarted}/{_lookMoved}/{_lookEnded} " +
             $"distance={_distanceBeforeZoom:F4}->{_camera.Distance:F4} elapsed={_elapsed:F2}s");
 
@@ -184,8 +207,8 @@ internal sealed class InputSelfTest
             $"[SAMPLE][selftest] ViewportResized 只发了 {_resizes} 次，期望首帧与缩放各一次");
         Debug.Assert(
             _lastViewport == (expectedWidth, expectedHeight),
-            $"[SAMPLE][selftest] 最后一次视口尺寸与窗口不符 last={_lastViewport} " +
-            $"expected=({expectedWidth},{expectedHeight})");
+            $"[SAMPLE][selftest] 最后一次视口尺寸与控件的 bounds 不符 last={_lastViewport} " +
+            $"expected=({expectedWidth},{expectedHeight}) bounds={_previewer.Bounds} scaling={scaling}");
 
         // 剧本自己摆的视角只有三次：两次旋转，一次掠射。滚轮、转视角、走动都不经过这里——
         // 它们走各自的控制器，那正是这几个相位要验的链路。外部输入也改不了这个计数：
@@ -269,6 +292,7 @@ internal sealed class InputSelfTest
                 _moveStartElapsed = _elapsed;
                 _moveStartCamera = _camera.Camera;
                 _moveStartDistance = _camera.Distance;
+                _moveSpeed = _previewer.MoveSpeed;
                 _walkForeignBaseline = ForeignInputCount();
                 RaiseKey(MoveKey, down: true);
                 break;
@@ -303,6 +327,10 @@ internal sealed class InputSelfTest
                     _startCamera.Far));
                 break;
 
+            case StepRightButton:
+                RightButtonSuspend();
+                break;
+
             default:
                 Debug.Fail($"[SAMPLE][selftest.step] 未知的步骤 step={step}");
                 break;
@@ -332,8 +360,8 @@ internal sealed class InputSelfTest
     // 转视角走完整条链路：合成指针移动 -> 适配器（不需要按键）-> Look* -> 控制器 -> 模型 -> SetCamera。
     //
     // 断言的是「相机转了多少」，而不是「收到了几次移动」：前者才是这条链路存在的理由，
-    // 后者只能证明事件到了。灵敏度取自控制器里的那个常量——它是个手感参数，脚本引用它
-    // 意味着改了值不会红，那是有意的；这里钉的是换算关系与方向。
+    // 后者只能证明事件到了。灵敏度取控件属性（侧边栏能改它）而不是写一个数：
+    // 写死的话，改了默认值这条断言就红，而它要钉的是换算关系与方向，不是那个手感值。
     //
     // 合成的是 PointerMoved，而且 Properties 里一个键都不按：适配器如果还留着「必须按着左键」
     // 那道门，这里一步都转不动，而日志上看起来只是「指针移了但画面没动」。
@@ -349,6 +377,7 @@ internal sealed class InputSelfTest
         // 这一段之后到断言为止是同步的（没有消息泵），外面插不进来，参照点从这里起是确定的。
         _input.ReleaseLook();
 
+        float sensitivity = _previewer.LookSensitivity;
         int startedBefore = _lookStarted;
         int movedBefore = _lookMoved;
         int endedBefore = _lookEnded;
@@ -374,12 +403,12 @@ internal sealed class InputSelfTest
         // 而「绕回」那个函数本身也是要验的东西，混进来会把两件事搅在一起。
         Expect(
             _camera.Camera.Yaw - before.Yaw,
-            (float)(LookStepX * LookSteps) * MouseLookController.DegreesPerDip,
+            (float)(LookStepX * LookSteps) * sensitivity,
             0.1f,
             "转视角的 yaw 增量（往右移是往右转）");
         Expect(
             _camera.Camera.Pitch - before.Pitch,
-            (float)(LookStepY * LookSteps) * MouseLookController.DegreesPerDip,
+            (float)(LookStepY * LookSteps) * sensitivity,
             0.1f,
             "转视角的 pitch 增量（往下移是往下看）");
 
@@ -403,6 +432,127 @@ internal sealed class InputSelfTest
             $"[SAMPLE][selftest] 一程转视角应该恰好一个终点 before={endedBefore} after={_lookEnded}");
     }
 
+    // 固定鼠标是「光标归程序」，于是拖窗口、点侧边栏上的滑块、够标题栏全都做不到。
+    // 按住右键把这些还回去：转视角停下、光标放出来。这一步验的就是「还回去了」。
+    //
+    // 分三段：按住期间一个事件都不该来、相机一动不动；抬起之后必须重新起手势并真的转起来；
+    // 以及**抬起事件落在别处**（拖到侧边栏上松开）时也要能自己恢复。
+    //
+    // 它的失效方式很静默：右键没被认出来时画面照旧跟着鼠标转，而「画面在转」在日志里
+    // 和「这一段本来就该转」长得一模一样——用户看到的是「按了右键还是拖不动窗口」。
+    private void RightButtonSuspend()
+    {
+        // 先把适配器手里可能挂着的手势收掉，理由同 LookAround。
+        _input.ReleaseLook();
+
+        float sensitivity = _previewer.LookSensitivity;
+        int startedBefore = _lookStarted;
+        int movedBefore = _lookMoved;
+        CameraState before = _camera.Camera;
+
+        RaisePointerPressed();
+
+        // 按住期间连发几段移动：一段就够验「没起手势」，多发几段是为了连「手势起了又立刻收」
+        // 这种半吊子实现一起挡住。移动事件里必须如实带上右键——适配器会拿这一栏判断挂起该不该继续。
+        Point position = new(LookStartX, LookStartY);
+        for (int i = 0; i <= LookSteps; i++)
+        {
+            position += new Avalonia.Vector(LookStepX, LookStepY);
+            RaisePointerMoved(position, RightButtonHeld);
+        }
+
+        Debug.Assert(
+            _lookStarted == startedBefore && _lookMoved == movedBefore,
+            $"[SAMPLE][selftest.right] 按住右键期间不该接管指针 started=+{_lookStarted - startedBefore} " +
+            $"moved=+{_lookMoved - movedBefore} expected=+0/+0");
+        Debug.Assert(
+            _camera.Camera == before,
+            $"[SAMPLE][selftest.right] 按住右键期间相机被改了 yaw={_camera.Camera.Yaw:F3} " +
+            $"pitch={_camera.Camera.Pitch:F3} expected=yaw={before.Yaw:F3} pitch={before.Pitch:F3}");
+
+        RaisePointerReleased();
+
+        // 抬起之后要两段移动才看得到角度：第一段起手势（不产生增量），第二段才真的转。
+        // 只发一段的话，「抬起时忘了复位」和「复位了」在角度上完全一样——
+        // 前者一条事件都不发，后者发一条起点，而两者都不转。
+        position += new Avalonia.Vector(LookStepX, LookStepY);
+        RaisePointerMoved(position);
+        position += new Avalonia.Vector(LookStepX, LookStepY);
+        RaisePointerMoved(position);
+
+        Debug.Assert(
+            _lookStarted == startedBefore + 1,
+            $"[SAMPLE][selftest.right] 抬起右键之后没有重新起手势 started=+{_lookStarted - startedBefore} " +
+            $"expected=+1");
+        Expect(
+            YawDelta(before.Yaw, _camera.Camera.Yaw),
+            (float)LookStepX * sensitivity,
+            0.05f,
+            "抬起右键之后第一段增量的 yaw");
+
+        Debug.WriteLine(
+            $"[SAMPLE][selftest.right] 按住期间 0 条事件、相机一动不动；抬起后重新起手势并转了 " +
+            $"{(float)LookStepX * sensitivity:F2} 度");
+
+        // 第三段：抬起事件**根本没送到控件**时也要能自己恢复。
+        //
+        // 这不是假想：右键按住之后可以把光标拖到侧边栏上再松开，那一下抬起落在侧边栏上，
+        // 而侧边栏不是控件的祖先，事件不会回来。标志会一直挂着，症状是回来之后鼠标怎么动都不转。
+        // 适配器因此不看那个事件，而看移动事件里报的按键状态——这一步钉的就是那条判断。
+        RaisePointerPressed();
+
+        position += new Avalonia.Vector(LookStepX, LookStepY);
+        RaisePointerMoved(position, RightButtonHeld);
+        Debug.Assert(
+            _lookStarted == startedBefore + 1,
+            $"[SAMPLE][selftest.right] 挂起期间又起了手势 started=+{_lookStarted - startedBefore} expected=+1");
+
+        float yawBeforeRecovery = _camera.Camera.Yaw;
+
+        // 第二段带的是「右键已经松开」的状态，而抬起事件一次都不发。
+        position += new Avalonia.Vector(LookStepX, LookStepY);
+        RaisePointerMoved(position);
+        position += new Avalonia.Vector(LookStepX, LookStepY);
+        RaisePointerMoved(position);
+
+        Debug.Assert(
+            _lookStarted == startedBefore + 2,
+            $"[SAMPLE][selftest.right] 抬起事件缺失时没能自己恢复 started=+{_lookStarted - startedBefore} " +
+            $"expected=+2 note=适配器要从移动事件报的按键状态补上这次抬起");
+        Expect(
+            YawDelta(yawBeforeRecovery, _camera.Camera.Yaw),
+            (float)LookStepX * sensitivity,
+            0.05f,
+            "抬起事件缺失时第一段增量的 yaw");
+
+        _input.ReleaseLook();
+    }
+
+    // 两次 yaw 之间的真实增量。
+    //
+    // yaw 的落点是 (-180,180]（模型里每改一次就归一次，见 CameraModel.Wrap），所以
+    // 「后一次减前一次」在跨过那条分界时会得到 -354 这种数，而真实增量是 +6。
+    // 这一步（以及它前面那一步）的起点正好停在 179.x——它就在分界上，必须折回来比。
+    //
+    // 别处那一步（LookAround）仍然直接相减，那里离分界很远，而它的注释说了理由：
+    // 那一段要钉的是「换算与方向」，把绕回这件事混进去会让两件事搅在一起。
+    // 归位本身在模型自检里有一条（正反各转 90 度再回来）。
+    private static float YawDelta(float before, float after)
+    {
+        float delta = (after - before) % 360f;
+
+        if (delta > 180f)
+        {
+            delta -= 360f;
+        }
+        else if (delta < -180f)
+        {
+            delta += 360f;
+        }
+
+        return delta;
+    }
+
     // 走动那一段的结论：位移大小由「按了多久」算，方向由按下时的视线定。
     //
     // 时长用两个累计时间之差，而不是脚本自己数帧：控制器的位移就是这些 tick 的 delta 积出来的，
@@ -413,7 +563,7 @@ internal sealed class InputSelfTest
         double seconds = _moveStopElapsed - _moveStartElapsed;
         Vector3 moved = _camera.Camera.Position - _moveStartCamera.Position;
         float distance = moved.Length();
-        float expected = WasdCameraController.UnitsPerSecond * (float)seconds;
+        float expected = _moveSpeed * (float)seconds;
 
         // 数据先打出来，结论再看前提：按住 W 的这 0.8 秒里只要有人动了鼠标或滚轮，
         // 相机就会合理地多走/少走一段，而这几个数与「控制器算错了」在数值上分不开。
@@ -422,8 +572,8 @@ internal sealed class InputSelfTest
         if (interference != 0)
         {
             Debug.WriteLine(
-                $"[SAMPLE][selftest.walk] seconds={seconds:F3} expected={expected:F4} actual={distance:F4} " +
-                $"跳过断言 note=按住期间外部输入插了 {interference} 条，位移里混着别人的");
+                $"[SAMPLE][selftest.walk] seconds={seconds:F3} speed={_moveSpeed} expected={expected:F4} " +
+                $"actual={distance:F4} 跳过断言 note=按住期间外部输入插了 {interference} 条，位移里混着别人的");
             return;
         }
 
@@ -451,8 +601,8 @@ internal sealed class InputSelfTest
         Expect(_camera.Distance, _moveStartDistance, 1e-3f, "走动后的距离");
 
         Debug.WriteLine(
-            $"[SAMPLE][selftest.walk] seconds={seconds:F3} expected={expected:F4} actual={distance:F4} " +
-            $"dot={Vector3.Dot(Vector3.Normalize(moved), groundForward):F6}");
+            $"[SAMPLE][selftest.walk] seconds={seconds:F3} speed={_moveSpeed} expected={expected:F4} " +
+            $"actual={distance:F4} dot={Vector3.Dot(Vector3.Normalize(moved), groundForward):F6}");
     }
 
     // 松开按键之后相机必须停住。这一条单独验，是因为它失效的样子最难看：键状态没清掉的话
@@ -530,9 +680,10 @@ internal sealed class InputSelfTest
         _lastViewport = (width, height);
     }
 
-    private void OnLookStarted(Point position) => _lookStarted++;
+    private void OnLookStarted() => _lookStarted++;
 
-    private void OnLookMoved(Point position) => _lookMoved++;
+    // 写全 Avalonia.Vector：System.Numerics 里也有个 Vector（静态类），简单名会撞上。
+    private void OnLookMoved(Avalonia.Vector delta) => _lookMoved++;
 
     private void OnLookEnded() => _lookEnded++;
 
@@ -595,14 +746,16 @@ internal sealed class InputSelfTest
     // 合成指针移动。走真实的路由事件而不是直接调 Previewer 的 RaiseLook*：
     // 「指针一动就开始转、不需要按键」那一段在适配器里，直接调就把它整个跳过去了。
     //
-    // 指针状态报的是「一个键都没按」：那正是要验的前提。适配器如果还留着按键那道门，
-    // 这里就一步都转不动——而日志上看起来只是「指针移了，画面没动」。
-    private void RaisePointerMoved(Point position)
+    // 按键状态默认是「一个键都没按」（default 就是 RawInputModifiers.None）：那正是要验的前提——
+    // 转视角不需要按键，适配器如果还留着那道门，这里就一步都转不动，
+    // 而日志上看起来只是「指针移了，画面没动」。
+    private void RaisePointerMoved(Point position, PointerPointProperties properties = default)
     {
         _ownInputEvents++;
 
-        // 移动事件的第一个参数是路由事件本身，来源在它后面：PointerEventArgs 的构造函数
-        // 与另外两个不一样。写错了编译不过，也就没机会在运行期悄悄递错。
+        // 移动事件的第一个参数是路由事件本身：PointerEventArgs 收 RoutedEvent，
+        // 而 PointerPressed/Released 那两个不收——它们自己就知道该用哪条路由事件。
+        // 三种构造函数的形状各不相同，写错了编译不过，也就没机会在运行期悄悄递错。
         PointerEventArgs args = new(
             InputElement.PointerMovedEvent,
             _previewer,
@@ -610,8 +763,48 @@ internal sealed class InputSelfTest
             _previewer,
             position,
             0UL,
-            NoButtons,
+            properties,
             KeyModifiers.None);
+
+        _previewer.RaiseEvent(args);
+    }
+
+    // 合成右键按下。走真实的路由事件，所以「适配器认不认得出右键」也在被验的范围里——
+    // 直接调它内部的方法就把那一层跳过去了，而那一层正是这一步要验的东西。
+    //
+    // 按键状态同时写进两栏（修饰位和 PointerUpdateKind）：适配器读的是哪一栏由它的实现决定，
+    // 而合成的这一份必须与真实鼠标产生的那一份一样。只填一栏的话，
+    // 「适配器读错了那一栏」这个 bug 会被剧本放过去，真机上才暴露。
+    private void RaisePointerPressed()
+    {
+        _ownInputEvents++;
+
+        PointerPressedEventArgs args = new(
+            _previewer,
+            TestPointer,
+            _previewer,
+            default,
+            0UL,
+            new PointerPointProperties(RawInputModifiers.RightMouseButton, PointerUpdateKind.RightButtonPressed),
+            KeyModifiers.None,
+            clickCount: 1);
+
+        _previewer.RaiseEvent(args);
+    }
+
+    private void RaisePointerReleased()
+    {
+        _ownInputEvents++;
+
+        PointerReleasedEventArgs args = new(
+            _previewer,
+            TestPointer,
+            _previewer,
+            default,
+            0UL,
+            new PointerPointProperties(RawInputModifiers.None, PointerUpdateKind.RightButtonReleased),
+            KeyModifiers.None,
+            MouseButton.Right);
 
         _previewer.RaiseEvent(args);
     }
