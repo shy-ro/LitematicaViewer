@@ -3,6 +3,9 @@
   <PropertyGroup>
     <RootNamespace>LitematicaViewer.Previewer</RootNamespace>
     <AssemblyName>LitematicaViewer.Previewer</AssemblyName>
+    <!-- 只为 GlInterface 里那几个只收裸指针的入口开（UniformMatrix4fv 之类），
+         GL 互操作是它正当的用途。其余地方不需要 unsafe。 -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
