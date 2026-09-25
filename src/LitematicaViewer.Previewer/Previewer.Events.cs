@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Avalonia;
 using Avalonia.Input;
 
 namespace LitematicaViewer.Previewer;
@@ -14,6 +15,20 @@ public partial class Previewer
     // 滚轮增量。正负方向不由 Previewer 约定：它只把原始增量递出去，
     // 「向上滚是拉近还是推远」是控制器的事，将来改手感不必动这里。
     public event Action<float>? Scrolled;
+
+    // 拖拽手势。位置是控件坐标（DIP，不是物理像素）。
+    //
+    // 为什么给的是「一次拖拽」而不是「左键按下了」：按哪个键起拖是平台绑定，
+    // 那属于输入适配器；而「按下之后指针移动了多少」是手势——差值要在能记住上一次位置的地方算，
+    // 那是控制器，只有它知道拖多远算转多少度。这里只把起点、过程和终点报出来。
+    //
+    // 起点的那个位置不产生旋转（只有一次位置就没有「差」），它的用处是定下参照点——
+    // 少了它，第一次移动会把「从上次拖拽留下的位置」到这里算成一段距离，画面上是一次凭空的跳转。
+    public event Action<Point>? DragStarted;
+
+    public event Action<Point>? DragMoved;
+
+    public event Action? DragEnded;
 
     // 按键状态变化。key 直接用 Avalonia 的枚举：Previewer 本来就依赖 Avalonia，
     // 再造一个 Key 枚举只会多一层翻译表，而翻译表是漏项的高发地。
@@ -74,6 +89,24 @@ public partial class Previewer
         // 而 Phase D 的验收恰好是「能看到事件触发」，这里打出 0 就是答案。
         Debug.WriteLine($"[PREVIEWER][event.scrolled] delta={delta} handlers={CountHandlers(Scrolled)}");
         Scrolled?.Invoke(delta);
+    }
+
+    // 拖拽的三条只有起点和终点打桩，中间那条不打：移动一秒几百条，逐条打会把终端冲掉，
+    // 而「指针从哪到了哪」这类信息在两条日志之间本来就看得出来。
+    internal void RaiseDragStarted(Point position)
+    {
+        Debug.WriteLine(
+            $"[PREVIEWER][event.drag] started pos=({position.X:F0},{position.Y:F0}) " +
+            $"handlers={CountHandlers(DragStarted)}");
+        DragStarted?.Invoke(position);
+    }
+
+    internal void RaiseDragMoved(Point position) => DragMoved?.Invoke(position);
+
+    internal void RaiseDragEnded()
+    {
+        Debug.WriteLine($"[PREVIEWER][event.drag] ended handlers={CountHandlers(DragEnded)}");
+        DragEnded?.Invoke();
     }
 
     internal void RaiseKeyChanged(Key key, bool isDown)

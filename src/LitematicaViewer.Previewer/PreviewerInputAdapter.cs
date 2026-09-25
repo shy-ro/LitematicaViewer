@@ -11,6 +11,7 @@ namespace LitematicaViewer.Previewer;
 public sealed class PreviewerInputAdapter : IDisposable
 {
     private readonly Previewer _previewer;
+    private bool _dragging;
     private bool _disposed;
 
     // 宿主就是控件本身，不再单收一个 host 参数：多一个「事件从哪来」和「往哪发」可以不同的
@@ -24,6 +25,9 @@ public sealed class PreviewerInputAdapter : IDisposable
         previewer.Focusable = true;
 
         previewer.PointerWheelChanged += OnPointerWheelChanged;
+        previewer.PointerPressed += OnPointerPressed;
+        previewer.PointerMoved += OnPointerMoved;
+        previewer.PointerReleased += OnPointerReleased;
         previewer.KeyDown += OnKeyDown;
         previewer.KeyUp += OnKeyUp;
 
@@ -47,6 +51,9 @@ public sealed class PreviewerInputAdapter : IDisposable
 
         _disposed = true;
         _previewer.PointerWheelChanged -= OnPointerWheelChanged;
+        _previewer.PointerPressed -= OnPointerPressed;
+        _previewer.PointerMoved -= OnPointerMoved;
+        _previewer.PointerReleased -= OnPointerReleased;
         _previewer.KeyDown -= OnKeyDown;
         _previewer.KeyUp -= OnKeyUp;
     }
@@ -57,6 +64,59 @@ public sealed class PreviewerInputAdapter : IDisposable
     {
         Debug.WriteLine($"[PREVIEWER][input.wheel] delta=({e.Delta.X},{e.Delta.Y})");
         _previewer.RaiseScrolled((float)e.Delta.Y);
+    }
+
+    // 哪个键起拖在这一层定：它是平台绑定（左键 = 主键），而「拖拽」是 Previewer 的说法。
+    // 判据用 IsLeftButtonPressed 而不是 PointerUpdateKind：后者在「按下的同时移动」时
+    // 报的是移动，两边都得判，而按键状态一个字段就问清了。
+    private void OnPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (_dragging || !e.GetCurrentPoint(_previewer).Properties.IsLeftButtonPressed)
+        {
+            // 已经在拖了：第二个键按下不该把参照点挪走，否则那一下会算成一段凭空的位移。
+            return;
+        }
+
+        _dragging = true;
+
+        // 捕获指针，拖到控件外（甚至窗口外）时移动事件才继续送过来。
+        // 不捕获的话指针一出边界画面就停住，手感像卡死——而那是「没了后续事件」，
+        // 不是「控制器没处理」。
+        e.Pointer.Capture(_previewer);
+
+        _previewer.RaiseDragStarted(e.GetPosition(_previewer));
+    }
+
+    private void OnPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (!_dragging)
+        {
+            return;
+        }
+
+        // 抬起事件丢了的话（捕获被抢走、窗口失活），按键状态是唯一还能问出「还在拖吗」的地方。
+        // 不问这一句，拖拽会挂在那里，画面跟着光标乱转。
+        if (!e.GetCurrentPoint(_previewer).Properties.IsLeftButtonPressed)
+        {
+            EndDrag();
+            return;
+        }
+
+        _previewer.RaiseDragMoved(e.GetPosition(_previewer));
+    }
+
+    private void OnPointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        if (_dragging && e.InitialPressMouseButton == MouseButton.Left)
+        {
+            EndDrag();
+        }
+    }
+
+    private void EndDrag()
+    {
+        _dragging = false;
+        _previewer.RaiseDragEnded();
     }
 
     private void OnKeyDown(object? sender, KeyEventArgs e) => _previewer.RaiseKeyChanged(e.Key, isDown: true);
