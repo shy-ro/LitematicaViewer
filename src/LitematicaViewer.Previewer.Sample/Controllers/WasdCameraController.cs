@@ -15,10 +15,15 @@ namespace LitematicaViewer.Previewer.Sample;
 // 而「按住一秒该走多远」只能由时间来定。这也顺带让走动快慢与键盘重复率无关。
 internal sealed class WasdCameraController : IDisposable
 {
-    // 每秒走多少世界单位。立方体边长是 1，也就是按住 W 一秒走过三个立方体。
+    // 每秒走多少世界单位。渲染器里那个单位立方体就是按「一个 MC 方块 = 1×1×1 世界单位」
+    // 画的（MC 里一方块也是一米），所以 1.5 就是每秒走过一个半方块。
+    //
+    // 材质包的分辨率（16x16 / 256x256 / 2048x2048）不影响这个数：它决定的是一个方块贴多少纹素，
+    // 也就是纹素密度，而方块的世界尺寸始终是 1。要按材质包配的是贴图采样（mipmap、过滤），不是速度。
+    //
     // internal 是给验收剧本用的：它拿这个值算期望的位移。脚本引用它意味着改这个数不会红，
     // 那是有意的——钉的是「按了多久走多远」这条积分关系，不是这个速度值本身。
-    internal const float UnitsPerSecond = 3f;
+    internal const float UnitsPerSecond = 1.5f;
 
     private readonly Previewer _previewer;
     private readonly CameraModel _camera;
