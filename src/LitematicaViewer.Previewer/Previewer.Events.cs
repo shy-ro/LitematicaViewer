@@ -58,13 +58,14 @@ public partial class Previewer
     //
     // 控件自己不读这两个值：它不移动相机，动相机是挂上来的导航控制器那一层的事。
     public static readonly StyledProperty<float> MoveSpeedProperty =
-        AvaloniaProperty.Register<Previewer, float>(nameof(MoveSpeed), defaultValue: 1.5f);
+        AvaloniaProperty.Register<Previewer, float>(nameof(MoveSpeed), defaultValue: 5f);
 
     public static readonly StyledProperty<float> LookSensitivityProperty =
         AvaloniaProperty.Register<Previewer, float>(nameof(LookSensitivity), defaultValue: 0.10f);
 
-    // 每秒走多少世界单位（＝方块）。1.5 是每秒一个半方块：渲染器里那个单位立方体就是按
-    // 「一个 MC 方块 = 1×1×1 世界单位」画的（MC 里一方块也是一米）。
+    // 每秒走多少世界单位（＝方块）。5 是每秒五个方块：渲染器里那个单位立方体就是按
+    // 「一个 MC 方块 = 1×1×1 世界单位」画的（MC 里一方块也是一米），MC 里走路大约 4.3 方块/秒、
+    // 冲刺 5.6——这个数调在两者之间，是在真机上拖滑块试出来的。
     //
     // 材质包的分辨率（16x16 / 256x256 / 2048x2048）不该配在这里：它决定一个方块贴多少纹素，
     // 方块的世界尺寸始终是 1，要按材质包配的是贴图采样（mipmap、过滤）。
