@@ -11,15 +11,24 @@ using Avalonia.VisualTree;
 
 namespace LitematicaViewer.Previewer.Sample;
 
-public partial class MainWindow : Window
+public partial class MainWindow : Window, IViewModeHost
 {
     private readonly PreviewerInputAdapter _input;
     private readonly CameraModel _camera;
-    private readonly ScrollZoomController _scroll;
-    private readonly MouseLookController _look;
-    private readonly WasdCameraController _wasd;
     private readonly Sidebar _sidebar;
     private readonly InputSelfTest? _selfTest;
+
+    // 自由视角的三个控制器只在那个模式下存在。可空是这层设计的全部代价，而它换来的是
+    // 「不该在这个模式下响应的事件根本没接上」——比每个控制器里加一个 Enabled 短路更结实，
+    // 因为短路要写在每一条处理函数里，漏掉一条的表现是「某个模式下偶尔不该动却动了」。
+    private ScrollZoomController? _scroll;
+    private MouseLookController? _look;
+    private WasdCameraController? _wasd;
+
+    // 展台那一个。它自己在构造时就把相机摆好、把光环点起来，所以「装」和「卸」就是全部的模式切换。
+    private TurntableController? _turntable;
+
+    private ViewMode _mode = ViewMode.FreeLook;
 
     public MainWindow()
     {
@@ -45,10 +54,17 @@ public partial class MainWindow : Window
         // 而那是两处各自都「对」的默认值，从任何一处都看不出问题。
         Viewport.SetCamera(_camera.Camera);
 
+        // 开窗这一份就是自由视角：三个控制器直接装好，不绕 ToggleMode。
+        // 绕一遍的话，「初始状态」和「从展台切回来」走的是同一条路，而那条路里有一半
+        // （拆展台）在第一次跑的时候没有东西可拆——一个只在启动时走的空分支。
         _scroll = new ScrollZoomController(Viewport, _camera);
         _look = new MouseLookController(Viewport, _camera);
         _wasd = new WasdCameraController(Viewport, _camera);
-        _sidebar = new Sidebar(this, Viewport, _camera);
+        _sidebar = new Sidebar(this, this, Viewport, _camera);
+
+        // 数字键 1/2 切模式。挂在控件的事件上而不是窗口的 KeyDown 上：按键只发给有焦点的元素，
+        // 而这个焦点是宿主自己还给视口的（见 OnSidebarPointerPressed），所以它在这一层看得见。
+        Viewport.KeyChanged += OnViewportKeyChanged;
 
         // 侧边栏上的任何一次按下都把焦点还回视口。滑块的 Focusable 已经是 false（拖它不该抢
         // 键盘焦点），但「按一个不可聚焦的元素会不会把焦点清掉」由模板和焦点管理器决定——
@@ -85,6 +101,158 @@ public partial class MainWindow : Window
         AddHandler(PointerPressedEvent, OnWindowPressedTunnel, RoutingStrategies.Tunnel);
         AddHandler(PointerEnteredEvent, OnWindowEnteredTunnel, RoutingStrategies.Tunnel);
 #endif
+    }
+
+    // IViewModeHost 走显式实现。接口是 internal 的，而 MainWindow 是 public 的：
+    // 隐式实现要求这几个成员也是 public，于是 Mode 的类型 ViewMode 会被一起拖成 public
+    // （CS0053：属性类型比属性更不可访问）。显式实现把这几个成员留在 private，
+    // 「模式」这件事就仍然只在这个程序集里。代价是从窗口内部调要用私有那几个名字。
+    ViewMode IViewModeHost.Mode => _mode;
+
+    string IViewModeHost.ShowcaseTargetCaption =>
+        _turntable is { } turntable
+            ? $"{turntable.Current.Name}  {turntable.Index + 1}/{turntable.Count}"
+            : "—";
+
+    void IViewModeHost.ToggleMode() => ToggleMode();
+
+    void IViewModeHost.StepTarget(int step) => StepTarget(step);
+
+    // 模式切换是「把那两个模式各自要的零件装上去、把另一个的拆下来」。没有第三态，
+    // 所以一个 Toggle 就够，而它同时是侧边栏那个按钮和数字键 1/2 的唯一入口。
+    private void ToggleMode()
+    {
+        // 自检剧本跑着的时候不切。剧本里那几段断言是按自由视角的换算算出来的，
+        // 中途换了模式它们会全部对不上——而 Debug 下断言失败是直接杀进程，
+        // 于是现象会是「跑 --selftest 时点了一下侧边栏，程序没了」。这是有意拒绝，不是漏做。
+        if (_selfTest is not null)
+        {
+            Debug.WriteLine(
+                "[SAMPLE][mode] 自检剧本正在进行，拒绝切模式 " +
+                "note=切了之后剧本后面的步骤会全部对不上，而断言失败会直接杀进程");
+            return;
+        }
+
+        if (_mode == ViewMode.FreeLook)
+        {
+            EnterShowcase();
+        }
+        else
+        {
+            EnterFreeLook();
+        }
+    }
+
+    private void StepTarget(int step)
+    {
+        if (_turntable is not { } turntable)
+        {
+            // 自由视角下侧边栏那一组是隐藏的，所以这条正常打不出来；打出来说明显隐那一处漏了，
+            // 而那种情况下按钮点得下去、只是什么都不发生。
+            Debug.WriteLine($"[SAMPLE][showcase.step] 不在展台模式，忽略 step={step} mode={_mode}");
+            return;
+        }
+
+        Debug.WriteLine($"[SAMPLE][showcase.step] step={step} from={turntable.Index + 1}/{turntable.Count}");
+
+        if (step > 0)
+        {
+            turntable.Next();
+        }
+        else
+        {
+            turntable.Previous();
+        }
+    }
+
+    // 进自由视角。三个控制器重新装：它们的状态（按住的键、挂着的手势）在拆的时候就作废了，
+    // 而那是要的——Alt+Tab 走一圈回来，不该有一个还按着的 W 在推相机。
+    private void EnterFreeLook()
+    {
+        Debug.WriteLine($"[SAMPLE][mode] 切到自由视角 from={_mode} 装上 WASD / 指针转视角 / 滚轮");
+
+        _turntable?.Dispose();
+        _turntable = null;
+
+        // 手势先恢复成「指针一动就转」再装控制器：反过来的话，装上的那一瞬间
+        // 指针在窗口里、手势还是拖动的，第一下移动会落到展台那条路上——而那个模式已经拆了。
+        _input.Gesture = LookGesture.FollowPointer;
+
+        _mode = ViewMode.FreeLook;
+
+        _scroll = new ScrollZoomController(Viewport, _camera);
+        _look = new MouseLookController(Viewport, _camera);
+        _wasd = new WasdCameraController(Viewport, _camera);
+        _sidebar.SetMode(_mode);
+    }
+
+    // 进展台。三个都拆掉，一个都不留：位置不许动（WASD 要停）、朝向只由公转给
+    // （指针移动不能自己转，否则两种来源抢同一个 yaw）、滚轮由展台自己夹取
+    // （自由视角那份不夹，留着它推出去的远近就没有界）。留着任何一个的表现都是
+    // 「同一帧里相机被写了两遍」，而两处各自看着都对。
+    //
+    // internal 而不是 private：验收剧本走这一个入口。它绕开 ToggleMode 里那道闸门，
+    // 而那正是要的——那道闸门挡的是人手在剧本跑的时候点按钮。
+    internal void EnterShowcase()
+    {
+        Debug.WriteLine($"[SAMPLE][mode] 切到展台 from={_mode} 拆掉三个控制器 gesture=DragPrimaryButton");
+
+        _wasd?.Dispose();
+        _wasd = null;
+        _look?.Dispose();
+        _look = null;
+        _scroll?.Dispose();
+        _scroll = null;
+
+        // 展台靠按住左键拖，所以光标既不钉住也不藏起来：钉住之后拖到画面边上光标就不动了，
+        // 而「拖多远」正是这个模式唯一的输入。
+        _input.Gesture = LookGesture.DragPrimaryButton;
+
+        _mode = ViewMode.Showcase;
+
+        // 构造里就把相机摆到展台上（俯仰归 25 度、距离按目标尺寸反解），并把光环点起来，
+        // 所以这一行之后画面已经对了，不需要再来一次 SetCamera。
+        _turntable = new TurntableController(Viewport, _camera, ShowcaseTargets.All);
+        _sidebar.SetMode(_mode);
+    }
+
+    private void OnViewportKeyChanged(Key key, bool isDown)
+    {
+        if (!isDown)
+        {
+            return;
+        }
+
+        switch (key)
+        {
+            case Key.D1 or Key.NumPad1:
+                Debug.WriteLine("[SAMPLE][mode] 数字键 1 -> 自由视角");
+                if (_mode != ViewMode.FreeLook)
+                {
+                    ToggleMode();
+                }
+
+                break;
+
+            case Key.D2 or Key.NumPad2:
+                Debug.WriteLine("[SAMPLE][mode] 数字键 2 -> 展台");
+                if (_mode != ViewMode.Showcase)
+                {
+                    ToggleMode();
+                }
+
+                break;
+
+            // 左右键切页。只在展台模式里用得上（自由视角那边没有「当前目标」这回事），
+            // 而 WASD 用的是 WASD，两不打扰。
+            case Key.Left when _mode == ViewMode.Showcase:
+                StepTarget(-1);
+                break;
+
+            case Key.Right when _mode == ViewMode.Showcase:
+                StepTarget(+1);
+                break;
+        }
     }
 
 #if DEBUG
@@ -357,21 +525,28 @@ public partial class MainWindow : Window
         Debug.WriteLine(
             "[SAMPLE][window.deactivated] note=此时滚轮收不到属于预期，不是接线问题；" +
             "按键与看向手势一并作废，否则抬起与进出事件不会来");
-        _wasd.ReleaseKeys();
+        _wasd?.ReleaseKeys();
         _input.ReleaseLook();
+
+        // 展台那边也要收尾。它的「手势进行中」记在适配器里（上面那一行已经清了），
+        // 但速度是记在控制器里的：失活时不清的话，切回来第一帧会带着走之前那一下的速度开始转，
+        // 而那只手早就松开了。
+        _turntable?.ReleaseDrag();
     }
 
     private void OnClosed(object? sender, EventArgs e)
     {
-        Debug.WriteLine($"[SAMPLE][window.closed] client={ClientSize} scaling={RenderScaling}");
+        Debug.WriteLine($"[SAMPLE][window.closed] client={ClientSize} scaling={RenderScaling} mode={_mode}");
 
         // 先出验收结论再拆零件：拆完事件就不触发了，
         // 而验收要的正是「到这一刻为止，每个事件都至少走通过一次」。
         _selfTest?.Report();
         _sidebar.Dispose();
-        _wasd.Dispose();
-        _look.Dispose();
-        _scroll.Dispose();
+        Viewport.KeyChanged -= OnViewportKeyChanged;
+        _turntable?.Dispose();
+        _wasd?.Dispose();
+        _look?.Dispose();
+        _scroll?.Dispose();
         _input.Dispose();
     }
 }

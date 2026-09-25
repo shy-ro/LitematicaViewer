@@ -80,9 +80,61 @@ internal sealed partial class CameraModel
             $"[SAMPLE][camera.pan] 平移把距离改了 before={distanceBefore:F6} after={Distance:F6}");
     }
 
-    // 这两个动作本身不打桩：它们由连续输入驱动，逐次打会把终端冲掉（指针移动一秒几百条、
-    // 按住 W 时每帧一次），而「这一拖转了多少、这一段走了多远」这类汇总只有控制器知道
-    // 该怎么划段，由它们打。缩放是离散的（一格滚轮一次），所以它自己打。
+    // 展台：绕当前看着的那个点（派生的 Target）公转。
+    //
+    // 位置与朝向一起转：位置绕 Target 走、朝向跟着转，于是「相机始终看着 Target」这条不变式
+    // 由构造保证，而不是靠两处各自算对。只转朝向、位置不动是自由视角那一条；
+    // 位置绕 Target 转、朝向另外算一次就有两个权威，两者一旦不一致，模型会在画面里慢慢漂出中心——
+    // 而单看每一次拖动都是对的。
+    //
+    // 俯仰的两头由调用方给：模型只保证落在这两个数之间，再往外是全局的 ±MaxPitch。
+    // 区间是策略（展台要 0..60 度：0 平视、60 俯视），落在这儿而不是写成常量，
+    // 因为「能抬到多高」取决于展示的东西，不取决于相机怎么算。
+    internal void Orbit(float deltaYaw, float deltaPitch, float minPitch, float maxPitch)
+    {
+        Debug.Assert(
+            float.IsFinite(deltaYaw) && float.IsFinite(deltaPitch),
+            $"[SAMPLE][camera.orbit] 增量不是有限值 dyaw={deltaYaw} dpitch={deltaPitch}");
+        Debug.Assert(
+            minPitch < maxPitch && minPitch >= -CameraState.MaxPitch && maxPitch <= CameraState.MaxPitch,
+            $"[SAMPLE][camera.orbit] 俯仰区间不合法 min={minPitch} max={maxPitch} " +
+            $"maxpitch=±{CameraState.MaxPitch}");
+
+        Vector3 pivot = Target;
+        float radius = _zoomDistance;
+
+        float yaw = Wrap(_camera.Yaw + deltaYaw);
+        float pitch = Math.Clamp(_camera.Pitch + deltaPitch, minPitch, maxPitch);
+
+        // 方向走 ForwardOf，不在这里再写一套三角函数：yaw/pitch 到方向的换算只有那一份实现，
+        // 两套一旦分叉，公转的圆心和视图矩阵用的方向就不是同一个，画面上是模型慢慢偏出去。
+        Vector3 forward = CameraState.ForwardOf(yaw, pitch);
+
+        _camera = _camera with
+        {
+            Position = pivot - (forward * radius),
+            Yaw = yaw,
+            Pitch = pitch,
+        };
+
+        // 公转不改半径。
+        Debug.Assert(
+            MathF.Abs(Vector3.Distance(_camera.Position, pivot) - radius) < 1e-3f * radius,
+            $"[SAMPLE][camera.orbit] 公转改了半径 pivot=({pivot}) pos=({_camera.Position}) " +
+            $"radius={radius:F4} actual={Vector3.Distance(_camera.Position, pivot):F4}");
+
+        // 视线仍然指着圆心。这一条和上面那条一起把「绕着一个不是自己看着的点转」这种状态挡掉。
+        Vector3 toCamera = Vector3.Normalize(pivot - _camera.Position);
+        Debug.Assert(
+            Vector3.Dot(_camera.Forward, toCamera) > 0.999f,
+            $"[SAMPLE][camera.orbit] 公转之后视线不再指着圆心 pos=({_camera.Position}) " +
+            $"pivot=({pivot}) forward=({_camera.Forward})");
+    }
+
+    // 转视角、平移、公转这三个动作本身不打桩：它们由连续输入驱动，逐次打会把终端冲掉
+    // （指针移动一秒几百条、按住 W 时每帧一次、自转每帧一次），而「这一拖转了多少、
+    // 这一段走了多远、这一程绕了几度」这类汇总只有控制器知道该怎么划段，由它们打。
+    // 缩放是离散的（一格滚轮一次），所以它自己打。
 #if DEBUG
     private static void VerifyLookAndPan()
     {
@@ -162,6 +214,67 @@ internal sealed partial class CameraModel
             $"distance={lookDistance:F4}");
         Debug.WriteLine(
             $"[SAMPLE][camera.pan] 方向/水平面/刚体性/Target 派生全通过 distance={distance:F4}");
+
+        VerifyOrbit();
+    }
+
+    // 展台公转：半径不变、圆心不变、俯仰夹在给定区间、转一圈回到原处。
+    private static void VerifyOrbit()
+    {
+        ShowcaseTarget target = ShowcaseTargets.Demo;
+        float distance = target.Radius * 6.6f;
+
+        CameraModel camera = new(CameraState.Default, Vector3.Zero);
+        camera.FrameTurntable(target.Centre, 25f, distance);
+
+        // 1. 取景之后圆心就在目标上，半径就是给定的那个数。
+        Expect((camera.Target - target.Centre).Length(), 0f, 1e-4f, "取景后的 Target");
+        Expect(camera.Distance, distance, 1e-4f, "取景后的参考距离");
+        Expect(camera.Camera.Pitch, 25f, 1e-4f, "取景后的俯仰");
+
+        // 2. 公转一圈回到原处。一次转 360 度与转 360 次 1 度必须落在同一个点上——
+        //    不落在同一个点上有两种可能：yaw 的归零有偏差，或者位置是从别处算出来的。
+        CameraModel once = new(CameraState.Default, Vector3.Zero);
+        once.FrameTurntable(target.Centre, 25f, distance);
+        CameraModel stepped = new(CameraState.Default, Vector3.Zero);
+        stepped.FrameTurntable(target.Centre, 25f, distance);
+
+        once.Orbit(360f, 0f, 0f, 60f);
+        for (int i = 0; i < 360; i++)
+        {
+            stepped.Orbit(1f, 0f, 0f, 60f);
+        }
+
+        Expect((once.Camera.Position - stepped.Camera.Position).Length(), 0f, 1e-3f, "整圈与分步的位置");
+        Expect((once.Target - target.Centre).Length(), 0f, 1e-4f, "整圈之后的圆心");
+
+        // 3. 公转不改半径、圆心也钉在目标上——转四分之一圈之后再看一遍，
+        //    因为「绕着别的点转」在单次小角度下看不出来。
+        stepped.Orbit(90f, 12f, 0f, 60f);
+        Expect((stepped.Target - target.Centre).Length(), 0f, 1e-3f, "公转后的圆心");
+        Expect(stepped.Distance, distance, 1e-4f, "公转后的参考距离");
+        Expect(
+            Vector3.Distance(stepped.Camera.Position, target.Centre),
+            distance,
+            1e-3f,
+            "公转后相机到目标的距离");
+
+        // 4. 俯仰夹在给定区间里，两头都顶得住。
+        stepped.Orbit(0f, 500f, 0f, 60f);
+        Expect(stepped.Camera.Pitch, 60f, 1e-4f, "抬头到顶");
+        stepped.Orbit(0f, -500f, 0f, 60f);
+        Expect(stepped.Camera.Pitch, 0f, 1e-4f, "低头到底");
+
+        // 5. 顶到区间端点之后相机仍然落在圆心周围那个球面上（俯仰一夹，位置就得跟着重算）。
+        Expect(
+            Vector3.Distance(stepped.Camera.Position, target.Centre),
+            distance,
+            1e-3f,
+            "顶到俯仰边界后相机到目标的距离");
+
+        Debug.WriteLine(
+            $"[SAMPLE][camera.orbit] 半径/圆心/俯仰夹取/整圈闭合全通过 distance={distance:F4} " +
+            $"target={target.Name}");
     }
 #endif
 }

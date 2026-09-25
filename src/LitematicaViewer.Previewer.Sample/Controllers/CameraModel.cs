@@ -98,6 +98,42 @@ internal sealed partial class CameraModel
     // 这不是遗漏，是「谁来定参考距离」只有一个答案：构造函数那一次。
     internal void Reset(CameraState camera) => _camera = camera;
 
+    // 把相机摆成展台那一套：站在 target 的 pitch 方向上、与它相距 distance，并且**把参考距离
+    // 也设成它**。
+    //
+    // Reset 不动参考距离是有意的（姿态与缩放的尺度无关），展台反过来：那里参考距离就是公转半径，
+    // 必须是同一个数——不然滚轮推拉动的是「看着哪儿」，而公转绕着的是另一个点，
+    // 表现是「滚一下，模型从画面中心漂走」。
+    //
+    // 朝向（yaw）不动，因为「从哪个角度看」是进来之前就定好的，而俯仰由展台角给定。
+    // 位置不是「保持不动再把视线拧过去」——那样相机与目标的距离是随机的，
+    // 公转半径跟着随机；位置是由 (target, yaw, pitch, distance) 算出来的那一个点。
+    internal void FrameTurntable(Vector3 target, float pitch, float distance)
+    {
+        Debug.Assert(
+            float.IsFinite(distance) && distance > 0f,
+            $"[SAMPLE][camera.showcase] 展台距离不是正数 distance={distance}");
+
+        float clamped = Math.Clamp(pitch, -CameraState.MaxPitch, CameraState.MaxPitch);
+        Vector3 forward = CameraState.ForwardOf(_camera.Yaw, clamped);
+
+        _zoomDistance = distance;
+        _camera = _camera with
+        {
+            // 位置 = 目标 − 视线 × 距离：视线指着目标，于是从目标往回退一个距离就是相机该在的地方。
+            Position = target - (forward * distance),
+            Pitch = clamped,
+        };
+
+        // 这条断言就是「展台绕着的是模型中心」本身：Target 是派生量（位置 + 视线 × 距离），
+        // 上面那个位置是照着它反解出来的，所以它必然落在 target 上。真不落在上面，
+        // 只能是位置与参考距离被分成了两处算——而那正是要防的。
+        Debug.Assert(
+            (Target - target).Length() < 1e-3f * distance,
+            $"[SAMPLE][camera.showcase] 取景之后 Target 不在目标上 target=({target}) " +
+            $"actual=({Target}) distance={distance:F4}");
+    }
+
     internal void Zoom(float steps)
     {
         float current = Distance;

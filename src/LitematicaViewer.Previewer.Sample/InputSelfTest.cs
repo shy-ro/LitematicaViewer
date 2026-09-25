@@ -28,6 +28,10 @@ internal sealed class InputSelfTest
     private const double GrazingAt = 4.0;
     private const double RightButtonAt = 4.4;
 
+    // 展台放在最后。它是唯一会换模式的步骤，而前面那些步骤的期望值全是按自由视角算的——
+    // 放中间的话，后面每一步都会在一个换成展台的相机上验，红的理由和真正的故障分不开。
+    private const double ShowcaseAt = 4.8;
+
     // 每步按顺序编号，与 StepTimes 一一对应。
     private const int StepRotate = 0;
     private const int StepRotateBack = 1;
@@ -38,9 +42,39 @@ internal sealed class InputSelfTest
     private const int StepResize = 6;
     private const int StepGrazing = 7;
     private const int StepRightButton = 8;
+    private const int StepShowcase = 9;
 
     private static readonly double[] StepTimes =
-        [RotateAt, RotateBackAt, WheelAt, LookAroundAt, KeyDownAt, KeyUpAt, ResizeAt, GrazingAt, RightButtonAt];
+    [
+        RotateAt, RotateBackAt, WheelAt, LookAroundAt, KeyDownAt, KeyUpAt, ResizeAt, GrazingAt,
+        RightButtonAt, ShowcaseAt,
+    ];
+
+    // 展台那一段的后续几拍。做动作按 tick 排（差几帧），下结论按秒排（物理时间够不够走完）——
+    // 两件事要的单位不一样，用同一种都会在别的帧率上不成立。
+    private const int ShowcaseMoveTicks = 2;
+    private const int ShowcaseReleaseTicks = 4;
+    private const double ShowcaseInertiaSeconds = 0.35;
+    private const double ShowcaseSettleSeconds = 1.00;
+
+    // 甩的判据：松手之后又顺着那个方向转了多少度。手速是「一帧攒下的角度」估出来的，
+    // 一帧之内做完按下与抬起时它是 0，于是这一段会是 0 度——而 0 度就是「没有惯性」。
+    private const float InertiaMinDegrees = 1.0f;
+
+    // 自转的判据：惯性过去之后又往反方向转了多少度。逆时针是 yaw 减小，所以判的是负值。
+    private const float SpinMinDegrees = 1.5f;
+
+    // 那一段临时用的两个手感值。自转的时间尺度是秒，而验收窗口只有几秒：
+    // 用默认的 1.5 秒延时加 0.35 秒阻尼，那一整套要两秒半才走得完。
+    //
+    // 延时先调到 5 秒（等于「这一段先别有自转」），等惯性那一条验完再调到 0——
+    // 这样「甩」和「自转」各自都在一个干净的窗口里量，不会叠进同一个 yaw。
+    private const float ShowcaseSpinIdleDelayOff = 5f;
+    private const float ShowcaseDamping = 0.1f;
+
+    // 滚轮那两个方向各推多少档。推到底要十几档（一档 0.8 倍），而两头的界各自是几十倍的距离差。
+    private const int ZoomInSteps = 12;
+    private const int ZoomOutSteps = 24;
 
     // 掠射姿态：相机几乎贴着 +X 面的平面，x 只比面心出去 0.008，其余两个方向在几米开外。
     // 那一张面按判据确实朝向我们（0.508 > 0.5），但视线与它的法线夹着 89.9 度，
@@ -82,6 +116,12 @@ internal sealed class InputSelfTest
     private static readonly PointerPointProperties RightButtonHeld =
         new(RawInputModifiers.RightMouseButton, PointerUpdateKind.Other);
 
+    // 左键按着时的指针状态。展台那条路要的就是它：适配器靠这一栏判断「还按着没有」
+    // （抬起落在别处时没有事件可等）。所以合成的那几段移动必须如实带上左键。
+    private static readonly PointerPointProperties LeftButtonHeld =
+        new(RawInputModifiers.LeftMouseButton, PointerUpdateKind.Other);
+
+    private readonly MainWindow _host;
     private readonly Window _window;
     private readonly Previewer _previewer;
 
@@ -108,6 +148,24 @@ internal sealed class InputSelfTest
     private int _lookMoved;
     private int _lookEnded;
 
+    // 展台那一段。圆心与公转半径都是从进模式那一刻的相机反算出来的，不是从目标的表里抄的：
+    // 抄一份常量等于把「相机确实被摆到了展台上」这条要验的事跳过去。
+    private Vector3 _showcaseCentre;
+    private float _showcaseRadius;
+    private Point _showcasePoint;
+    private int _showcaseStartedBefore;
+    private int _showcaseEndedBefore;
+    private int _showcaseMoveTick;
+    private int _showcaseReleaseTick;
+    private double _showcaseInertiaAt;
+    private double _showcaseSettleAt;
+    private float _showcaseYawAtRelease;
+    private float _showcaseYawAtInertia;
+    private int _showcaseForeignBaseline;
+    private float _spinIdleDelayBefore;
+    private float _spinDampingBefore;
+    private bool _showcaseChecked;
+
     // 滚轮前后的距离。前面那个由剧本记下，后面那个从模型读回来对——中间隔着一整个控制器。
     private float _distanceBeforeZoom;
     private float _expectedDistanceAfterZoom;
@@ -133,9 +191,10 @@ internal sealed class InputSelfTest
     // 剧本在最后调它的 ReleaseLook()，与宿主在窗口失活时调的是同一个口子。
     private readonly PreviewerInputAdapter _input;
 
-    internal InputSelfTest(Window window, Previewer previewer, CameraModel camera, PreviewerInputAdapter input)
+    internal InputSelfTest(MainWindow host, Previewer previewer, CameraModel camera, PreviewerInputAdapter input)
     {
-        _window = window;
+        _host = host;
+        _window = host;
         _previewer = previewer;
         _camera = camera;
         _input = input;
@@ -217,8 +276,14 @@ internal sealed class InputSelfTest
             _cameraSets == 3,
             $"[SAMPLE][selftest] 剧本摆视角的次数不对 cameraSets={_cameraSets} expected=3");
 
+        Debug.Assert(
+            _showcaseChecked,
+            $"[SAMPLE][selftest] 展台那一段没走完 note=窗口开得太短，最后一步还没轮到就关了 " +
+            $"ticks={_ticks} elapsed={_elapsed:F2}s");
+
         Debug.WriteLine(
-            "[SAMPLE][selftest.summary] 四个事件都至少走通一次，滚轮/转视角/走动各自经由控制器改了相机");
+            "[SAMPLE][selftest.summary] 四个事件都至少走通一次，滚轮/转视角/走动各自经由控制器改了相机；" +
+            "展台那一段验了换模式、按住左键拖动、松手之后的逆时针自转");
     }
 
     private void OnTick(double delta)
@@ -240,6 +305,12 @@ internal sealed class InputSelfTest
         {
             _idleCheckAt = 0;
             CheckIdle();
+        }
+
+        if (_showcaseMoveTick != 0 || _showcaseReleaseTick != 0
+            || _showcaseInertiaAt != 0d || _showcaseSettleAt != 0d)
+        {
+            AdvanceShowcase();
         }
     }
 
@@ -329,6 +400,10 @@ internal sealed class InputSelfTest
 
             case StepRightButton:
                 RightButtonSuspend();
+                break;
+
+            case StepShowcase:
+                Showcase();
                 break;
 
             default:
@@ -450,7 +525,7 @@ internal sealed class InputSelfTest
         int movedBefore = _lookMoved;
         CameraState before = _camera.Camera;
 
-        RaisePointerPressed();
+        RaisePointerPressed(MouseButton.Right, new Point(LookStartX, LookStartY));
 
         // 按住期间连发几段移动：一段就够验「没起手势」，多发几段是为了连「手势起了又立刻收」
         // 这种半吊子实现一起挡住。移动事件里必须如实带上右键——适配器会拿这一栏判断挂起该不该继续。
@@ -470,7 +545,7 @@ internal sealed class InputSelfTest
             $"[SAMPLE][selftest.right] 按住右键期间相机被改了 yaw={_camera.Camera.Yaw:F3} " +
             $"pitch={_camera.Camera.Pitch:F3} expected=yaw={before.Yaw:F3} pitch={before.Pitch:F3}");
 
-        RaisePointerReleased();
+        RaisePointerReleased(MouseButton.Right);
 
         // 抬起之后要两段移动才看得到角度：第一段起手势（不产生增量），第二段才真的转。
         // 只发一段的话，「抬起时忘了复位」和「复位了」在角度上完全一样——
@@ -499,7 +574,7 @@ internal sealed class InputSelfTest
         // 这不是假想：右键按住之后可以把光标拖到侧边栏上再松开，那一下抬起落在侧边栏上，
         // 而侧边栏不是控件的祖先，事件不会回来。标志会一直挂着，症状是回来之后鼠标怎么动都不转。
         // 适配器因此不看那个事件，而看移动事件里报的按键状态——这一步钉的就是那条判断。
-        RaisePointerPressed();
+        RaisePointerPressed(MouseButton.Right, new Point(LookStartX, LookStartY));
 
         position += new Avalonia.Vector(LookStepX, LookStepY);
         RaisePointerMoved(position, RightButtonHeld);
@@ -526,6 +601,287 @@ internal sealed class InputSelfTest
             "抬起事件缺失时第一段增量的 yaw");
 
         _input.ReleaseLook();
+    }
+    // 展台那一段：换模式 -> 拖 -> 甩 -> 自转 -> 滚轮。
+    //
+    // 几条只有这里能验的：换过去之后自由视角那三个控制器真的拆掉了（合成一段不带按键的移动，
+    // 相机必须一动不动）、按住左键拖是真的在绕圆心公转（半径与视线方向都不许变）、
+    // 松手之后带着惯性继续转、惯性过去之后逆时针自转、滚轮推到底也进不去模型里面。
+    // 自由视角下前几条正好相反，所以一步都不能提前。
+    //
+    // 拖动必须跨帧，这是这个段落里唯一不显然的地方：控制器估手速的唯一材料是「一帧里攒下的角度」，
+    // 而那是 Tick 给的。一帧之内把按下-移动-抬起全做完的话，那个估计永远是 0——
+    // 甩出去的初速度是 0，而画面上看起来和「甩了但很轻」一模一样。
+    // 所以按下与第一段移动在这一步里做（顺带把公转那几条不变量就地验掉），
+    // 后面那段移动与抬起排到后面几帧（见 AdvanceShowcase）。
+    //
+    // 光环那一条不在这里，它由画面校验在展台模式下自己认像素（DebugCube 里的 pedestalPixels）——
+    // 而换模式这一行正是让那条断言第一次有机会跑起来的东西。
+    private void Showcase()
+    {
+        _host.EnterShowcase();
+
+        // 圆心与半径从进模式那一刻的相机反算，而不是从目标的表里抄：抄常量的话，
+        // 「相机被摆到了展台上」这条要验的事就被跳过去了。
+        CameraState entered = _camera.Camera;
+        _showcaseCentre = entered.Position + (entered.Forward * _camera.Distance);
+        _showcaseRadius = _camera.Distance;
+
+        // 俯仰归 25 度是切模式时约定的动作之一：不归的话从自由视角切过来会带着上一个姿态，
+        // 而「展台」这个模式的画面本来就该是固定的那一个。
+        Expect(entered.Pitch, TurntableController.DefaultPitch, 1e-4f, "进展台时的俯仰");
+
+        Debug.WriteLine(
+            $"[SAMPLE][selftest.showcase] 进模式 centre=({_showcaseCentre}) radius={_showcaseRadius:F4} " +
+            $"pitch={entered.Pitch:F2} yaw={entered.Yaw:F2}");
+
+        // 这一段先把自转关掉（延时调到 5 秒）。理由有两层：
+        // 甩的判据是「松手之后 yaw 还往那个方向走」——自转一起来就会叠进同一个 yaw 里，
+        // 「惯性」和「自转」在数值上分不开；而把延时改到 0 再验自转，顺带还验了
+        // 控制器是每帧重新读这个属性的（在构造时缓存下来的话，后面那一步不会动）。
+        _spinIdleDelayBefore = _previewer.SpinIdleDelay;
+        _spinDampingBefore = _previewer.SpinDamping;
+        _previewer.SpinIdleDelay = ShowcaseSpinIdleDelayOff;
+        _previewer.SpinDamping = ShowcaseDamping;
+
+        // 第一件：不带按键的移动在展台里必须什么都不做。自由视角下同一段移动是「指针一动就转」，
+        // 所以这一条同时钉着「手势换过去了」——没换的话下面那几个数会立刻不对。
+        int movedBefore = _lookMoved;
+        CameraState beforeMove = _camera.Camera;
+        _showcasePoint = new Point(LookStartX, LookStartY);
+        RaisePointerMoved(_showcasePoint);
+        _showcasePoint += new Avalonia.Vector(LookStepX, LookStepY);
+        RaisePointerMoved(_showcasePoint);
+
+        Debug.Assert(
+            _lookMoved == movedBefore,
+            $"[SAMPLE][selftest.showcase] 展台里不带按键的移动转视角了 moved=+{_lookMoved - movedBefore} " +
+            "expected=+0 note=手势没换成「按住左键拖」");
+        Debug.Assert(
+            _camera.Camera == beforeMove,
+            $"[SAMPLE][selftest.showcase] 展台里不带按键的移动改了相机 yaw={_camera.Camera.Yaw:F3} " +
+            $"expected=yaw={beforeMove.Yaw:F3}");
+
+        // 第二件：按住左键拖。参照点在按下那一刻就定下了（BeginDrag 记的就是按下的位置），
+        // 所以按下之后的第一段移动就有增量——与自由视角那边不同，那边第一段只定参照。
+        float sensitivity = _previewer.DragSensitivity;
+        _showcaseStartedBefore = _lookStarted;
+        _showcaseEndedBefore = _lookEnded;
+
+        RaisePointerPressed(MouseButton.Left, _showcasePoint);
+        Debug.Assert(
+            _lookStarted == _showcaseStartedBefore + 1,
+            $"[SAMPLE][selftest.showcase] 按住左键没有起手势 started=+{_lookStarted - _showcaseStartedBefore} " +
+            "expected=+1");
+
+        _showcasePoint += new Avalonia.Vector(LookStepX, LookStepY);
+        RaisePointerMoved(_showcasePoint, LeftButtonHeld);
+
+        Expect(
+            YawDelta(beforeMove.Yaw, _camera.Camera.Yaw),
+            (float)LookStepX * sensitivity,
+            0.05f,
+            "展台拖动一段的 yaw（往右拖是相机往右绕）");
+        Expect(
+            _camera.Camera.Pitch - beforeMove.Pitch,
+            (float)LookStepY * sensitivity,
+            0.05f,
+            "展台拖动的 pitch（往下拖是抬高相机）");
+
+        // 公转的两条不变量：半径不变、视线始终对着圆心。位置本身当然变了（它绕着圆心走了一个弧），
+        // 所以能验的不是「位置没动」而是「它还在那个球面上」。
+        CameraState dragged = _camera.Camera;
+        Expect((dragged.Position - _showcaseCentre).Length(), _showcaseRadius, _showcaseRadius * 1e-3f, "展台拖动后的公转半径");
+        Expect(_camera.Distance, _showcaseRadius, 1e-3f, "展台拖动后的参考距离");
+        Expect(
+            Vector3.Dot(dragged.Forward, Vector3.Normalize(_showcaseCentre - dragged.Position)),
+            1f,
+            1e-3f,
+            "展台拖动后视线是否仍指向圆心");
+
+        // 俯仰有界：正的是俯视、负的是仰视。这一段拖了 +6 度（在界内），所以这里验的是区间本身
+        // 没被写反——写反成 [-60,0] 的话上面那条 alignment 立刻不对。
+        Debug.Assert(
+            dragged.Pitch >= TurntableController.MinPitch - 1e-3f
+            && dragged.Pitch <= TurntableController.MaxPitch + 1e-3f,
+            $"[SAMPLE][selftest.showcase] 展台的俯仰跑出区间 pitch={dragged.Pitch:F3} " +
+            $"range=[{TurntableController.MinPitch},{TurntableController.MaxPitch}]");
+
+        Debug.WriteLine(
+            $"[SAMPLE][selftest.showcase] 拖动一段 yaw={_camera.Camera.Yaw:F3} pitch={_camera.Camera.Pitch:F3} " +
+            $"distance={_camera.Distance:F4} 半径与看向圆心两条不变量都保持");
+
+        // 剩下的移动与抬起排到后面几帧去（帧数按 tick 算，时间按秒算，见 AdvanceShowcase）。
+        _showcaseMoveTick = _ticks + ShowcaseMoveTicks;
+        _showcaseReleaseTick = _ticks + ShowcaseReleaseTicks;
+    }
+
+    // 展台那一段的后续几拍。按 tick 排「第几帧做」，按秒排「多久之后下结论」：
+    // 前者要的是「落在不同的帧上」（一帧里做完就没有手速可言），后者要的是「物理时间够走完」
+    // ——两者用同一种单位都不对，帧率一变其中一个就不成立。
+    private void AdvanceShowcase()
+    {
+        if (_showcaseMoveTick != 0 && _ticks >= _showcaseMoveTick)
+        {
+            _showcaseMoveTick = 0;
+            _showcasePoint += new Avalonia.Vector(LookStepX, LookStepY);
+            RaisePointerMoved(_showcasePoint, LeftButtonHeld);
+        }
+
+        if (_showcaseReleaseTick != 0 && _ticks >= _showcaseReleaseTick)
+        {
+            _showcaseReleaseTick = 0;
+
+            RaisePointerReleased(MouseButton.Left);
+            Debug.Assert(
+                _lookEnded == _showcaseEndedBefore + 1,
+                $"[SAMPLE][selftest.showcase] 松开左键没有收手势 ended=+{_lookEnded - _showcaseEndedBefore} expected=+1");
+
+            _showcaseYawAtRelease = _camera.Camera.Yaw;
+
+            // 顺手按住 W：展台里 WASD 必须整个失效。它要是还接着，相机就会被推离那个球面，
+            // 而下面那两条不变量正是拿那个球面量的。
+            RaiseKey(MoveKey, down: true);
+            _showcaseForeignBaseline = ForeignInputCount();
+
+            _showcaseInertiaAt = _elapsed + ShowcaseInertiaSeconds;
+
+            Debug.WriteLine(
+                $"[SAMPLE][selftest.showcase] 松手 yaw={_showcaseYawAtRelease:F3} " +
+                $"{ShowcaseInertiaSeconds}s 之后看惯性，再 {ShowcaseSettleSeconds}s 之后看自转");
+        }
+
+        if (_showcaseInertiaAt != 0 && _elapsed >= _showcaseInertiaAt)
+        {
+            _showcaseInertiaAt = 0;
+            CheckInertia();
+        }
+
+        if (_showcaseSettleAt != 0 && _elapsed >= _showcaseSettleAt)
+        {
+            _showcaseSettleAt = 0;
+            CheckShowcase();
+        }
+    }
+
+    // 松手之后那一下：yaw 还应该顺着手的那个方向走一段。这就是「甩」。
+    //
+    // 判据只用 yaw 的增量，不用别的：这一段时间里自转是关着的（延时 5 秒），
+    // 也没有别的输入，所以这一段 yaw 只可能来自惯性。往右拖是 yaw 增大，惯性也就该是正的。
+    private void CheckInertia()
+    {
+        _showcaseYawAtInertia = _camera.Camera.Yaw;
+        float carried = YawDelta(_showcaseYawAtRelease, _showcaseYawAtInertia);
+
+        Debug.Assert(
+            carried > InertiaMinDegrees,
+            $"[SAMPLE][selftest.showcase] 松手之后没有惯性 carried={carried:F3} 度 " +
+            $"expected>{InertiaMinDegrees} note=手速是在 Tick 里按「一帧攒了多少角度」估的，" +
+            "按下与抬起落在同一帧里的话那个估计永远是零");
+
+        // 到这里才把自转放出来。改的是控件属性，而控制器每帧重新读它——
+        // 在构造时缓存下来的话这一步会原地不动，而那正是「松手之后画面就死了」这个 bug 的样子。
+        _previewer.SpinIdleDelay = 0f;
+        _showcaseSettleAt = _elapsed + ShowcaseSettleSeconds;
+
+        Debug.WriteLine(
+            $"[SAMPLE][selftest.showcase] 松手之后又转了 {carried:F3} 度（同向），" +
+            $"现在把自转延时改到 0，{ShowcaseSettleSeconds}s 之后看方向");
+    }
+
+    // 自转与滚轮。两条都是「展台」这个模式的要求，而且都只有这里能验。
+    private void CheckShowcase()
+    {
+        _showcaseChecked = true;
+
+        _previewer.SpinIdleDelay = _spinIdleDelayBefore;
+        _previewer.SpinDamping = _spinDampingBefore;
+        RaiseKey(MoveKey, down: false);
+
+        int interference = ForeignInputCount() - _showcaseForeignBaseline;
+        if (interference != 0)
+        {
+            Debug.WriteLine(
+                $"[SAMPLE][selftest.showcase] 跳过结论 note=这一段里外部输入插了 {interference} 条，" +
+                "自转的方向和位移都混着别人的");
+            return;
+        }
+
+        CameraState now = _camera.Camera;
+
+        // 逆时针 = yaw 减小：yaw=0 看向 +Z，yaw=90 看向 −X，俯视图里 +X 在右 +Z 在下，
+        // 所以 yaw 增大在画面上是顺时针。要让模型看着逆时针，相机就得逆时针，也就是 yaw 减小。
+        float turned = YawDelta(_showcaseYawAtInertia, now.Yaw);
+        Debug.Assert(
+            turned < -SpinMinDegrees,
+            $"[SAMPLE][selftest.showcase] 惯性过去之后不是逆时针转 yawDelta={turned:F3} " +
+            $"expected<-{SpinMinDegrees} from={_showcaseYawAtInertia:F3} to={now.Yaw:F3} " +
+            "note=延时到了之后速度的衰减目标换成自转速度，而自转速度是负的（yaw 减小）");
+
+        // 只转不移动：相机还在那个球面上、还看着圆心。这两条同时钉住「WASD 拆掉了」——
+        // 上一步按住的 W 要是有人响应，位移就是几十帧 × 5 方块/秒这个量级，半径立刻不对。
+        Expect((now.Position - _showcaseCentre).Length(), _showcaseRadius, _showcaseRadius * 1e-3f, "自转后的公转半径");
+        Expect(_camera.Distance, _showcaseRadius, 1e-3f, "自转后的参考距离");
+        Expect(
+            Vector3.Dot(now.Forward, Vector3.Normalize(_showcaseCentre - now.Position)),
+            1f,
+            1e-3f,
+            "自转后视线是否仍指向圆心");
+
+        Debug.WriteLine(
+            $"[SAMPLE][selftest.showcase] 惯性之后转了 {turned:F3} 度（负数是逆时针），" +
+            $"半径 {_showcaseRadius:F4} 与看向圆心两条不变量都保持；按住的 W 没有动过相机");
+
+        CheckShowcaseZoom();
+    }
+
+    // 滚轮：只许缩放，不许把相机推进模型里面——这是展台「只允许缩放大小」那句话的落点。
+    // 两头的界都是「目标的水平半对角线 × 一个因子」，所以期望值是算出来的而不是抄的；
+    // 手感值改了，这里跟着改，不需要人来对数字。
+    private void CheckShowcaseZoom()
+    {
+        ShowcaseTarget target = ShowcaseTargets.Demo;
+
+        for (int i = 0; i < ZoomInSteps; i++)
+        {
+            RaiseWheel(WheelIn);
+        }
+
+        Expect(
+            _camera.Distance,
+            target.Radius * TurntableController.MinZoomFactor,
+            1e-3f,
+            "展台推到底之后的距离");
+
+        // 这条才是「穿不过去」本身：距离被夹住还不够，因为圆心到相机的距离才是位置。
+        // 判据用「目标的外接圆」而不是更小的数：光环按设计就落在它外面，相机不该跑到模型那一侧去。
+        float toCentre = (_camera.Camera.Position - _showcaseCentre).Length();
+        Debug.Assert(
+            toCentre > target.Radius,
+            $"[SAMPLE][selftest.showcase] 展台推到底之后相机进到目标里面了 " +
+            $"|pos-centre|={toCentre:F4} radius={target.Radius:F4} distance={_camera.Distance:F4}");
+
+        Expect(
+            Vector3.Dot(_camera.Camera.Forward, Vector3.Normalize(_showcaseCentre - _camera.Camera.Position)),
+            1f,
+            1e-3f,
+            "推到底之后视线是否仍指向圆心");
+
+        for (int i = 0; i < ZoomOutSteps; i++)
+        {
+            RaiseWheel(WheelOut);
+        }
+
+        Expect(
+            _camera.Distance,
+            target.Radius * TurntableController.MaxZoomFactor,
+            1e-3f,
+            "展台推到头之后的距离");
+
+        Debug.WriteLine(
+            $"[SAMPLE][selftest.showcase] 滚轮 {ZoomInSteps} 档推到底 distance={target.Radius * TurntableController.MinZoomFactor:F4}、" +
+            $"{ZoomOutSteps} 档推到头 distance={target.Radius * TurntableController.MaxZoomFactor:F4}，" +
+            $"两头都夹住了，相机始终在目标外接圆之外（{target.Radius:F4}）");
     }
 
     // 两次 yaw 之间的真实增量。
@@ -769,32 +1125,44 @@ internal sealed class InputSelfTest
         _previewer.RaiseEvent(args);
     }
 
-    // 合成右键按下。走真实的路由事件，所以「适配器认不认得出右键」也在被验的范围里——
+    // 合成按下。走真实的路由事件，所以「适配器认不认得出是哪个键」也在被验的范围里——
     // 直接调它内部的方法就把那一层跳过去了，而那一层正是这一步要验的东西。
     //
     // 按键状态同时写进两栏（修饰位和 PointerUpdateKind）：适配器读的是哪一栏由它的实现决定，
     // 而合成的这一份必须与真实鼠标产生的那一份一样。只填一栏的话，
     // 「适配器读错了那一栏」这个 bug 会被剧本放过去，真机上才暴露。
-    private void RaisePointerPressed()
+    //
+    // 位置是参数而不是恒为 (0,0)：展台那条路把**按下那一点**记成参照点
+    // （自由视角那边记的是第一段移动的位置），于是按在原点再移到 380,300 会被算成
+    // 一段 380×300 的拖动，而那只手其实一动没动。
+    private void RaisePointerPressed(MouseButton button, Point position)
     {
         _ownInputEvents++;
+
+        bool left = button == MouseButton.Left;
 
         PointerPressedEventArgs args = new(
             _previewer,
             TestPointer,
             _previewer,
-            default,
+            position,
             0UL,
-            new PointerPointProperties(RawInputModifiers.RightMouseButton, PointerUpdateKind.RightButtonPressed),
+            new PointerPointProperties(
+                left ? RawInputModifiers.LeftMouseButton : RawInputModifiers.RightMouseButton,
+                left ? PointerUpdateKind.LeftButtonPressed : PointerUpdateKind.RightButtonPressed),
             KeyModifiers.None,
             clickCount: 1);
 
         _previewer.RaiseEvent(args);
     }
 
-    private void RaisePointerReleased()
+    // 抬起那一份的修饰位是「一个键都没按」：真实事件里修饰位报的是**此刻**的按键状态，
+    // 而抬起的那一瞬间已经没有键按着了。适配器在抬起这条路上读的是 PointerUpdateKind。
+    private void RaisePointerReleased(MouseButton button)
     {
         _ownInputEvents++;
+
+        bool left = button == MouseButton.Left;
 
         PointerReleasedEventArgs args = new(
             _previewer,
@@ -802,9 +1170,11 @@ internal sealed class InputSelfTest
             _previewer,
             default,
             0UL,
-            new PointerPointProperties(RawInputModifiers.None, PointerUpdateKind.RightButtonReleased),
+            new PointerPointProperties(
+                RawInputModifiers.None,
+                left ? PointerUpdateKind.LeftButtonReleased : PointerUpdateKind.RightButtonReleased),
             KeyModifiers.None,
-            MouseButton.Right);
+            button);
 
         _previewer.RaiseEvent(args);
     }

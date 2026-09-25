@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Numerics;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
+using Avalonia.Interactivity;
 
 namespace LitematicaViewer.Previewer.Sample;
 
@@ -16,12 +17,27 @@ internal sealed class Sidebar : IDisposable
 {
     private const double StatsIntervalSeconds = 0.25;
 
+    private readonly IViewModeHost _host;
     private readonly Previewer _previewer;
     private readonly CameraModel _camera;
+    private readonly StackPanel _freeLookGroup;
+    private readonly StackPanel _showcaseGroup;
+    private readonly Button _modeButton;
+    private readonly Button _previousTarget;
+    private readonly Button _nextTarget;
     private readonly Slider _moveSpeed;
     private readonly Slider _lookSensitivity;
+    private readonly Slider _dragSensitivity;
+    private readonly Slider _spinDamping;
+    private readonly Slider _spinIdleDelay;
+    private readonly Slider _spinIdleSpeed;
     private readonly TextBlock _moveSpeedText;
     private readonly TextBlock _lookSensitivityText;
+    private readonly TextBlock _showcaseTargetText;
+    private readonly TextBlock _dragSensitivityText;
+    private readonly TextBlock _spinDampingText;
+    private readonly TextBlock _spinIdleDelayText;
+    private readonly TextBlock _spinIdleSpeedText;
     private readonly TextBlock _fpsText;
     private readonly TextBlock _viewportText;
     private readonly TextBlock _positionText;
@@ -33,19 +49,35 @@ internal sealed class Sidebar : IDisposable
     private int _windowFrames;
     private long _totalFrames;
     private int _statsLogs;
+    private int _modeLogs;
     private bool _disposed;
 
     // 控件用名字找，不走一长串构造参数：十来个控件的参数表没有任何一个调用点读得懂，
     // 而名字写错在 Debug 下会当场断言炸掉，比「某一行永远是空的」好查。
-    internal Sidebar(Window window, Previewer previewer, CameraModel camera)
+    internal Sidebar(IViewModeHost host, Window window, Previewer previewer, CameraModel camera)
     {
+        _host = host;
         _previewer = previewer;
         _camera = camera;
 
+        _freeLookGroup = Required<StackPanel>(window, "FreeLookGroup");
+        _showcaseGroup = Required<StackPanel>(window, "ShowcaseGroup");
+        _modeButton = Required<Button>(window, "ModeButton");
+        _previousTarget = Required<Button>(window, "PreviousTargetButton");
+        _nextTarget = Required<Button>(window, "NextTargetButton");
         _moveSpeed = Required<Slider>(window, "MoveSpeedSlider");
         _lookSensitivity = Required<Slider>(window, "LookSensitivitySlider");
+        _dragSensitivity = Required<Slider>(window, "DragSensitivitySlider");
+        _spinDamping = Required<Slider>(window, "SpinDampingSlider");
+        _spinIdleDelay = Required<Slider>(window, "SpinIdleDelaySlider");
+        _spinIdleSpeed = Required<Slider>(window, "SpinIdleSpeedSlider");
         _moveSpeedText = Required<TextBlock>(window, "MoveSpeedText");
         _lookSensitivityText = Required<TextBlock>(window, "LookSensitivityText");
+        _showcaseTargetText = Required<TextBlock>(window, "ShowcaseTargetText");
+        _dragSensitivityText = Required<TextBlock>(window, "DragSensitivityText");
+        _spinDampingText = Required<TextBlock>(window, "SpinDampingText");
+        _spinIdleDelayText = Required<TextBlock>(window, "SpinIdleDelayText");
+        _spinIdleSpeedText = Required<TextBlock>(window, "SpinIdleSpeedText");
         _fpsText = Required<TextBlock>(window, "FpsText");
         _viewportText = Required<TextBlock>(window, "ViewportText");
         _positionText = Required<TextBlock>(window, "PositionText");
@@ -62,18 +94,74 @@ internal sealed class Sidebar : IDisposable
         // 光读那一行 XAML 看不出「拖了之后值到底写没写进控件」，而这里要的只有那一件事。
         _moveSpeed.ValueChanged += OnMoveSpeedChanged;
         _lookSensitivity.ValueChanged += OnLookSensitivityChanged;
+        _dragSensitivity.ValueChanged += OnDragSensitivityChanged;
+        _spinDamping.ValueChanged += OnSpinDampingChanged;
+        _spinIdleDelay.ValueChanged += OnSpinIdleDelayChanged;
+        _spinIdleSpeed.ValueChanged += OnSpinIdleSpeedChanged;
+
+        // 按钮的 Click 与滑块的 ValueChanged 不是一回事：Click 是「这一次按下被认成了一次点击」，
+        // 由模板里的按钮部分在抬起时判出来。接线断了的话表现是「按了没反应」，
+        // 而下面那一条日志是它唯一的证据（按下本身有 sidebar.focus 那一行，所以分得开）。
+        _modeButton.Click += OnModeButtonClick;
+        _previousTarget.Click += OnPreviousTargetClick;
+        _nextTarget.Click += OnNextTargetClick;
 
         // 初值从控件属性取，不在 XAML 里再写一份：属性是权威，写两份就有两个默认值，
         // 而它们分叉时「程序里用的是哪个」从界面上看不出来。
         //
         // 滑块会把 Value 夹进自己的区间：区间盖不住属性值时夹取的结果会被回写进属性，
         // 那是一次静默的改值（XAML 里写 20 而区间到 8，实际生效的是 8）。
-        // 所以两侧的默认值都落在区间内（1.5 ∈ [0.1,8]、0.10 ∈ [0.01,0.6]），
-        // 而真有越界时那两行日志记着改成了多少。
+        // 所以两侧的默认值都落在区间内（5 ∈ [0.1,8]、0.10 ∈ [0.01,0.6]、0.20 ∈ [0.05,0.8]、
+        // 0.35 ∈ [0.05,1.5]、1.5 ∈ [0,5]、8 ∈ [0,30]），而真有越界时那几行日志记着改成了多少。
         _moveSpeed.Value = _previewer.MoveSpeed;
         _lookSensitivity.Value = _previewer.LookSensitivity;
+        _dragSensitivity.Value = _previewer.DragSensitivity;
+        _spinDamping.Value = _previewer.SpinDamping;
+        _spinIdleDelay.Value = _previewer.SpinIdleDelay;
+        _spinIdleSpeed.Value = _previewer.SpinIdleSpeed;
+
+        // 初值推完再摆显隐。反过来的话，那几行「滑块真的接上了」会写在一个还没显示出来的组里，
+        // 拖起来才发现区间不对时，日志上看不出是初值推错了还是根本没推。
+        SetMode(_host.Mode);
 
         _previewer.Tick += OnTick;
+    }
+
+    // 按模式整块显隐。写在侧边栏里而不是宿主的 XAML 里：模式一变这两块要一起动，
+    // 分成两处的话「切了模式但侧边栏没跟上」是一类只看得见一部分的症状。
+    internal void SetMode(ViewMode mode)
+    {
+        bool showcase = mode == ViewMode.Showcase;
+
+        // 赋值前先比一次：TextBlock / Button 的 Content 重复赋值会走一遍属性相等性比较，
+        // 而 IsVisible 同样会向下传播一次失效——切一次模式而已，只有真的变了才写。
+        if (_freeLookGroup.IsVisible == showcase)
+        {
+            _freeLookGroup.IsVisible = !showcase;
+        }
+
+        if (_showcaseGroup.IsVisible != showcase)
+        {
+            _showcaseGroup.IsVisible = showcase;
+        }
+
+        string caption = showcase
+            ? "模式：展台（点这里或按 1 切回自由视角）"
+            : "模式：自由视角（点这里或按 2 切展台）";
+
+        if (!string.Equals(_modeButton.Content as string, caption, StringComparison.Ordinal))
+        {
+            _modeButton.Content = caption;
+        }
+
+        // 只打前两次：这条要回答的是「切换这条链走到了侧边栏」，
+        // 一次就够，而后面的每一次都会和上面那两行成对出现，多打只是噪声。
+        if (_modeLogs++ < 2)
+        {
+            Debug.WriteLine(
+                $"[SAMPLE][sidebar.mode] mode={mode} freeLookGroup={_freeLookGroup.IsVisible} " +
+                $"showcaseGroup={_showcaseGroup.IsVisible} note=只打前两次");
+        }
     }
 
     public void Dispose()
@@ -87,6 +175,13 @@ internal sealed class Sidebar : IDisposable
         _previewer.Tick -= OnTick;
         _moveSpeed.ValueChanged -= OnMoveSpeedChanged;
         _lookSensitivity.ValueChanged -= OnLookSensitivityChanged;
+        _dragSensitivity.ValueChanged -= OnDragSensitivityChanged;
+        _spinDamping.ValueChanged -= OnSpinDampingChanged;
+        _spinIdleDelay.ValueChanged -= OnSpinIdleDelayChanged;
+        _spinIdleSpeed.ValueChanged -= OnSpinIdleSpeedChanged;
+        _modeButton.Click -= OnModeButtonClick;
+        _previousTarget.Click -= OnPreviousTargetClick;
+        _nextTarget.Click -= OnNextTargetClick;
     }
 
     private static T Required<T>(Window window, string name)
@@ -112,6 +207,43 @@ internal sealed class Sidebar : IDisposable
         _previewer.LookSensitivity = (float)e.NewValue;
         Debug.WriteLine($"[SAMPLE][sidebar.look] lookSensitivity={_previewer.LookSensitivity}");
     }
+
+    private void OnDragSensitivityChanged(object? sender, RangeBaseValueChangedEventArgs e)
+    {
+        _previewer.DragSensitivity = (float)e.NewValue;
+        Debug.WriteLine($"[SAMPLE][sidebar.drag] dragSensitivity={_previewer.DragSensitivity}");
+    }
+
+    private void OnSpinDampingChanged(object? sender, RangeBaseValueChangedEventArgs e)
+    {
+        _previewer.SpinDamping = (float)e.NewValue;
+        Debug.WriteLine($"[SAMPLE][sidebar.spin] spinDamping={_previewer.SpinDamping}");
+    }
+
+    private void OnSpinIdleDelayChanged(object? sender, RangeBaseValueChangedEventArgs e)
+    {
+        _previewer.SpinIdleDelay = (float)e.NewValue;
+        Debug.WriteLine($"[SAMPLE][sidebar.spin] spinIdleDelay={_previewer.SpinIdleDelay}");
+    }
+
+    private void OnSpinIdleSpeedChanged(object? sender, RangeBaseValueChangedEventArgs e)
+    {
+        _previewer.SpinIdleSpeed = (float)e.NewValue;
+        Debug.WriteLine($"[SAMPLE][sidebar.spin] spinIdleSpeed={_previewer.SpinIdleSpeed}");
+    }
+
+    // 模式按钮不是「切到展台」而是「切一下」：按钮只有一个，而它要说的那句话取决于当前是哪一边，
+    // 于是这里必须问一次状态。切到哪一边由宿主决定，侧边栏只负责把请求递过去——
+    // 侧边栏要真去装拆控制器，就必须持有那两套零件，而它今天一个都不认识。
+    private void OnModeButtonClick(object? sender, RoutedEventArgs e)
+    {
+        Debug.WriteLine($"[SAMPLE][sidebar.mode] 模式按钮被按下 from={_host.Mode}");
+        _host.ToggleMode();
+    }
+
+    private void OnPreviousTargetClick(object? sender, RoutedEventArgs e) => _host.StepTarget(-1);
+
+    private void OnNextTargetClick(object? sender, RoutedEventArgs e) => _host.StepTarget(+1);
 
     private void OnTick(double delta)
     {
@@ -146,13 +278,25 @@ internal sealed class Sidebar : IDisposable
         Set(_moveSpeedText, $"移速 {_previewer.MoveSpeed:F2} 方块/秒");
         Set(_lookSensitivityText, $"灵敏度 {_previewer.LookSensitivity:F3} 度/DIP");
 
+        // 展台那几行只在那一组真的显示着的时候刷。它们在自由视角下是隐藏的，
+        // 而给一个隐藏的 TextBlock 写文本照样会让布局失效往上传一趟——
+        // 每秒四次乘以四行，为一个没人看得见的数字。
+        if (_showcaseGroup.IsVisible)
+        {
+            Set(_showcaseTargetText, $"目标 {_host.ShowcaseTargetCaption}");
+            Set(_dragSensitivityText, $"拖动灵敏度 {_previewer.DragSensitivity:F3} 度/DIP");
+            Set(_spinDampingText, $"惯性阻尼 {_previewer.SpinDamping:F3} 秒");
+            Set(_spinIdleDelayText, $"自转延时 {_previewer.SpinIdleDelay:F2} 秒");
+            Set(_spinIdleSpeedText, $"自转速度 {_previewer.SpinIdleSpeed:F2} 度/秒");
+        }
+
         // 只打第一条：整流刷新每秒四次，逐条打会把终端冲掉，而这条要回答的是
         // 「刷新这条链（Tick -> 攒计数 -> 写文本）到底跑了没有」——一次就够了。
         // 空白的侧边栏和「程序没跑起来」在界面上分不开，所以这句话得留在日志里。
         if (_statsLogs++ == 0)
         {
             Debug.WriteLine(
-                $"[SAMPLE][sidebar.stats] 侧边栏开始刷新（只打这一条）fps={fps:F1} frameMs={frameMilliseconds:F1} " +
+                $"[SAMPLE][sidebar.stats] 侧边栏开始刷新（只打这一条）mode={_host.Mode} fps={fps:F1} frameMs={frameMilliseconds:F1} " +
                 $"pos=({position}) yaw={camera.Yaw:F2} pitch={camera.Pitch:F2} distance={_camera.Distance:F4} " +
                 $"viewport={_previewer.Bounds.Width:F0}x{_previewer.Bounds.Height:F0} scaling={Scaling():F2}");
         }
