@@ -103,10 +103,16 @@ internal sealed class InputSelfTest
             $"distance={_distanceBeforeZoom:F4}->{distance:F4} elapsed={_elapsed:F2}s");
 
         Debug.Assert(_ticks > 0, "[SAMPLE][selftest] Tick 一次都没触发");
-        Debug.Assert(_scrolled == 3, $"[SAMPLE][selftest] Scrolled 触发次数不对 scrolled={_scrolled} expected=3");
+
+        // 计数只断言「至少」。验收窗口是一个有焦点、真实存在的窗口，用户在上面滚一下鼠标
+        // 就会多出几次——那是外部输入，既不说明接线错了，也不说明接线对了。
+        // 「恰好一次」那一条在 RaiseWheel / RaiseKey 里同步验，外部输入插不进那一段。
         Debug.Assert(
-            _wheelIn == 2 && _wheelOut == 1,
-            $"[SAMPLE][selftest] 滚轮方向没走全 in={_wheelIn} out={_wheelOut} expected=2/1");
+            _scrolled >= 3,
+            $"[SAMPLE][selftest] Scrolled 少触发 scrolled={_scrolled} expected=>=3");
+        Debug.Assert(
+            _wheelIn >= 2 && _wheelOut >= 1,
+            $"[SAMPLE][selftest] 滚轮方向没走全 in={_wheelIn} out={_wheelOut} expected=>=2/>=1");
         Debug.Assert(
             _sawKeyDown && _sawKeyUp,
             $"[SAMPLE][selftest] 按键没有成对到达 down={_sawKeyDown} up={_sawKeyUp}");
@@ -121,23 +127,12 @@ internal sealed class InputSelfTest
             $"[SAMPLE][selftest] 最后一次视口尺寸与窗口不符 last={_lastViewport} " +
             $"expected=({expectedWidth},{expectedHeight})");
 
-        // 剧本自己摆的视角只有两次旋转。画面上还有一次滚动缩放，但它不经过这里——
+        // 剧本自己摆的视角只有两次旋转。画面上还有滚动缩放，但它不经过这里——
         // 它走的是 ScrollZoomController，正是这一相位要验的那条链路。
+        // 外部输入也改不了这个计数：只有 ApplyCamera 会动它。
         Debug.Assert(
             _cameraSets == 2,
             $"[SAMPLE][selftest] 剧本摆视角的次数不对 cameraSets={_cameraSets} expected=2");
-
-        // 这一条是 Phase E 的核心：三次滚轮穿过
-        // 事件 -> 适配器 -> ScrollZoomController -> CameraModel，最后落在模型的距离上。
-        // 控制器没接上、订阅漏了、方向接反了、比例写错了，几种错法这里各红一次。
-        // 容差 1e-3 对浮点足够，而算错一档的偏差是 20% 这个量级，不会混。
-        Debug.Assert(
-            MathF.Abs(distance - _expectedDistanceAfterZoom) < 1e-3f,
-            $"[SAMPLE][selftest] 三次滚轮之后的距离不对 actual={distance:F4} " +
-            $"expected={_expectedDistanceAfterZoom:F4}，说明滚轮没有走到模型上");
-        Debug.Assert(
-            distance < _distanceBeforeZoom,
-            $"[SAMPLE][selftest] 正向滚轮没有把相机拉近 before={_distanceBeforeZoom:F4} after={distance:F4}");
 
         Debug.WriteLine("[SAMPLE][selftest.summary] 四个事件都至少走通一次，滚轮经由控制器改了相机，画面随之切换");
     }
@@ -184,6 +179,24 @@ internal sealed class InputSelfTest
                 RaiseWheel(WheelIn);
                 RaiseWheel(WheelIn);
                 RaiseWheel(WheelOut);
+
+                // 这一条是 Phase E 的核心：三次滚轮穿过
+                // 事件 -> 适配器 -> ScrollZoomController -> CameraModel，最后落在模型的距离上。
+                // 控制器没接上、订阅漏了、方向接反了、比例写错了，几种错法这里各红一次。
+                // 容差 1e-3 对浮点足够，而算错一档的偏差是 20% 这个量级，不会混。
+                //
+                // 就地验而不是留到 Report：RaiseWheel 是同步的，这一行跑到的时候这三次已经走完，
+                // 此刻的距离就是脚本那三次的结果。留到 Report 再比的话，中间任何一次真实滚轮
+                // 都会把它改掉——而那会让一条正确的实现红掉，比漏报还糟。
+                float afterWheels = _camera.Distance;
+                Debug.Assert(
+                    MathF.Abs(afterWheels - _expectedDistanceAfterZoom) < 1e-3f,
+                    $"[SAMPLE][selftest] 三次滚轮之后的距离不对 actual={afterWheels:F4} " +
+                    $"expected={_expectedDistanceAfterZoom:F4}，说明滚轮没有走到模型上");
+                Debug.Assert(
+                    afterWheels < _distanceBeforeZoom,
+                    $"[SAMPLE][selftest] 正向滚轮没有把相机拉近 before={_distanceBeforeZoom:F4} " +
+                    $"after={afterWheels:F4}");
                 break;
 
             case StepKeyDown:
@@ -277,6 +290,8 @@ internal sealed class InputSelfTest
     // 所以适配器里「哪个事件映射成 down、哪个映射成 up」也在被验。
     private void RaiseKey(Key key, bool down)
     {
+        int before = _keyEvents;
+
         KeyEventArgs args = new()
         {
             RoutedEvent = down ? InputElement.KeyDownEvent : InputElement.KeyUpEvent,
@@ -284,12 +299,20 @@ internal sealed class InputSelfTest
         };
 
         _previewer.RaiseEvent(args);
+
+        // RaiseEvent 是同步的，跑到这一行时这一次已经转发完，所以可以就地验「恰好一次」。
+        // 留到 Report 里数总数的话，用户按一下键就分不清多出来的是他的、还是同一次被转发了两次。
+        Debug.Assert(
+            _keyEvents == before + 1,
+            $"[SAMPLE][selftest] 一次合成按键应该恰好转发一次 KeyChanged before={before} after={_keyEvents}");
     }
 
     // 合成滚轮。rootVisual 传的就是控件自己，于是事件的坐标系与控件一致，
     // 适配器里读 e.Delta 不依赖任何窗口状态。
     private void RaiseWheel(float delta)
     {
+        int before = _scrolled;
+
         PointerWheelEventArgs args = new(
             _previewer,
             new Pointer(1, PointerType.Mouse, isPrimary: true),
@@ -302,5 +325,9 @@ internal sealed class InputSelfTest
             new Avalonia.Vector(0, delta));
 
         _previewer.RaiseEvent(args);
+
+        Debug.Assert(
+            _scrolled == before + 1,
+            $"[SAMPLE][selftest] 一次合成滚轮应该恰好转发一次 Scrolled before={before} after={_scrolled}");
     }
 }
