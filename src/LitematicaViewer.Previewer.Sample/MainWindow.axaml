@@ -1,0 +1,9 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:pv="clr-namespace:LitematicaViewer.Previewer;assembly=LitematicaViewer.Previewer"
+        x:Class="LitematicaViewer.Previewer.Sample.MainWindow"
+        Title="Litematica Viewer — Previewer"
+        Width="1024"
+        Height="768">
+  <pv:Previewer />
+</Window>

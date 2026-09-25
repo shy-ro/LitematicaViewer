@@ -1,5 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/LitematicaViewer.Core/LitematicaViewer.Core.csproj" />
+    <Project Path="src/LitematicaViewer.Previewer.Sample/LitematicaViewer.Previewer.Sample.csproj" />
+    <Project Path="src/LitematicaViewer.Previewer/LitematicaViewer.Previewer.csproj" />
   </Folder>
 </Solution>

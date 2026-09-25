@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>LitematicaViewer.Previewer</RootNamespace>
+    <AssemblyName>LitematicaViewer.Previewer</AssemblyName>
+    <!-- 只为 GlInterface 里那几个只收裸指针的入口开（UniformMatrix4fv 之类），
+         GL 互操作是它正当的用途。其余地方不需要 unsafe。 -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 只要 Avalonia：Avalonia.OpenGL 就在这个包里，OpenGlControlBase 与 GlInterface 都由它提供。 -->
+    <PackageReference Include="Avalonia" Version="12.1.3" />
+  </ItemGroup>
+
+</Project>
