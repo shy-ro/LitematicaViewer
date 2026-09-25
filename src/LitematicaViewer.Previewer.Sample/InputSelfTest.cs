@@ -8,7 +8,7 @@ namespace LitematicaViewer.Previewer.Sample;
 
 // 验收剧本。Phase D 立起来的是「输入能进来、相机能出去」，Phase E 起多一层：
 // 滚轮不再由剧本自己改相机，而是交给 ScrollZoomController 与 CameraModel——剧本退到旁观者的位置。
-// Phase F 的拖拽与走动同样如此：剧本只合成手势、报事实，改相机的全程是控制器。
+// Phase F 的转视角与走动同样如此：剧本只合成手势、报事实，改相机的全程是控制器。
 //
 // 让剧本自己改相机的话，控制器整个删掉剧本照样全绿，而那恰恰是这几个相位要验的东西。
 //
@@ -21,7 +21,7 @@ internal sealed class InputSelfTest
     private const double RotateAt = 0.4;
     private const double RotateBackAt = 0.8;
     private const double WheelAt = 1.2;
-    private const double DragAt = 1.6;
+    private const double LookAroundAt = 1.6;
     private const double KeyDownAt = 2.4;
     private const double KeyUpAt = 3.2;
     private const double ResizeAt = 3.6;
@@ -31,14 +31,14 @@ internal sealed class InputSelfTest
     private const int StepRotate = 0;
     private const int StepRotateBack = 1;
     private const int StepWheel = 2;
-    private const int StepDrag = 3;
+    private const int StepLookAround = 3;
     private const int StepKeyDown = 4;
     private const int StepKeyUp = 5;
     private const int StepResize = 6;
     private const int StepGrazing = 7;
 
     private static readonly double[] StepTimes =
-        [RotateAt, RotateBackAt, WheelAt, DragAt, KeyDownAt, KeyUpAt, ResizeAt, GrazingAt];
+        [RotateAt, RotateBackAt, WheelAt, LookAroundAt, KeyDownAt, KeyUpAt, ResizeAt, GrazingAt];
 
     // 掠射姿态：相机几乎贴着 +X 面的平面，x 只比面心出去 0.008，其余两个方向在几米开外。
     // 那一张面按判据确实朝向我们（0.508 > 0.5），但视线与它的法线夹着 89.9 度，
@@ -56,14 +56,14 @@ internal sealed class InputSelfTest
     private const float WheelIn = 1f;
     private const float WheelOut = -1f;
 
-    // 一次拖拽：按下，往右下移动两段各 60x30 个 DIP，抬起。
-    // 只往右下而不来回，理由和滚轮那三步一样：一来一回正好抵消，画面回到原样，
-    // 「相机一变就验一帧」的那一帧看到的还是上一张，等于什么都没验。
-    private const double DragStartX = 380;
-    private const double DragStartY = 300;
-    private const double DragStepX = 60;
-    private const double DragStepY = 30;
-    private const int DragMoves = 2;
+    // 一程转视角：第一段移动只定下参照点（只要一次位置就没有「差」，不产生旋转），
+    // 之后两段各往右下走 60x30 个 DIP。只往右下而不来回，理由和滚轮那三步一样：
+    // 一来一回正好抵消，画面回到原样，「相机一变就验一帧」的那一帧看到的还是上一张，等于什么都没验。
+    private const double LookStartX = 380;
+    private const double LookStartY = 300;
+    private const double LookStepX = 60;
+    private const double LookStepY = 30;
+    private const int LookSteps = 2;
 
     // 走动只按 W：A/S/D 与它共用同一段公式，逐个按键再验一遍不加分辨力。
     private const Key MoveKey = Key.W;
@@ -73,16 +73,10 @@ internal sealed class InputSelfTest
 
     private static readonly Pointer TestPointer = new(1, PointerType.Mouse, isPrimary: true);
 
-    // 合成的指针状态。按下之后一直保持「左键按着」，抬起时才改——适配器靠这个字段
-    // 判「还在不在拖」，它与「按键事件有没有来」是两回事，正是漏掉抬起时的兜底。
-    private static readonly PointerPointProperties LeftPressed =
-        new(RawInputModifiers.LeftMouseButton, PointerUpdateKind.LeftButtonPressed);
-
-    private static readonly PointerPointProperties LeftHeld =
-        new(RawInputModifiers.LeftMouseButton, PointerUpdateKind.Other);
-
-    private static readonly PointerPointProperties LeftReleased =
-        new(RawInputModifiers.None, PointerUpdateKind.LeftButtonReleased);
+    // 合成的指针状态：一个键都不按。转视角现在不需要按键，这一栏是 PointerEventArgs 要求填的，
+    // 填「没按键」正是要验的那件事——适配器如果还在挑按键，这里就走不通。
+    private static readonly PointerPointProperties NoButtons =
+        new(RawInputModifiers.None, PointerUpdateKind.Other);
 
     private readonly Window _window;
     private readonly Previewer _previewer;
@@ -106,9 +100,9 @@ internal sealed class InputSelfTest
     private int _resizes;
     private (int Width, int Height) _lastViewport;
     private int _cameraSets;
-    private int _dragStarted;
-    private int _dragMoved;
-    private int _dragEnded;
+    private int _lookStarted;
+    private int _lookMoved;
+    private int _lookEnded;
 
     // 滚轮前后的距离。前面那个由剧本记下，后面那个从模型读回来对——中间隔着一整个控制器。
     private float _distanceBeforeZoom;
@@ -126,11 +120,16 @@ internal sealed class InputSelfTest
     private int _walkForeignBaseline;
     private int _idleForeignBaseline;
 
-    internal InputSelfTest(Window window, Previewer previewer, CameraModel camera)
+    // 适配器是「手势的起止」的持有者（只有它拿得到指针与捕获），所以收尾那一步得走它——
+    // 剧本在最后调它的 ReleaseLook()，与宿主在窗口失活时调的是同一个口子。
+    private readonly PreviewerInputAdapter _input;
+
+    internal InputSelfTest(Window window, Previewer previewer, CameraModel camera, PreviewerInputAdapter input)
     {
         _window = window;
         _previewer = previewer;
         _camera = camera;
+        _input = input;
         _startCamera = CameraState.Default;
     }
 
@@ -140,9 +139,9 @@ internal sealed class InputSelfTest
         _previewer.Scrolled += OnScrolled;
         _previewer.KeyChanged += OnKeyChanged;
         _previewer.ViewportResized += OnViewportResized;
-        _previewer.DragStarted += OnDragStarted;
-        _previewer.DragMoved += OnDragMoved;
-        _previewer.DragEnded += OnDragEnded;
+        _previewer.LookStarted += OnLookStarted;
+        _previewer.LookMoved += OnLookMoved;
+        _previewer.LookEnded += OnLookEnded;
 
         Debug.WriteLine(
             $"[SAMPLE][selftest.attach] steps={StepTimes.Length} last={StepTimes[^1]}s " +
@@ -160,7 +159,7 @@ internal sealed class InputSelfTest
             $"key={_keyEvents} keyDown={_sawKeyDown} keyUp={_sawKeyUp} resizes={_resizes} " +
             $"lastViewport={_lastViewport.Width}x{_lastViewport.Height} " +
             $"expected={expectedWidth}x{expectedHeight} cameraSets={_cameraSets} " +
-            $"drag={_dragStarted}/{_dragMoved}/{_dragEnded} " +
+            $"look={_lookStarted}/{_lookMoved}/{_lookEnded} " +
             $"distance={_distanceBeforeZoom:F4}->{_camera.Distance:F4} elapsed={_elapsed:F2}s");
 
         Debug.Assert(_ticks > 0, "[SAMPLE][selftest] Tick 一次都没触发");
@@ -188,7 +187,7 @@ internal sealed class InputSelfTest
             $"[SAMPLE][selftest] 最后一次视口尺寸与窗口不符 last={_lastViewport} " +
             $"expected=({expectedWidth},{expectedHeight})");
 
-        // 剧本自己摆的视角只有三次：两次旋转，一次掠射。滚轮、拖拽、走动都不经过这里——
+        // 剧本自己摆的视角只有三次：两次旋转，一次掠射。滚轮、转视角、走动都不经过这里——
         // 它们走各自的控制器，那正是这几个相位要验的链路。外部输入也改不了这个计数：
         // 只有 ApplyCamera 会动它。
         Debug.Assert(
@@ -196,7 +195,7 @@ internal sealed class InputSelfTest
             $"[SAMPLE][selftest] 剧本摆视角的次数不对 cameraSets={_cameraSets} expected=3");
 
         Debug.WriteLine(
-            "[SAMPLE][selftest.summary] 四个事件都至少走通一次，滚轮/拖拽/走动各自经由控制器改了相机");
+            "[SAMPLE][selftest.summary] 四个事件都至少走通一次，滚轮/转视角/走动各自经由控制器改了相机");
     }
 
     private void OnTick(double delta)
@@ -262,8 +261,8 @@ internal sealed class InputSelfTest
                     $"after={_camera.Distance:F4}");
                 break;
 
-            case StepDrag:
-                DragView();
+            case StepLookAround:
+                LookAround();
                 break;
 
             case StepKeyDown:
@@ -315,7 +314,7 @@ internal sealed class InputSelfTest
     //
     // 第一视角下「转头」会让相机看向别处，那种姿态本来就验不了（IsVerifiable 会明说跳过）。
     // 所以剧本得自己摆出一个看向中心的姿态，画面校验才有东西可验——这里摆的是位置，
-    // 而拖拽那一步改的是朝向，两者验的不是同一件事。
+    // 而转视角那一步改的是朝向，两者验的不是同一件事。
     private void RotateAroundCube(float degrees)
     {
         Vector3 position = Vector3.Transform(
@@ -330,62 +329,78 @@ internal sealed class InputSelfTest
             _startCamera.Far));
     }
 
-    // 拖拽走完整条链路：合成指针事件 -> 适配器（左键起拖）-> Drag* -> 控制器 -> 模型 -> SetCamera。
+    // 转视角走完整条链路：合成指针移动 -> 适配器（不需要按键）-> Look* -> 控制器 -> 模型 -> SetCamera。
     //
     // 断言的是「相机转了多少」，而不是「收到了几次移动」：前者才是这条链路存在的理由，
     // 后者只能证明事件到了。灵敏度取自控制器里的那个常量——它是个手感参数，脚本引用它
     // 意味着改了值不会红，那是有意的；这里钉的是换算关系与方向。
-    private void DragView()
+    //
+    // 合成的是 PointerMoved，而且 Properties 里一个键都不按：适配器如果还留着「必须按着左键」
+    // 那道门，这里一步都转不动，而日志上看起来只是「指针移了但画面没动」。
+    private void LookAround()
     {
-        int startedBefore = _dragStarted;
-        int movedBefore = _dragMoved;
-        int endedBefore = _dragEnded;
+        // 先把适配器手里可能挂着的手势收掉，再开始自己的。
+        //
+        // 现在指针一动就转视角，于是真实鼠标在窗口上的每一次移动都是一段手势——它是**连续**的。
+        // 不先收掉的话，脚本的第一段移动会被当成「那一段真人手势的延续」：参照点还在真人那个位置上，
+        // 差值就是一段凭空的跳转，而这与「换算写错了」在数值上分不开。
+        //
+        // 放在取基线之前：这一次收尾自己也会发一个 LookEnded，记在基线后面才算得对。
+        // 这一段之后到断言为止是同步的（没有消息泵），外面插不进来，参照点从这里起是确定的。
+        _input.ReleaseLook();
+
+        int startedBefore = _lookStarted;
+        int movedBefore = _lookMoved;
+        int endedBefore = _lookEnded;
 
         CameraState before = _camera.Camera;
         float distanceBefore = _camera.Distance;
 
-        Point position = new(DragStartX, DragStartY);
-        RaisePointerPressed(position);
+        // 第一段只把参照点写下来，它本身不产生旋转——角度是两次位置之差。
+        Point position = new(LookStartX, LookStartY);
+        RaisePointerMoved(position);
 
-        for (int i = 0; i < DragMoves; i++)
+        for (int i = 0; i < LookSteps; i++)
         {
-            position += new Avalonia.Vector(DragStepX, DragStepY);
+            position += new Avalonia.Vector(LookStepX, LookStepY);
             RaisePointerMoved(position);
         }
 
-        RaisePointerReleased(position);
+        // 收尾走适配器的 ReleaseLook()，与宿主在窗口失活时调的是同一个口子。
+        // 没有抬起事件可以用了，所以「这一段结束」只能由位置本身或者宿主给出。
+        _input.ReleaseLook();
 
-        // yaw 增量直接相减而不绕回 ±180：这一段拖拽是正的 30 度，离跳变点还有 7 度以上；
+        // yaw 增量直接相减而不绕回 ±180：这一段是正的 30 度，离跳变点还有 7 度以上；
         // 而「绕回」那个函数本身也是要验的东西，混进来会把两件事搅在一起。
         Expect(
             _camera.Camera.Yaw - before.Yaw,
-            (float)(DragStepX * DragMoves) * MouseLookController.DegreesPerDip,
+            (float)(LookStepX * LookSteps) * MouseLookController.DegreesPerDip,
             0.1f,
-            "拖拽的 yaw 增量（往右拖是往右转）");
+            "转视角的 yaw 增量（往右移是往右转）");
         Expect(
             _camera.Camera.Pitch - before.Pitch,
-            (float)(DragStepY * DragMoves) * MouseLookController.DegreesPerDip,
+            (float)(LookStepY * LookSteps) * MouseLookController.DegreesPerDip,
             0.1f,
-            "拖拽的 pitch 增量（往下拖是往下看）");
+            "转视角的 pitch 增量（往下移是往下看）");
 
-        // 第一视角：拖拽只改朝向，相机位置一个 bit 都不该动。
+        // 第一视角：转视角只改朝向，相机位置一个 bit 都不该动。
         // 位置动了就说明转视角又写成了「把相机挪到别处」（orbit 那个老实现），而单看角度增量、
         // 灵敏度、方向这些都是对的——只有连着转上一圈才发现画面是在绕着某点公转。
-        Expect((_camera.Camera.Position - before.Position).Length(), 0f, 1e-6f, "拖拽后的相机位置");
+        Expect((_camera.Camera.Position - before.Position).Length(), 0f, 1e-6f, "转视角后的相机位置");
 
         // 参考距离是缩放的尺度，与转视角无关，同样不该动。
-        Expect(_camera.Distance, distanceBefore, 1e-3f, "拖拽后的参考距离");
+        Expect(_camera.Distance, distanceBefore, 1e-3f, "转视角后的参考距离");
 
         Debug.Assert(
-            _dragStarted == startedBefore + 1,
-            $"[SAMPLE][selftest] 一次拖拽应该恰好一个起点 before={startedBefore} after={_dragStarted}");
+            _lookStarted == startedBefore + 1,
+            $"[SAMPLE][selftest] 一程转视角应该恰好一个起点 before={startedBefore} after={_lookStarted}");
         Debug.Assert(
-            _dragMoved == movedBefore + DragMoves,
-            $"[SAMPLE][selftest] 一次拖拽的移动条数不对 before={movedBefore} after={_dragMoved} " +
-            $"expected=+{DragMoves}");
+            _lookMoved == movedBefore + LookSteps,
+            $"[SAMPLE][selftest] 一程转视角的移动条数不对 before={movedBefore} after={_lookMoved} " +
+            $"expected=+{LookSteps}（第一段只定参照点，不算在内）");
         Debug.Assert(
-            _dragEnded == endedBefore + 1,
-            $"[SAMPLE][selftest] 一次拖拽应该恰好一个终点 before={endedBefore} after={_dragEnded}");
+            _lookEnded == endedBefore + 1,
+            $"[SAMPLE][selftest] 一程转视角应该恰好一个终点 before={endedBefore} after={_lookEnded}");
     }
 
     // 走动那一段的结论：位移大小由「按了多久」算，方向由按下时的视线定。
@@ -463,9 +478,9 @@ internal sealed class InputSelfTest
         Debug.WriteLine($"[SAMPLE][selftest.walk] 松开后 {IdleCheckTicks} 帧位移为 0，键状态确实清掉了");
     }
 
-    // 能改相机的外部输入的总数。滚轮、拖拽、按键都算——它们里的任何一个在停住检查的窗口里
+    // 能改相机的外部输入的总数。滚轮、转视角、按键都算——它们里的任何一个在停住检查的窗口里
     // 出现，都会让相机合理地动起来，而那与「键状态没清掉」在数值上分不开。
-    private int InputEventCount() => _scrolled + _dragStarted + _dragMoved + _moveKeyEvents;
+    private int InputEventCount() => _scrolled + _lookStarted + _lookMoved + _moveKeyEvents;
 
     // 其中有多少是剧本自己合成的。
     //
@@ -473,7 +488,7 @@ internal sealed class InputSelfTest
     // 有一部分本来就是自己发的。前面写错过一次——基线记在按下之前，于是自己的那次抬起
     // 被当成外来的，停住检查永远跳过，而它看起来像「一切正常」。
     //
-    // 只算「能移动相机的那些」：拖拽的抬起不在内（它动不了相机），所以合成的抬起也不记。
+    // 只算「能移动相机的那些」：转视角的终点不在内（它动不了相机），所以合成的收尾也不记。
     private int ForeignInputCount() => InputEventCount() - _ownInputEvents;
     private void OnScrolled(float delta)
     {
@@ -515,11 +530,11 @@ internal sealed class InputSelfTest
         _lastViewport = (width, height);
     }
 
-    private void OnDragStarted(Point position) => _dragStarted++;
+    private void OnLookStarted(Point position) => _lookStarted++;
 
-    private void OnDragMoved(Point position) => _dragMoved++;
+    private void OnLookMoved(Point position) => _lookMoved++;
 
-    private void OnDragEnded() => _dragEnded++;
+    private void OnLookEnded() => _lookEnded++;
 
     // 摆视角走模型，不直接灌给 Previewer：否则模型手里的相机和画面上那个是两回事，
     // 之后滚轮一滚就会从模型记得的旧朝向重新出发，画面跳一下。
@@ -577,27 +592,11 @@ internal sealed class InputSelfTest
             $"[SAMPLE][selftest] 一次合成滚轮应该恰好转发一次 Scrolled before={before} after={_scrolled}");
     }
 
-    // 合成指针事件。三段都走真实的路由事件，而不是直接调 Previewer 的 RaiseDrag*：
-    // 「左键按下才算拖拽起点」那一段在适配器里，直接调就把它整个跳过去了。
-    // 指针状态也跟着走：按下之后一直是「左键按着」，抬起时才改——适配器靠这个字段
-    // 判「还在不在拖」，它是抬起事件丢了之后仅剩的兜底。
-    private void RaisePointerPressed(Point position)
-    {
-        _ownInputEvents++;
-
-        PointerPressedEventArgs args = new(
-            _previewer,
-            TestPointer,
-            _previewer,
-            position,
-            0UL,
-            LeftPressed,
-            KeyModifiers.None,
-            clickCount: 1);
-
-        _previewer.RaiseEvent(args);
-    }
-
+    // 合成指针移动。走真实的路由事件而不是直接调 Previewer 的 RaiseLook*：
+    // 「指针一动就开始转、不需要按键」那一段在适配器里，直接调就把它整个跳过去了。
+    //
+    // 指针状态报的是「一个键都没按」：那正是要验的前提。适配器如果还留着按键那道门，
+    // 这里就一步都转不动——而日志上看起来只是「指针移了，画面没动」。
     private void RaisePointerMoved(Point position)
     {
         _ownInputEvents++;
@@ -611,23 +610,8 @@ internal sealed class InputSelfTest
             _previewer,
             position,
             0UL,
-            LeftHeld,
+            NoButtons,
             KeyModifiers.None);
-
-        _previewer.RaiseEvent(args);
-    }
-
-    private void RaisePointerReleased(Point position)
-    {
-        PointerReleasedEventArgs args = new(
-            _previewer,
-            TestPointer,
-            _previewer,
-            position,
-            0UL,
-            LeftReleased,
-            KeyModifiers.None,
-            MouseButton.Left);
 
         _previewer.RaiseEvent(args);
     }
