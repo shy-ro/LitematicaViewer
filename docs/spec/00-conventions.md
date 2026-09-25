@@ -4,12 +4,18 @@
 
 ## 分层
 
-    Core（Poly.NBT）              Previewer（Avalonia + Silk.NET）
+    Core（Poly.NBT）              Previewer（Avalonia）
          ↑                                ↑
      中间层（MeshBuilder，尚未设计）───────┘
 
 Core 与 Previewer 之间零引用。Previewer 不知道 Core 存在，Core 不知道渲染存在。
 把 `LitematicDocument` 转成 mesh 的中间层等两边都能独立跑起来之后再设计契约。
+
+Previewer 只用 Avalonia 自带的 GL 绑定（`Avalonia.OpenGL.GlInterface`），不引 Silk.NET。
+实测 Avalonia 12.1.3 的 `GlInterface` 已经覆盖了渲染要用的全部入口——着色器编译、
+缓冲区、VAO、uniform、绘制、纹理、FBO 都在，缺的只是类型化枚举。加第二套绑定层
+只会多一份枚举和函数表，而常量本身有现成的：`Avalonia.OpenGL.GlConsts` 是公开类型，
+79 个 `GL_*` 常量都在里面，包括后面的 `GL_TRIANGLES` / `GL_VERTEX_SHADER` / `GL_DEPTH_TEST`。
 
 在中间层落地之前，任何一边都不得为了让另一边好过而修改自己的公开面。
 
