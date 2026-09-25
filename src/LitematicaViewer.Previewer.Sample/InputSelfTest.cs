@@ -6,12 +6,14 @@ using Avalonia.Input;
 
 namespace LitematicaViewer.Previewer.Sample;
 
-// Phase D 的验收剧本。事件「触发了」这件事光看探针说服力不够——没人订阅时它同样安静，
-// 而「安静」和「没接上」在日志里长得一样。所以这里把 Avalonia 的真实路由事件合成出来打进控件，
-// 再断言 Previewer 把每一次输入都翻成了自己的事件、而且相机确实换掉了画面。
+// 验收剧本。Phase D 立起来的是「输入能进来、相机能出去」，Phase E 起多一层：
+// 滚轮不再由剧本自己改相机，而是交给 ScrollZoomController 与 CameraModel——剧本退到旁观者的位置。
 //
-// 合成真事件而不是直接调 Previewer 的内部方法：这样输入适配器那一层（订阅、映射、方向、
-// 只取 Y 分量）也在被验的范围里。绕过它，适配器写反了方向这个剧本照样全绿。
+// 让剧本继续自己改相机的话，控制器整个删掉剧本照样全绿，而那恰恰是这一相位要验的东西。
+//
+// 「事件触发了」光看探针说服力不够：没人订阅时它同样安静，而「安静」和「没接上」在日志里长得一样。
+// 所以这里合成 Avalonia 的真实路由事件打进控件，再断言 Previewer 把每一次输入都翻成了自己的事件。
+// 合成真事件而不是直接调内部方法：输入适配器那一层（订阅、映射、方向、只取 Y 分量）也在被验的范围里。
 internal sealed class InputSelfTest
 {
     // 剧本按秒推进而不是按帧：帧率随机器和窗口大小变，验收脚本不该跟着变。
@@ -34,16 +36,19 @@ internal sealed class InputSelfTest
         [RotateAt, RotateBackAt, WheelAt, KeyDownAt, KeyUpAt, ResizeAt];
 
     private const double ResizeDelta = 160;
-    private const float ZoomInFactor = 0.8f;
-    private const float ZoomOutFactor = 1.25f;
+
+    // 滚轮那三步：+1、+1、-1。净效果是正向一档，也就是推近到 0.8 倍距离。
+    private const float WheelIn = 1f;
+    private const float WheelOut = -1f;
 
     private readonly Window _window;
     private readonly Previewer _previewer;
-    private readonly CameraState _startCamera;
 
-    // 剧本自己记着当前相机。Previewer 不提供 GetCamera（状态的权威在消费侧），
-    // 所以想知道「现在相机在哪」的调用方必须自己维护——这里就是第一个这样的调用方。
-    private CameraState _camera;
+    // 相机状态的权威在模型那边，剧本不再自己存一份「当前相机」：
+    // 存了它就会在某个时刻和真正的权威不一致，而那表现成画面校验偶尔红一次，很难归因。
+    private readonly CameraModel _camera;
+
+    private readonly CameraState _startCamera;
 
     private double _elapsed;
     private int _nextStep;
@@ -58,12 +63,16 @@ internal sealed class InputSelfTest
     private (int Width, int Height) _lastViewport;
     private int _cameraSets;
 
-    internal InputSelfTest(Window window, Previewer previewer)
+    // 滚轮前后的距离。前面那个由剧本记下，后面那个从模型读回来对——中间隔着一整个控制器。
+    private float _distanceBeforeZoom;
+    private float _expectedDistanceAfterZoom;
+
+    internal InputSelfTest(Window window, Previewer previewer, CameraModel camera)
     {
         _window = window;
         _previewer = previewer;
+        _camera = camera;
         _startCamera = CameraState.Default;
-        _camera = _startCamera;
     }
 
     internal void Attach()
@@ -84,11 +93,14 @@ internal sealed class InputSelfTest
         int expectedWidth = (int)Math.Round(_window.ClientSize.Width * scaling);
         int expectedHeight = (int)Math.Round(_window.ClientSize.Height * scaling);
 
+        float distance = _camera.Distance;
+
         Debug.WriteLine(
             $"[SAMPLE][selftest.summary] ticks={_ticks} scrolled={_scrolled} wheelIn={_wheelIn} wheelOut={_wheelOut} " +
             $"key={_keyEvents} keyDown={_sawKeyDown} keyUp={_sawKeyUp} resizes={_resizes} " +
             $"lastViewport={_lastViewport.Width}x{_lastViewport.Height} " +
-            $"expected={expectedWidth}x{expectedHeight} cameraSets={_cameraSets} elapsed={_elapsed:F2}s");
+            $"expected={expectedWidth}x{expectedHeight} cameraSets={_cameraSets} " +
+            $"distance={_distanceBeforeZoom:F4}->{distance:F4} elapsed={_elapsed:F2}s");
 
         Debug.Assert(_ticks > 0, "[SAMPLE][selftest] Tick 一次都没触发");
         Debug.Assert(_scrolled == 3, $"[SAMPLE][selftest] Scrolled 触发次数不对 scrolled={_scrolled} expected=3");
@@ -109,12 +121,25 @@ internal sealed class InputSelfTest
             $"[SAMPLE][selftest] 最后一次视口尺寸与窗口不符 last={_lastViewport} " +
             $"expected=({expectedWidth},{expectedHeight})");
 
-        // 两次旋转 + 三次滚轮。首帧那个相机是 Previewer 的默认值，没经过 SetCamera，不算在内。
+        // 剧本自己摆的视角只有两次旋转。画面上还有一次滚动缩放，但它不经过这里——
+        // 它走的是 ScrollZoomController，正是这一相位要验的那条链路。
         Debug.Assert(
-            _cameraSets >= 5,
-            $"[SAMPLE][selftest] 相机切换次数不对 cameraSets={_cameraSets} expected=>=5");
+            _cameraSets == 2,
+            $"[SAMPLE][selftest] 剧本摆视角的次数不对 cameraSets={_cameraSets} expected=2");
 
-        Debug.WriteLine("[SAMPLE][selftest.summary] 四个事件都至少走通一次，且相机切了画面");
+        // 这一条是 Phase E 的核心：三次滚轮穿过
+        // 事件 -> 适配器 -> ScrollZoomController -> CameraModel，最后落在模型的距离上。
+        // 控制器没接上、订阅漏了、方向接反了、比例写错了，几种错法这里各红一次。
+        // 容差 1e-3 对浮点足够，而算错一档的偏差是 20% 这个量级，不会混。
+        Debug.Assert(
+            MathF.Abs(distance - _expectedDistanceAfterZoom) < 1e-3f,
+            $"[SAMPLE][selftest] 三次滚轮之后的距离不对 actual={distance:F4} " +
+            $"expected={_expectedDistanceAfterZoom:F4}，说明滚轮没有走到模型上");
+        Debug.Assert(
+            distance < _distanceBeforeZoom,
+            $"[SAMPLE][selftest] 正向滚轮没有把相机拉近 before={_distanceBeforeZoom:F4} after={distance:F4}");
+
+        Debug.WriteLine("[SAMPLE][selftest.summary] 四个事件都至少走通一次，滚轮经由控制器改了相机，画面随之切换");
     }
 
     private void OnTick(double delta)
@@ -146,13 +171,19 @@ internal sealed class InputSelfTest
                 break;
 
             case StepWheel:
-                // 滚轮走完整条链路：合成事件 -> 适配器 -> Scrolled -> 这里的订阅者改相机。
+                // 滚轮走完整条链路：合成事件 -> 适配器 -> Scrolled -> 控制器 -> 模型 -> SetCamera。
                 // 三次而不是一上一下：一来一回正好抵消，相机回到原位，
                 // 「相机一变就验一帧」的那一帧看到的还是上一张画面，等于什么都没验。
                 // 净效果是推近到 0.8 倍距离，画面确实变了。
-                RaiseWheel(1f);
-                RaiseWheel(1f);
-                RaiseWheel(-1f);
+                _distanceBeforeZoom = _camera.Distance;
+
+                // 期望值按「净一档」算，而不是把每一步的距离记下来逐个比：
+                // 逐个比等于把控制器的实现抄一遍，抄错了也照样通过。
+                _expectedDistanceAfterZoom = _distanceBeforeZoom * CameraModel.ZoomRatioPerStep;
+
+                RaiseWheel(WheelIn);
+                RaiseWheel(WheelIn);
+                RaiseWheel(WheelOut);
                 break;
 
             case StepKeyDown:
@@ -203,12 +234,13 @@ internal sealed class InputSelfTest
             _wheelOut++;
         }
 
-        // 沿视线推拉就是按比例缩放位置向量：相机一直看向原点，缩放后仍然看向原点，
-        // 所以质心还是落在画面中心，画面校验的那几条继续有效。
-        // 比例限制在 [0.8, 1.25]，免得一步就把相机推进立方体里或者推出画面外。
-        CameraState camera = _camera;
-        float factor = delta > 0 ? ZoomInFactor : ZoomOutFactor;
-        ApplyCamera(camera with { Position = camera.Position * factor });
+        // 相机不在这里改。滚轮改相机是 ScrollZoomController 的职责，剧本只是它的旁观者；
+        // 顺手在这里也改一次的话，控制器坏掉了剧本照样全绿。
+        // 这条日志的顺序也不承重：控制器和剧本都订阅 Scrolled，谁先谁后由订阅顺序决定，
+        // 所以这里只报事实，结论留到 Report 里出。
+        Debug.WriteLine(
+            $"[SAMPLE][selftest.scroll] delta={delta} distance={_camera.Distance:F4} " +
+            $"expected={_expectedDistanceAfterZoom:F4}");
     }
 
     private void OnKeyChanged(Key key, bool isDown)
@@ -232,11 +264,13 @@ internal sealed class InputSelfTest
         _lastViewport = (width, height);
     }
 
+    // 摆视角走模型，不直接灌给 Previewer：否则模型手里的相机和画面上那个是两回事，
+    // 之后滚轮一滚就会从模型记得的旧朝向重新出发，画面跳一下。
     private void ApplyCamera(CameraState camera)
     {
-        _camera = camera;
         _cameraSets++;
-        _previewer.SetCamera(camera);
+        _camera.Reset(camera);
+        _previewer.SetCamera(_camera.Camera);
     }
 
     // 合成按键。构造的是真实的路由事件，走的是控件上订阅的那套处理器，
