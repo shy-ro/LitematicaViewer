@@ -24,11 +24,21 @@ public partial class Previewer : OpenGlControlBase
     // 逐帧打桩会把终端冲掉，而上下文稳不稳定只要抽样看就够。
     private const int ProbeFrameInterval = 60;
 
+    // 一次 tick 最多认 0.25 秒。两帧之间隔上几百毫秒是常事（拖窗口、断点停下、换显示器），
+    // 不夹住的话控制器拿着这个 dt 一积分就是一整段瞬移，滚动缩放会直接跳穿；
+    // 夹住之后最坏只是动作变慢，而那一眼就能看出来。
+    private const double MaxTickSeconds = 0.25;
+
     // R4 的守卫。控件在 UI 线程上构造，之后每次 GL 回调都要求落在同一线程。
     // GL 上下文不跨线程，而这个错误通常不抛异常，只在某些机器上偶发黑屏或花屏。
     private readonly int _uiThreadId = Environment.CurrentManagedThreadId;
 
+    private readonly Stopwatch _clock = Stopwatch.StartNew();
+
+    private TimeSpan _lastFrameElapsed;
     private int _framesRendered;
+    private int _viewportWidth;
+    private int _viewportHeight;
     private GlCubeRenderer? _cube;
 
 #if DEBUG
@@ -72,6 +82,11 @@ public partial class Previewer : OpenGlControlBase
             $"[PREVIEWER][gl.init] cap.vao={gl.IsBindVertexArrayAvailable} cap.blit={gl.IsBlitFramebufferAvailable} " +
             $"cap.drawBuffer={gl.IsDrawBufferAvailable}");
 
+#if DEBUG
+        // 与 GL 无关，放这儿只是因为「上下文初始化」是唯一确定只跑一次的地方。
+        CameraState.VerifyConvention();
+#endif
+
         _cube = GlCubeRenderer.Create(gl);
     }
 
@@ -79,11 +94,36 @@ public partial class Previewer : OpenGlControlBase
     {
         _framesRendered++;
 
+        TimeSpan now = _clock.Elapsed;
+        double delta = _framesRendered == 1 ? 0 : (now - _lastFrameElapsed).TotalSeconds;
+        _lastFrameElapsed = now;
+
+        double tickSeconds = Math.Min(delta, MaxTickSeconds);
+        if (tickSeconds < delta)
+        {
+            Debug.WriteLine(
+                $"[PREVIEWER][gl.render] tick 被夹住 delta={delta:F3} clamped={tickSeconds:F3} " +
+                $"max={MaxTickSeconds} expected=只在卡顿时才出现");
+        }
+
+        // 先 tick 再画：控制器在 Tick 里 SetCamera，这一帧立刻用得上新相机，少一帧延迟。
+        // 反过来先画再 tick 也跑得起来，代价是相机永远落后一帧，拖起来像有阻尼。
+        RaiseTick(tickSeconds);
+
         // 视口按物理像素算，Bounds 是 DIP。差一个 RenderScaling 在 100% 缩放的显示器上
         // 完全看不出来，只在缩放显示器上把画面缩进一角——那时已经在查别的地方了。
         double scaling = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
         int width = Math.Max(1, (int)Math.Round(Bounds.Width * scaling));
         int height = Math.Max(1, (int)Math.Round(Bounds.Height * scaling));
+
+        if (width != _viewportWidth || height != _viewportHeight)
+        {
+            int previousWidth = _viewportWidth;
+            int previousHeight = _viewportHeight;
+            _viewportWidth = width;
+            _viewportHeight = height;
+            RaiseViewportResized(width, height, previousWidth, previousHeight);
+        }
 
         // 显式绑一次 Avalonia 交给我们的那个 framebuffer。省掉这一步不会立刻报错，
         // 症状是画到别处去了，而屏幕上什么都没有。
@@ -93,6 +133,11 @@ public partial class Previewer : OpenGlControlBase
 
         _cube?.Render(_camera, width, height);
 
+        // 自驱动渲染循环：这一帧的末尾换来下一帧，节流交给 Avalonia 的合成器（实测就是显示刷新率）。
+        // 不改成「只在相机变化时才请求」是因为 Tick 是控制器的时间来源：一旦没有输入就不出帧，
+        // 靠时间推进的东西（惯性、缩放动画）会直接停住。代价是空闲时也按刷新率出帧。
+        RequestNextFrameRendering();
+
         if (_framesRendered == 1 || _framesRendered % ProbeFrameInterval == 0)
         {
             Debug.Assert(
@@ -101,7 +146,8 @@ public partial class Previewer : OpenGlControlBase
 
             Debug.WriteLine(
                 $"[PREVIEWER][gl.render] frame={_framesRendered} fb={fb} bounds={Bounds.Width}x{Bounds.Height} " +
-                $"scaling={scaling} viewport={width}x{height}");
+                $"scaling={scaling} viewport={width}x{height} dt={tickSeconds * 1000:F1}ms " +
+                $"elapsed={now.TotalSeconds:F2}s");
         }
 
         // 这一段是约定里说的例外：断言本身在 Release 下会消失，但读回那一下 GPU 同步不会，
@@ -118,7 +164,12 @@ public partial class Previewer : OpenGlControlBase
 
     protected override void OnOpenGlDeinit(GlInterface gl)
     {
-        Debug.WriteLine($"[PREVIEWER][gl.deinit] frames={_framesRendered} expected=>0");
+        double elapsed = _clock.Elapsed.TotalSeconds;
+        double averageFps = elapsed > 0 ? _framesRendered / elapsed : 0;
+
+        Debug.WriteLine(
+            $"[PREVIEWER][gl.deinit] frames={_framesRendered} expected=>0 elapsed={elapsed:F2}s " +
+            $"avgFps={averageFps:F1}");
         Debug.Assert(
             _framesRendered > 0,
             $"[PREVIEWER][gl.deinit] 挂上去了却一帧没画 frames={_framesRendered}");
