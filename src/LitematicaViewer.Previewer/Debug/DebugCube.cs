@@ -29,6 +29,12 @@ internal static class DebugCube
     // 相机掠过某个面的平面时那个面本来就只有十几个像素。
     private const int RasterNoiseFloor = 8;
 
+    // 面的投影在薄的那个维度不足这么多像素时也不再断言。期望值是连续面积算出来的，
+    // 而光栅化按像素中心采样：一个两百像素宽、0.2 像素厚的细条（期望 40 个像素）
+    // 里可以一个像素中心都不落，0 是合法输出——实测相机俯仰 10.8 度时顶面就是这样。
+    // 连续期望与离散采样只在「细条」这个形态下分家，粗块仍然照常判。
+    private const float MinFaceThicknessPx = 1.5f;
+
     public static void CheckGeometry(float[] vertices, int[] indices, int faceCount)
     {
         int vertexCount = faceCount * 4;
@@ -214,12 +220,12 @@ internal static class DebugCube
         // 「判据的强度被一个无关参数悄悄带走」正是要避免的。
         // 展台光环也改像素，而且改的比轴线多两个数量级（它是一整圈半透明的带子），
         // 但它的 alpha 是连续插值出来的，进不了这张表——理由见下。
-        // 展台光环不进这张表。它的 alpha 是顶点插值出来的**连续**值（内带 0.14→0.42、
-        // 中带 0.42、外带 0.42→0.14），而枚举一个连续统需要无穷多个候选色。
+        // 展台光环不进这张表。它的 alpha 是顶点插值出来的**连续**值（内带从暗缘渐变到亮芯、
+        // 中带是常量、外带再渐变回暗缘），而枚举一个连续统需要无穷多个候选色。
         //
         // 曾经按「两档 alpha」列进表里，结果真机上一跑就红：unmatched=10751（1.18%）。
         // 根因是那张表的注释写错了——「相邻两圈同值于是带内是常量」只对中带成立，
-        // 内外两个带的两端分别是 0.14 与 0.42，插值出来是一整段渐变，只有贴到端点的那几行像素才认得出。
+        // 内外两个带插值出来是一整段渐变，只有贴到端点的那几行像素才认得出。
         // 所以光环走另一条判据（见 TryPedestalAlpha）：像素落在「底色 → 不透明光环色」这条线段上，
         // 落点参数就是它的 alpha，再要求这个 alpha 落在声明的区间里。
         int candidateCount = baseCount + (baseCount * axisCount);
@@ -361,12 +367,17 @@ internal static class DebugCube
             // 一直没暴露；相机能自由转之后，任意一张面扫过镜头都会触发它，而 Debug.Assert
             // 失败是直接终止进程——表现成「Debug 下转着转着就崩了」。
             float expectedPixels = 0f;
+            float thicknessPx = 0f;
             if (expectedVisible)
             {
                 float depth = toFace.Length();
                 float halfHeight = depth * tanHalfFov;
                 float halfWidth = halfHeight * aspect;
                 expectedPixels = pixelCount * (incidence / depth) / (4f * halfHeight * halfWidth);
+
+                // 薄维度的厚度（像素）＝ 期望面积 ÷ 面在画面上的宽度。面的宽是 1 个世界单位，
+                // 每个世界单位在这条深度上摊开 width / (2 * halfWidth) 个像素。
+                thicknessPx = expectedPixels / (width / (2f * halfWidth));
             }
 
             Debug.WriteLine(
@@ -380,7 +391,7 @@ internal static class DebugCube
             {
                 visibleFaces++;
 
-                if (expectedPixels >= RasterNoiseFloor)
+                if (expectedPixels >= RasterNoiseFloor && thicknessPx >= MinFaceThicknessPx)
                 {
                     Debug.Assert(
                         facePixels[face] >= expectedPixels * MinFacePixelRatio,
@@ -454,7 +465,7 @@ internal static class DebugCube
                 $"[PREVIEWER][gl.cube] 光环的 alpha 没铺满声明的区间 " +
                 $"observed=[{Bound(minPedestalAlpha)},{Bound(maxPedestalAlpha)}] " +
                 $"declared=[{Bound(PedestalAlphaMin)},{Bound(PedestalAlphaMax)}] " +
-                $"note=内缘与外缘那两个 0.14 的两端都要有像素；只观测到一个值说明软边没了");
+                $"note=内缘与外缘的暗端都要有像素；只观测到一个值说明软边没了");
         }
 
         // 逐轴打一遍：三条线的像素数差着量级是正常的（正对着镜头的那根投影成一段，
@@ -541,8 +552,8 @@ internal static class DebugCube
     // 一是判据本身：alpha 是顶点插值出来的，混完再取整成 8 位，所以反推回来的那个参数
     // 会带上千分之几的抖动，落在声明的区间外面一点点是正常的。
     //
-    // 二是「两端都要够到」那条：贴到内缘的那一行像素，alpha 比 0.14 大一点点（渐变是从这里起步的），
-    // 所以断言不能要求恰好等于 0.14。
+    // 二是「两端都要够到」那条：贴到内缘的那一行像素，alpha 比声明的小值大一点点（渐变是从这里起步的），
+    // 所以断言不能要求恰好等于声明的端点。
     private const float AlphaSlack = 0.05f;
 
     private const float AlphaReachSlack = 0.06f;
@@ -571,7 +582,7 @@ internal static class DebugCube
 
     // 这个像素是不是光环画出来的，如果是，它的 alpha 是多少。
     //
-    // 光环的顶点 alpha 从 0.14 渐变到 0.42，混出来的颜色因此是一条**线段**上的点：
+    // 光环的顶点 alpha 在暗缘与亮芯之间渐变，混出来的颜色因此是一条**线段**上的点：
     // 从「这个像素底下的那个颜色」出发，指向不透明光环色。落在线上哪个位置，就是那一点的 alpha
     // （Over 那条式子在 alpha 上是线性的）。所以判据是：
     // 到这条线段足够近，而且落点参数落在声明的 alpha 区间里。
