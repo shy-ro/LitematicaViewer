@@ -23,30 +23,30 @@ public static class CoreFixtureBuilder
         Vector3I size,
         ImmutableArray<string> paletteNames,
         ImmutableArray<int> indices,
-        bool compress = true)
+        bool compress = true) =>
+        BuildLitematic(compress, new RegionSpec(regionName, position, size, paletteNames, indices));
+
+    // 多区域重载。区域的先后顺序就是文件里的键顺序，而"先遍历到谁"与"哪个更近"
+    // 是两件事，所以要能把近的那个排在后面。
+    public static byte[] BuildLitematic(bool compress, params RegionSpec[] regions)
     {
-        IntBounds bounds = IntBounds.FromPositionSize(position, size);
+        Debug.Assert(regions.Length > 0, "fixture needs at least one region");
 
-        // 索引数与体积不匹配时夹具自身就是坏的，而症状会伪装成解析器算错了长度。
-        // 在这里炸掉，别让一个写错的夹具去冤枉被测代码。
-        Debug.Assert(
-            indices.Length == bounds.Volume,
-            $"fixture indices={indices.Length} but volume={bounds.Volume}");
+        List<KeyValuePair<string, NbtElement>> regionPairs = new(regions.Length);
+        List<IntBounds> regionBounds = new(regions.Length);
+        long totalBlocks = 0;
+        long totalVolume = 0;
 
-        ImmutableArray<long> packed =
-            [.. BlockStatesCodec.Pack(indices.AsSpan(), paletteNames.Length)];
-
-        ImmutableArray<BlockStateDefinition> palette =
-            [.. paletteNames.Select(static n => new BlockStateDefinition(n, BlockStateDefinition.NoProperties))];
-
-        long nonAir = 0;
-        foreach (int index in indices)
+        foreach (RegionSpec spec in regions)
         {
-            if ((uint)index < (uint)palette.Length && !palette[index].IsAir)
-            {
-                nonAir++;
-            }
+            (NbtCompound compound, long nonAir, long volume) = BuildRegion(spec);
+            regionPairs.Add(new KeyValuePair<string, NbtElement>(spec.Name, compound));
+            regionBounds.Add(IntBounds.FromPositionSize(spec.Position, spec.Size));
+            totalBlocks += nonAir;
+            totalVolume += volume;
         }
+
+        IntBounds bounds = IntBounds.Enclose(regionBounds);
 
         NbtCompound metadata = Compound(
             ("EnclosingSize", Vec(bounds.Size)),
@@ -54,16 +54,52 @@ public static class CoreFixtureBuilder
             ("Description", new NbtString(string.Empty)),
             ("Name", new NbtString("fixture")),
             ("Software", new NbtString("LitematicaViewer.Tests")),
-            ("RegionCount", new NbtInt(1)),
+            ("RegionCount", new NbtInt(regions.Length)),
             ("TimeCreated", new NbtLong(0)),
             ("TimeModified", new NbtLong(0)),
-            ("TotalBlocks", new NbtLong(nonAir)),
-            ("TotalVolume", new NbtLong(bounds.Volume)),
+            ("TotalBlocks", new NbtLong(totalBlocks)),
+            ("TotalVolume", new NbtLong(totalVolume)),
             ("PreviewImageData", new NbtIntArray([])));
 
+        NbtCompound root = Compound(
+            ("Version", new NbtInt(6)),
+            ("SubVersion", new NbtInt(1)),
+            ("MinecraftDataVersion", new NbtInt(3465)),
+            ("Metadata", metadata),
+            ("Regions", new NbtCompound(regionPairs)));
+
+        byte[] raw = Serializer.Serialize(new NbtDocument(string.Empty, root));
+        return compress ? Gzip(raw) : raw;
+    }
+
+    private static (NbtCompound Compound, long NonAir, long Volume) BuildRegion(RegionSpec spec)
+    {
+        IntBounds bounds = IntBounds.FromPositionSize(spec.Position, spec.Size);
+
+        // 索引数与体积不匹配时夹具自身就是坏的，而症状会伪装成解析器算错了长度。
+        // 在这里炸掉，别让一个写错的夹具去冤枉被测代码。
+        Debug.Assert(
+            spec.Indices.Length == bounds.Volume,
+            $"fixture region '{spec.Name}' indices={spec.Indices.Length} but volume={bounds.Volume}");
+
+        ImmutableArray<long> packed =
+            [.. BlockStatesCodec.Pack(spec.Indices.AsSpan(), spec.PaletteNames.Length)];
+
+        ImmutableArray<BlockStateDefinition> palette =
+            [.. spec.PaletteNames.Select(static n => new BlockStateDefinition(n, BlockStateDefinition.NoProperties))];
+
+        long nonAir = 0;
+        foreach (int index in spec.Indices)
+        {
+            if ((uint)index < (uint)palette.Length && !palette[index].IsAir)
+            {
+                nonAir++;
+            }
+        }
+
         NbtCompound region = Compound(
-            ("Position", Vec(position)),
-            ("Size", Vec(size)),
+            ("Position", Vec(spec.Position)),
+            ("Size", Vec(spec.Size)),
             ("BlockStatePalette", new NbtList([.. palette.Select(static p => (NbtElement)Compound(
                 ("Name", new NbtString(p.Name))))])),
             ("Entities", new NbtList()),
@@ -72,15 +108,7 @@ public static class CoreFixtureBuilder
             ("PendingFluidTicks", new NbtList()),
             ("BlockStates", new NbtLongArray([.. packed])));
 
-        NbtCompound root = Compound(
-            ("Version", new NbtInt(6)),
-            ("SubVersion", new NbtInt(1)),
-            ("MinecraftDataVersion", new NbtInt(3465)),
-            ("Metadata", metadata),
-            ("Regions", Compound((regionName, region))));
-
-        byte[] raw = Serializer.Serialize(new NbtDocument(string.Empty, root));
-        return compress ? Gzip(raw) : raw;
+        return (region, nonAir, bounds.Volume);
     }
 
     public static byte[] BuildNbtWithoutRegions()
