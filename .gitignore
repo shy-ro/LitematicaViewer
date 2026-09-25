@@ -1,0 +1,13 @@
+# build output
+bin/
+obj/
+*.user
+
+# IDE
+.vs/
+.idea/
+*.suo
+
+# 本机探查脚本与智能体状态，不进仓库
+tools/
+.workbuddy/
