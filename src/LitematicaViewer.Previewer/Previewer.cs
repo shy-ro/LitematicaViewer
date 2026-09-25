@@ -60,17 +60,15 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
     // ICustomHitTest 是给「自己画自己」的控件留的口子：命中范围由它说了算。
     // 判据用 Bounds 而不是「有没有画东西」：这个控件的画面盖满自己的整个矩形，
     // 让指针穿过去点它背后的东西本来就没有意义。
-    bool ICustomHitTest.HitTest(Point point)
-    {
-        // 入参是 TopLevel 坐标，先转回自己的坐标系再跟 Bounds 比。
-        if (TopLevel.GetTopLevel(this) is not { } root)
-        {
-            return false;
-        }
-
-        Point? local = root.TranslatePoint(point, this);
-        return local is { } value && new Rect(Bounds.Size).Contains(value);
-    }
+    //
+    // 入参是**控件自己的坐标**。这一条到 Phase F 才确定：那时控件从窗口左上角挪到了侧边栏右边，
+    // 而原来这里按「入参是 TopLevel 坐标」又转了一次（root.TranslatePoint(point, this)），
+    // 于是左边缘那 300 个像素的命中被整个减没了——真实输入落在那一段时控件收不到任何东西。
+    //
+    // 它一直是错的，只是控件在原点时「转一次」正好等于不转（偏移是 0,0），
+    // 所以从外观上验不出差别；换个布局才暴露。实测那一行的入参：探针在窗口坐标 (790,400) 提问，
+    // 这里收到 (490,400)，正好差控件左边界的 300。
+    bool ICustomHitTest.HitTest(Point point) => new Rect(Bounds.Size).Contains(point);
 
 #if DEBUG
     // 整张 framebuffer 读回来会强制 GPU 同步，逐帧读会把帧率打到地板上，
