@@ -5,7 +5,7 @@ namespace LitematicaViewer.Previewer.Sample;
 
 // CameraModel 的两个连续动作：转视角、沿自己的视角平移。与缩放分在两个文件里，
 // 是因为它们的驱动方式不同——缩放一格一格地来（滚轮），这两个是被连续输入推着的
-// （拖拽一秒几百条、按住方向键每帧一次），探针与节流也就落在不同的人身上。
+// （指针移动一秒几百条、按住方向键每帧一次），探针与节流也就落在不同的人身上。
 internal sealed partial class CameraModel
 {
     // 转视角。增量以度为单位，方向照抄鼠标：往右拖 yaw 增大（往右转），
@@ -80,7 +80,7 @@ internal sealed partial class CameraModel
             $"[SAMPLE][camera.pan] 平移把距离改了 before={distanceBefore:F6} after={Distance:F6}");
     }
 
-    // 这两个动作本身不打桩：它们由连续输入驱动，逐次打会把终端冲掉（拖拽一秒几百条、
+    // 这两个动作本身不打桩：它们由连续输入驱动，逐次打会把终端冲掉（指针移动一秒几百条、
     // 按住 W 时每帧一次），而「这一拖转了多少、这一段走了多远」这类汇总只有控制器知道
     // 该怎么划段，由它们打。缩放是离散的（一格滚轮一次），所以它自己打。
 #if DEBUG
@@ -126,7 +126,7 @@ internal sealed partial class CameraModel
 
         // 6. 转视角只改朝向，位置一动不动——这是第一视角的核心。
         //    位置跟着动就是 orbit 那个老实现，表现是「拖鼠标时画面绕着某个点公转」；
-        //    而单看一次拖拽的方向和灵敏度都是对的，只有连着转上一圈才看得出来。
+        //    而单看一次转视角的方向和灵敏度都是对的，只有连着转上一圈才看得出来。
         CameraModel look = new(CameraState.Default, Vector3.Zero);
         float lookDistance = look.Distance;
         float lookPitch = look.Camera.Pitch;

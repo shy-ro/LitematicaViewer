@@ -6,7 +6,7 @@ namespace LitematicaViewer.Previewer.Sample;
 // 相机状态的权威持有者。Previewer 只画不记（公开面里没有 GetCamera），
 // 想知道「相机现在在哪」的都得来这里问；控制器改了它，再把结果推给 Previewer。
 //
-// 三个动作：拖拽转视角（只改朝向，不动位置）、W/A/S/D 沿视线平移、滚轮沿视线推拉。
+// 三个动作：移动指针转视角（只改朝向，不动位置）、W/A/S/D 沿视线平移、滚轮沿视线推拉。
 // 姿态是**第一视角**——像游戏里操作一个人物那样，拖鼠标是转头，不是绕着一个点公转。
 //
 // 曾经写成绕 Target 转的 orbit 相机：那个模型下平移会把 Target 一起带走，于是「走两步再转视角」
@@ -170,7 +170,7 @@ internal sealed partial class CameraModel
     private static string Bound(float? bound) => bound?.ToString("F2") ?? "未设";
 
     // yaw 落在 (-180,180]，两次取值之差可能绕了一圈（179.9 与 -179.9 只差 0.2 度）。
-    // 转视角每拖一段就归一次，不归的话连续拖拽会把 yaw 累到几万度，
+    // 转视角每动一下就归一次，不归的话连续移动会把 yaw 累到几万度，
     // 那时 sin/cos 的精度开始掉，表现是「转了很久之后视角开始抖」。
     private static float Wrap(float degrees)
     {
