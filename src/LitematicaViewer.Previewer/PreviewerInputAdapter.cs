@@ -34,6 +34,7 @@ public sealed class PreviewerInputAdapter : IDisposable
     // 退回「只捕获指针」。它不再复位：一次钉不住之后，这个窗口的位置没变，下一次也不会成功。
     private bool _pinBroken;
     private bool _pinBrokenLogged;
+    private bool _pinLogged;
 
     private Cursor? _cursorBeforeHide;
     private bool _cursorHidden;
@@ -306,12 +307,37 @@ public sealed class PreviewerInputAdapter : IDisposable
             return centre;
         }
 
-        if (actual != (target.X, target.Y))
+        Point reference = _previewer.PointToClient(new PixelPoint(actual.X, actual.Y));
+
+        // 判据是「钉完之后光标在不在控件里」，不是「和请求点是不是一模一样」。
+        //
+        // 后者是这里原来的写法，而它会误杀：手在 MoveTo 与 TryRead 两次系统调用之间本来就会动，
+        // 实测有一次 requested=(850,483) actual=(843,476)——差 7 个像素就被当成「钉不住」，
+        // 而 _pinBroken 是粘住的，一整个会话的固定鼠标当场作废。表现正是「鼠标没固定在中心、
+        // 右键也呼不出鼠标」，可它前面已经连续五轮钉得好好的。
+        //
+        // 落点有偏差这件事本身不需要判：返回的参照点就是读回来的那个点，下一次的增量按真实位置算，
+        // 偏差不累积。真正要拦的只有一种情形——请求点不可达（窗口有一部分在屏幕外）时系统会把
+        // 光标挪到最近的可见点上，返回值仍然说成功，而那一点通常已经不在控件里。
+        if (!new Rect(_previewer.Bounds.Size).Contains(reference))
         {
-            AbandonPin($"光标没落在请求的点上 requested=({target.X},{target.Y}) actual=({actual.X},{actual.Y})");
+            AbandonPin(
+                $"钉完之后光标不在控件里 requested=({target.X},{target.Y}) actual=({actual.X},{actual.Y}) " +
+                $"reference=({reference.X:F0},{reference.Y:F0}) bounds={_previewer.Bounds.Size}");
+            return reference;
         }
 
-        return _previewer.PointToClient(new PixelPoint(actual.X, actual.Y));
+        // 成功本来是完全没有声音的，而「固定鼠标到底有没有生效」正是这一整条里唯一看不见的事。
+        if (!_pinLogged)
+        {
+            _pinLogged = true;
+            Debug.WriteLine(
+                $"[PREVIEWER][input.pin] 固定鼠标已生效 centre=({target.X},{target.Y}) " +
+                $"actual=({actual.X},{actual.Y}) reference=({reference.X:F0},{reference.Y:F0}) " +
+                $"偏差=({reference.X - centre.X:F1},{reference.Y - centre.Y:F1})px note=只打这一条");
+        }
+
+        return reference;
     }
 
     // 钉不住就整段放弃，并且把光标还回去。
