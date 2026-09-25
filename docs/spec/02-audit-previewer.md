@@ -229,6 +229,9 @@ NuGet 上那个叫 `Avalonia.OpenGL` 的包最新只有 0.7.0，是上古遗留�
 没有 `GetCamera`，没有 `PointerMoved` / `PointerPressed`，没有 `SetMeshes`。
 相机状态的权威在控制器侧（Phase E/F 的 `CameraModel`），Previewer 只是它的消费者。
 
+（Phase F 补了三个手势事件 `LookStarted` / `LookMoved` / `LookEnded`：指针移动就是在转视角。
+裸的 `PointerMoved` 仍然没有——差值要在能记住上一次位置的地方算，那是控制器。见 05。）
+
 `Key` 直接用 `Avalonia.Input.Key`，不再造一个自己的枚举：Previewer 本来就依赖 Avalonia，
 多一层翻译表只多一个漏项的地方。
 
@@ -392,9 +395,9 @@ pitch 夹在 ±89.9 度，且夹在**取用点**而不是构造点：读 `Forwar
 
 - 没有目视确认。所有结论都来自像素统计：颜色对、位置对、面积比例对、覆盖率对，
   但「看起来像个立方体」这件事没有人看过。你看一眼就能补上。
-- 鼠标拖拽不做（规范明确排除），所以相机目前只能由程序设置，没有「转视角」的交互。
-  屏幕射线拾取是下一件要接的事：Core 侧的射线与体素求交已经写完验完了，
-  缺的是「屏幕上的点 → 世界射线」那半边，它需要一个能定期喂相机的控制器。
+- 鼠标转视角这一相位不做（规范明确排除）。**Phase F 做了**，而且是「指针一动就转」、
+  不用按键（`Look*` 三个事件 + `MouseLookController`，见 05）——所以相机现在有了持续改它的东西。
+  屏幕射线拾取还缺的只剩「屏幕上的点 → 世界射线」那半边。
 - 相机还没有由控制器驱动。Phase D 只把入口和事件摆好，所以那一刻没有任何东西会持续改相机——
   转视角只能靠合成事件或者代码。`CameraModel` 与 `ScrollZoomController` 在 Phase E 落地（见 03），
   `WasdCameraController` 在 F。
