@@ -105,7 +105,7 @@ internal sealed class MouseLookController : IDisposable
         _totalYaw += yaw;
         _totalPitch += pitch;
 
-        _camera.Orbit(yaw, pitch);
+        _camera.Look(yaw, pitch);
         _previewer.SetCamera(_camera.Camera);
 
         if (_moves == 1 || _moves % MoveLogInterval == 0)
