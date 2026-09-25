@@ -4,7 +4,7 @@ using Avalonia.Input;
 
 namespace LitematicaViewer.Previewer;
 
-// 本文件是 Previewer 的对外公开面：四个事件加 SetCamera。Phase D 的清单里这个文件叫
+// 本文件是 Previewer 的对外公开面：七个事件加 SetCamera。Phase D 的清单里这个文件叫
 // Previewer.Events.cs，相机入口一并放这儿——它们都是同一个东西：Previewer 允许外界碰的表面。
 //
 // 没有 GetCamera，也没有任何读回相机状态的口子：外部想跟踪当前相机，自己在控制器里维护。
@@ -16,19 +16,20 @@ public partial class Previewer
     // 「向上滚是拉近还是推远」是控制器的事，将来改手感不必动这里。
     public event Action<float>? Scrolled;
 
-    // 拖拽手势。位置是控件坐标（DIP，不是物理像素）。
+    // 看向手势：指针在控件上移动就是在转视角，不需要按任何键——第一人称的默认操作。
+    // 位置是控件坐标（DIP，不是物理像素）。
     //
-    // 为什么给的是「一次拖拽」而不是「左键按下了」：按哪个键起拖是平台绑定，
-    // 那属于输入适配器；而「按下之后指针移动了多少」是手势——差值要在能记住上一次位置的地方算，
-    // 那是控制器，只有它知道拖多远算转多少度。这里只把起点、过程和终点报出来。
+    // 为什么给的是「一段连续的移动」而不是裸露的 PointerMoved：差值要在能记住上一次位置的地方算，
+    // 那是控制器，只有它知道移动多少算转多少度。这里只把起点、过程和终点报出来。
     //
     // 起点的那个位置不产生旋转（只有一次位置就没有「差」），它的用处是定下参照点——
-    // 少了它，第一次移动会把「从上次拖拽留下的位置」到这里算成一段距离，画面上是一次凭空的跳转。
-    public event Action<Point>? DragStarted;
+    // 少了它，第一次移动会把「从上次手势留下的位置」到这里算成一段距离，画面上是一次凭空的跳转。
+    // 它原来叫 DragStarted/DragMoved/DragEnded，改成默认转动之后「拖拽」是假话：没有键被按着。
+    public event Action<Point>? LookStarted;
 
-    public event Action<Point>? DragMoved;
+    public event Action<Point>? LookMoved;
 
-    public event Action? DragEnded;
+    public event Action? LookEnded;
 
     // 按键状态变化。key 直接用 Avalonia 的枚举：Previewer 本来就依赖 Avalonia，
     // 再造一个 Key 枚举只会多一层翻译表，而翻译表是漏项的高发地。
@@ -52,7 +53,7 @@ public partial class Previewer
     // 一次自增的代价可以忽略，不值得为它换一个只在 Debug 成立的声明。
     private int _cameraVersion;
 
-    // 每次 SetCamera 打一整行（五个向量加六个标量）的话，拖拽时就是每秒六十行——
+    // 每次 SetCamera 打一整行（五个向量加六个标量）的话，指针一动就是每秒六十行——
     // 这一条是全项目最重的一处 IO，而它的信息量在相邻两行之间几乎不增。
     // 首条加每 60 条一条：「相机到底有没有被推过来」是个是非题，抽样足够回答。
     // 调用方都在 UI 线程上，计数不用原子。
@@ -103,22 +104,22 @@ public partial class Previewer
         Scrolled?.Invoke(delta);
     }
 
-    // 拖拽的三条只有起点和终点打桩，中间那条不打：移动一秒几百条，逐条打会把终端冲掉，
+    // 看向手势的三条只有起点和终点打桩，中间那条不打：转动一秒几百条，逐条打会把终端冲掉，
     // 而「指针从哪到了哪」这类信息在两条日志之间本来就看得出来。
-    internal void RaiseDragStarted(Point position)
+    internal void RaiseLookStarted(Point position)
     {
         Debug.WriteLine(
-            $"[PREVIEWER][event.drag] started pos=({position.X:F0},{position.Y:F0}) " +
-            $"handlers={CountHandlers(DragStarted)}");
-        DragStarted?.Invoke(position);
+            $"[PREVIEWER][event.look] started pos=({position.X:F0},{position.Y:F0}) " +
+            $"handlers={CountHandlers(LookStarted)}");
+        LookStarted?.Invoke(position);
     }
 
-    internal void RaiseDragMoved(Point position) => DragMoved?.Invoke(position);
+    internal void RaiseLookMoved(Point position) => LookMoved?.Invoke(position);
 
-    internal void RaiseDragEnded()
+    internal void RaiseLookEnded()
     {
-        Debug.WriteLine($"[PREVIEWER][event.drag] ended handlers={CountHandlers(DragEnded)}");
-        DragEnded?.Invoke();
+        Debug.WriteLine($"[PREVIEWER][event.look] ended handlers={CountHandlers(LookEnded)}");
+        LookEnded?.Invoke();
     }
 
     internal void RaiseKeyChanged(Key key, bool isDown)

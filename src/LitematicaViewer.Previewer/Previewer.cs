@@ -240,7 +240,7 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         // （强制 GPU 同步加拷几 MB 回来，后面还跟着每帧五百多万次像素距离计算）。
         //
         // 这个常量一度只声明、只自增、从没被判断过，于是注释里写的「一次会话封顶 24 次」
-        // 实际是「相机每变一次读回一帧」——拖拽和按住 W 时相机每帧都在变，那就是每秒六十次读回。
+        // 实际是「相机每变一次读回一帧」——转视角和按住 W 时相机每帧都在变，那就是每秒六十次读回。
         // 症状是「一动鼠标就卡」，而它看起来像渲染慢，不像校验慢。
         if (_cameraVerifications >= MaxCameraVerifications)
         {
