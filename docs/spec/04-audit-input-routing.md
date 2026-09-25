@@ -87,17 +87,7 @@ GL 直接画到窗口上的，**合成器那边它是空的**。
 
 `ICustomHitTest` 就是给这种「自己画自己」的控件留的口子。修复就是实现它：
 
-    bool ICustomHitTest.HitTest(Point point)
-    {
-        // 入参是 TopLevel 坐标，先转回自己的坐标系再跟 Bounds 比。
-        if (TopLevel.GetTopLevel(this) is not { } root)
-        {
-            return false;
-        }
-
-        Point? local = root.TranslatePoint(point, this);
-        return local is { } value && new Rect(Bounds.Size).Contains(value);
-    }
+    bool ICustomHitTest.HitTest(Point point) => new Rect(Bounds.Size).Contains(point);
 
 判据用 `Bounds` 而不是「有没有画东西」：这个控件的画面盖满自己的整个矩形，
 让指针穿过去点它背后的东西本来就没有意义。
@@ -107,6 +97,34 @@ GL 直接画到窗口上的，**合成器那边它是空的**。
     point=(512,384) inputHitTest=Previewer#Viewport < ContentPresenter#PART_ContentPresenter < ...
     point=(10,10)   inputHitTest=Previewer#Viewport < ...
     point=(1014,758) inputHitTest=Previewer#Viewport < ...
+
+### 入参是控件自己的坐标（Phase F 更正）
+
+上面那条一行写完的判据，原本多绕了一次坐标换算：
+
+    // 入参是 TopLevel 坐标，先转回自己的坐标系再跟 Bounds 比。
+    Point? local = root.TranslatePoint(point, this);
+    return local is { } value && new Rect(Bounds.Size).Contains(value);
+
+它是错的，而且错了很久没被发现：控件当时正好在窗口左上角，偏移是 `(0,0)`，
+「转一次」与「不转」完全等价，那三个采样点全过。
+
+Phase F 把控件挪到侧边栏右边（左边偏移 300）之后，`(10,10)` 那一点开始命中失败：
+左边缘那 300 个像素被减成了负数，那里放不进 `Bounds`，于是整个控件的命中被放弃，
+输入落到窗口模板里那层匿名 `Panel` 上。这次是被探针的断言抓住的——`Debug.Assert` 直接终止进程。
+
+实测（临时在 `HitTest` 里打出入参，看完即删）：
+
+    探针在窗口坐标 (790,400) 提问 -> 这里收到 (490,400) = 790 - 300
+    探针在窗口坐标 (310, 10) 提问 -> 这里收到 ( 10, 10) = 310 - 300
+    探针在窗口坐标 (1270,790) 提问 -> 这里收到 (970,790) = 1270 - 300
+
+收到的是**控件自己的坐标**，不需要任何换算。这一条是布局逼出来的：
+「入参是 TopLevel 坐标」这个说法在控件位于原点时无法被证伪，而它是错的。
+
+记在文档里而不只记在注释里，是因为它的形状很容易再犯：这条判据的正确形式不是
+「转一次坐标」，而是**没有坐标要转**。下面任何一句「先把它转回自己的坐标系」都是多余的，
+而多出来的那一句在控件位于原点时是恒等变换，测不出来。
 
 ## 为什么自检剧本是绿的
 

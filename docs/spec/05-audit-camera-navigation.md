@@ -16,6 +16,36 @@ Phase F：相机能走、能转。拆成三件事——指针移动转视角、W
 
 还顺手改成**指针一动就转**（第一版要按住左键），并把走动速度从 3 单位/秒降到 1.5。
 
+**后又返工过一次。** 拿在手里再转一圈，暴露的是「自由转头没有参照物」：
+转到某个角度时相邻两个面的颜色差不说明「现在朝的是世界的哪一侧」，而上下一放开连地平线也没有了。
+这一轮加的四件事：
+
+- **固定鼠标**：转视角的时候光标被钉在视口中心并藏起来（游戏里的做法），手可以一直朝一个方向划；
+  按住右键把它们还回去，那一段不转视角、光标自由。
+- **视角锁收到 89 度**：从 89.9 降到 89，留一度让人还知道哪边是上。
+- **原点上的 xyz 参考线**：X 黄、Y 绿、Z 蓝，60% 半透明，走深度测试。
+- **灵敏度降到 0.10 度/DIP**：固定鼠标去掉「划不到头」这个问题之后，灵敏度就该往小里调。
+
+固定鼠标牵动了事件契约：`LookMoved` 报的不再是指针位置，而是**增量**——
+参照点在钉光标的那一层手里，控制器按位置相减得到的会是「挪动 + 手移动」的混合。
+理由写在「输入」那一节。
+
+**第三次返工。** 这次改的是「调不了」：移速与灵敏度是常量，而它们本来就是每个人手感不同、
+鼠标 DPI 不同就该不同的两个数——改一下要动代码重编译。这一轮：
+
+- **两个手感参数变成控件属性**（`Previewer.MoveSpeed` / `LookSensitivity`）。
+- **Sample 加侧边栏**：两个滑块直接改它们（改完当场生效），加上 fps、帧时、视口尺寸与缩放、
+  相机位置、朝向、距离这些运行数据。
+
+把控件从窗口左上角挪到侧边栏右边这个动作本身，又撞出两个一直藏着的问题。
+两个都是「控件在原点时恒等、挪开才现形」的那一类：
+
+- **命中测试的坐标换算多转了一次**（`ICustomHitTest.HitTest` 的入参已经是控件自己的坐标）。
+  错的写法在控件位于原点时是恒等变换，测不出来；挪开之后左边缘 300 像素整个收不到输入。
+  见 04 那一节。
+- **右键的抬起事件可以落在侧边栏上**，而侧边栏不是视口的祖先，事件不会回来——
+  挂起标志会一直挂着，表现成「从那以后鼠标怎么动都不转了」。见「输入」那一节。
+
 ## 文件与职责
 
     Controllers/CameraModel.cs             相机状态的权威 + 缩放 + 边界（可选）+ DEBUG 自检
@@ -23,11 +53,16 @@ Phase F：相机能走、能转。拆成三件事——指针移动转视角、W
     Controllers/MouseLookController.cs     指针位移 -> 转角度 -> SetCamera
     Controllers/WasdCameraController.cs    按键状态 -> 按时间积分的平移 -> SetCamera
     Controllers/ScrollZoomController.cs    滚轮 -> 缩放（Phase E，未改）
-    Previewer.Events.cs                    新增 LookStarted / LookMoved / LookEnded
-    PreviewerInputAdapter.cs               指针移动 -> 看向手势（首移捕获、离开或丢捕获收尾）
-    MainWindow.axaml.cs                    三个控制器的装配与生命周期；失活时清输入状态
-    Debug/DebugCube.cs                     IsVerifiable 的姿态前提 + 逐面的几何期望
-    Previewer.cs                           VerifyFrame 的预算与跳过日志
+    Previewer.Events.cs                    新增看 LookStarted / LookMoved / LookEnded 与两个控件属性
+    PreviewerInputAdapter.cs               指针移动 -> 增量、捕获、把光标钉在中心、右键让开
+    Win32Cursor.cs                         把光标挪走与读回来（Avalonia 没有这个口子）
+    GlAxesRenderer.cs                      原点上的 xyz 参考线（±X/±Y/±Z，半透明）
+    Debug/DebugAxes.cs                     那三条线的顶点检查 + 混合色的算式
+    Gpu/GlRaw.cs                           GlInterface 没包的两个入口（混合、线宽）
+    Sidebar.cs                             侧边栏：滑块 -> 控件属性、每秒四次刷那些读数
+    MainWindow.axaml / MainWindow.axaml.cs  两列布局、控制器与侧边栏的装配、失活时清输入状态
+    Debug/DebugCube.cs                     IsVerifiable 的姿态前提 + 逐面几何期望 + 轴线像素
+    Previewer.cs                           VerifyFrame 的预算与跳过日志；轴线的创建与绘制
 
 模型拆成两个 partial 文件，理由是驱动方式不同：缩放一格一格地来（滚轮），
 转视角与平移被连续输入推着走（指针一秒几百条、按住键每帧一次）。
@@ -52,22 +87,26 @@ Phase F：相机能走、能转。拆成三件事——指针移动转视角、W
 `MouseLookController` / `WasdCameraController`（`internal sealed class`，`IDisposable`）
 
     MouseLookController(Previewer previewer, CameraModel camera)
-
     WasdCameraController(Previewer previewer, CameraModel camera)
     ReleaseKeys()
 
-    DegreesPerDip = 0.25f     // 指针移过一个 DIP 转多少度
-    UnitsPerSecond = 1.5f     // 按住一秒走多少世界单位（＝方块）
+这两个控制器里**没有**手感常量了：灵敏度与速度由控件属性给（见「控件属性与侧边栏」）。
 
-`Previewer` 新增的三个事件（位置是控件坐标，DIP）：
+`Previewer` 新增的三个事件（增量是控件坐标下的 DIP）：
 
-    event Action<Point>? LookStarted
-    event Action<Point>? LookMoved
+    event Action? LookStarted
+    event Action<Vector>? LookMoved
     event Action? LookEnded
 
-`PreviewerInputAdapter` 新增一个公开方法，给宿主在窗口失活时用：
+`Previewer` 新增的两个控件属性（放在 `Previewer.Events.cs` 里，与事件同一处——都是对外表面）：
 
-    public void ReleaseLook()
+    float MoveSpeed          // 每秒走多少世界单位（＝方块），默认 1.5
+    float LookSensitivity    // 指针每移过一个 DIP 转多少度，默认 0.10
+
+`PreviewerInputAdapter` 新增的公开面，给宿主用：
+
+    public void ReleaseLook()          // 窗口失活时调：收手势 + 清右键挂起状态
+    public bool ConfinePointer { get; set; }   // 默认 true；关掉就退回「只捕获指针」
 
 ## 为什么是「第一视角」，而不是 orbit
 
@@ -165,25 +204,241 @@ Phase E 里 `MinDistance = 2.4` / `MaxDistance = 7.0` 是写死的常量，取�
 算不出一个能画的相机就原地不动，并把这件事打出来。自检两头各推一次
 （+6000 / -6000 档），断言距离**精确不变**且位置仍是有限值。
 
-## 输入：指针一动就转
+## 输入：指针一动就转，并且把光标钉在中心
 
 第一版要按住左键才算「起拖」。改掉了：**指针在控件上移动就是在转视角**，
 不需要按任何键——这是第一人称的默认操作，多一个按键就多一道「为什么不动」的可能。
 
-手势的起止在**适配器**里，不在控制器里：
-
-- 第一次 `PointerMoved` 定下参照点并发 `LookStarted`，同时把指针**捕获**过来。
-  捕获之后指针移出控件、甚至移出窗口时移动事件仍然送得到，转动不会在边界上突然停住；
-  不捕获的话指针一出界画面就停，手感像卡死——而那是「没了后续事件」，不是「控制器没处理」。
-- `PointerExited` 或 `PointerCaptureLost` 收尾。没有抬起事件可以用了，
-  「这一段结束」只能由位置本身给出。
-- 宿主在窗口失活时调 `ReleaseLook()`。
-
 事件名从 `DragStarted/DragMoved/DragEnded` 改成 `LookStarted/LookMoved/LookEnded`：
 没有键被按着的时候「拖拽」是假话，而事件名是给人读的。
 
-`MouseLookController` 因此也**没有**「取消」那个口子了（原来有 `CancelDrag`）：
-它只管按事件做增量，起止归适配器——而适配器才是拿得到指针与捕获的那一层。
+### 增量为什么改在适配器里算
+
+`LookMoved` 报的是**增量**，不是指针位置。这是固定鼠标逼出来的结论，不是风格偏好：
+
+光标被钉在中心之后，「指针在哪」这个信息恒等于中心，真正有意义的只剩两次之差。
+而那个差必须在**知道光标被挪到哪儿**的那一层算出来。控制器不知道光标被挪走过，
+它按事件位置相减得到的是「我们那次回中 + 手移动」的混合——表现是转一下就跳一段，
+而单看灵敏度、方向、符号全都是对的。
+
+于是参照点（`_reference`）落在适配器手里，和捕获、光标一样。三者本来就是同一件事：
+谁挪走了光标，谁才知道下一次「移动了多少」。
+
+### 钉住：挪过去、读回来、用读回来的那个点当参照
+
+- 起手势时把光标移到视口中心（`Win32Cursor.MoveTo`），再**读回来**（`TryRead`），
+  把读回来的那个像素换算成控件坐标当参照点。
+- 每次移动：增量 = 事件位置 − 参照点；然后重新钉一次，参照点更新为新的读回值。
+  我们那次回中会紧接着产生一个「指针回到参照点」的事件，它的增量是零，直接放过。
+- 收尾（`PointerExited` / `PointerCaptureLost` / 右键 / `ReleaseLook`）时把光标还回去。
+
+**必须用读回来的点，不能用请求的点**：`SetCursorPos` 的目标不可达（窗口有一部分在屏幕外）
+时会把它挪到最近的可见点，返回值却仍然说成功；而屏幕坐标到 DIP 的换算还会把中心舍到整像素上
+（窗口宽是奇数时差半个 DIP）。用请求值当参照点时，每一次移动都会把这半像素的偏差再加一遍——
+每秒几百次，画面自己就转起来了，而那看起来像灵敏度写爆了。
+
+钉不住时整段放弃（`_pinBroken`）并**只打一次**日志，退回「只捕获指针」：
+视角照转，只是手划到屏幕边上会停。宁可降级也不要一个位置对不上的参照点。
+
+### 为什么是 Win32 P/Invoke
+
+Avalonia 的公开面里只有「换一个光标形状」（包括 `StandardCursorType.None`），
+**没有任何移动光标位置的 API**——Win32 后端自己用了 `GetCursorPos` / `SetCursor`，
+但那几个 P/Invoke 是 internal 的。所以只能自己来，并且只在 `OperatingSystem.IsWindows()`
+上做：别的系统要另找一套（X11 的 `XWarpPointer` 之类），而调用方需要的是「知道能不能做」，
+不是「静默地什么都不做」——所以是 `Win32Cursor.IsSupported` + 降级日志。
+
+顺带一条边界：**窗口没激活时不钉**。指针从别的窗口上扫过时把它拽到这个窗口中心很讨厌，
+而真要转视角本来就该先点一下让窗口激活。这一条只挡「钉」，不挡转视角。
+判据只能用 `Window.IsActive`：`TopLevel` 在 12.1.3 上没有这个概念（实测它的公开成员里
+既没有 `IsActive` 也没有激活状态），所以拿不到窗口就按激活处理。
+
+### 右键：把指针还回去
+
+固定鼠标是「光标归程序」，于是拖不动窗口、点不到别的控件、够不着标题栏。
+按住右键就把这一段让出来：`EndLook()` 收手势（顺带放出光标）、置上 `_suspended`，
+之后**完全不接管指针**——不转视角、不钉、不藏。抬起右键清掉标志，
+下一次移动重新起一段手势（重新钉住）。
+
+挂起期间**不保留指针捕获**：捕获还挂着时，「这次移动没进来」和「移动事件根本没来」
+在日志上分不开——而有捕获时移出控件也不会触发 `PointerExited`，这一段就没有收尾的口子了。
+
+`ReleaseLook()` 里连 `_suspended` 一起清：按住右键的时候 Alt+Tab 走掉，
+抬起事件送到别的窗口去了，那一位会一直留着——症状是回来之后鼠标怎么动都不转，
+而日志里只有一条「右键按下」。
+
+### 抬起可以落在别处（侧边栏逼出来的）
+
+挂着 `_suspended` 的那一位，原来是靠控件上的 `PointerReleased` 清掉的。
+这条路有个前提：**松开鼠标时指针还在视口上**。之前这个前提几乎不会被打破
+（窗口里只有这一个控件），把侧边栏放进来之后它成了最常走的那条：
+
+    在视口里按下右键 -> 拖到侧边栏上 -> 在那上面松开
+
+那一下抬起落在侧边栏上，而侧边栏不是视口的祖先，事件冒泡不到控件。
+挂起状态于是永远留着，症状是「从那以后鼠标怎么动都不转」——
+而日志里只有一条「按下」，看起来像灵敏度被调成了 0。
+（真要走过去也行：按住右键拖出窗口再松开，老代码同样会卡住，只是没人这么用。）
+
+修法不是去别的层再订阅一次抬起，而是**不信那个事件**：移动事件里本来就报着按键的当前状态，
+挂起期间只要发现右键已经放开了，就当场复位（`OnPointerMoved` 里那一小段）。
+于是「抬起落到哪儿」这件事不再重要，挂起状态也就不可能挂死。
+
+剧本把这条路单独写了第三步：合成两段「右键已松开」的移动、而一条抬起事件都不发，
+断言适配器自己重新起了手势并且真的转了。这一步是这次改动的回归用例。
+
+副作用一条：抬起落在别处时会晚一个移动事件才恢复（下一次指针进视口时）。
+那正是需要它的时刻——不会有人在意「还没动就已经恢复了」。
+
+### 剧本为什么关掉它
+
+`InputSelfTest` 一上来就 `_input.ConfinePointer = false`。剧本摆的是**合成的**指针位置，
+而钉住会让参照点取自「读回来的真实光标位置」——于是脚本合成的那一段增量里会混进
+真实光标当时在哪，算出来的角度就不再是它自己给的那一段。
+
+这是有意的取舍，不是漏测：钉住的答案在系统里（光标被挪走之后落在哪），
+剧本要么作弊（自己假定一个答案），要么就得有一套真鼠标。**它能被验的那一半单独写了三步**：
+按住右键期间一个事件都不该来、相机一个 bit 都不该动；抬起之后必须重新起手势并真的转起来；
+以及抬起事件一次都不发时也要能从移动事件报的按键状态里自己恢复。
+三步合起来把「右键认不出来」「抬手忘了复位」「抬手落在别处就挂死」这几种半吊子实现都挡住。
+
+至于钉住本身：`input.confine` / `input.right` 那几行日志记着每一次的请求点与读回来的点，
+真机上按住右键划一下就知道。这与 `ICustomHitTest` 那条是同一类边界——
+合成事件绕过的那一层，只能靠真输入或日志。
+
+## 视角锁：pitch 夹在 89 度
+
+`CameraState.MaxPitch` 从 89.9 降到 89。夹取本身一直都在（±90 时 forward 与 up 共线，
+`CreateLookAt` 退化，画面整块消失而 GL 一声不吭），改的是**留多少**：
+
+- 顶到 89.9 时画面上已经没有地平线的迹象了，抬头低头都只剩一片颜色，
+  而那正是自由转头之后最容易迷路的时候。留一度让人还知道哪边是上。
+- 对视图矩阵没有任何区别：`cos(1°) = 0.99985`。
+- 代价是朝正上/正下看时会差一点点到位——那本来也不是一个有意义的姿态。
+
+`CameraState.VerifyConvention` 里那条 `dot(down, -UnitY) > 0.9995` 顺带成了这一档的守卫：
+它等价于「夹取至少留到 88.2 度」，把最大俯角改到 88 度以下会立刻红。
+
+## 原点上的 xyz 参考线
+
+立方体六面按法线着色，转到某些角度时相邻两面的颜色差不说明「现在朝的是世界的哪一侧」。
+三条轴线是唯一不带歧义的世界坐标系参照：X 黄、Y 绿、Z 蓝，60% 半透明，
+沿 ±X/±Y/±Z 各伸出去 2 个世界单位（方块半边长 0.5，所以每根露在外面 1.5）。
+
+两个决定：
+
+- **走深度测试**，不做「永远画在最前」的 gizmo。落在方块里的那一段被挡住，
+  露在外面的是从方块里伸出来的三根轴。永远画在最前会让线糊在方块上，
+  而画面校验正是按颜色反推画面上有什么的——那种线会把方块的面糊成认不出的颜色，
+  而它本来只是一条几何关系。
+- **混合是真的混合**。`GlInterface` 里没有 `glBlendFunc`，只有 `Enable`，
+  而 GL_BLEND 配默认的 `(ONE, ZERO)` 就是原样覆盖——alpha 只是个被写进帧缓冲的数。
+  所以混合函数走 `GetProcAddress`（`glBlendFuncSeparate`），并且**找不到就断言**：
+  一个颜色不对的参照物比一个起不来的程序更难查。
+
+线宽同理走 `GetProcAddress`（`glLineWidth`）：GLES 3 的 core 只保证 1.0，
+更粗的是可选的。不假设——先把攒着的错误读干净（那可能是别的绘制留下的），设一次粗的，
+再读一次；被拒就退回 1.0。实测 ANGLE/D3D11 接受 2.0。
+
+`GlRaw` 是这些入口的归处：`GlInterface` 只包了后端自己用得上的那 115 个，
+我们要的 `glGetError` / `glReadPixels` / `glBlendFuncSeparate` / `glLineWidth` 都在外面。
+原来 `Previewer` 里手写过前两个的委托，现在合成一处——同一件事有两种写法时，
+签名写错的那一份要等到运行期把栈搅乱才暴露，而它长得和另一份一模一样。
+
+轴线也进了画面校验的分类：`DebugCube` 的像素分类现在认二十八种颜色
+（七种底色 + 每根轴压在每种底色上的二十一种混合结果）。**不能分两趟**（先认底色、
+再看是不是某根轴压在上面）：混过的像素离底色已经很远，而它往往更接近另一个**面色**——
+黄色压在背景上得到的那个颜色离「Y 面那个黄」比离背景近，第一步就把底色认错了。
+二十八种放在一起取最近的，就没有这个先后问题。
+
+不认出来会怎样：认不出色的像素有一个 1% 的预算，几条线当然吃得下——
+但那样一来那条断言的余量就取决于线有多长，而不是取决于画得对不对。
+
+## 灵敏度与走动速度
+
+两个数现在是**控件属性**（`Previewer.MoveSpeed` / `Previewer.LookSensitivity`），
+默认值与上一轮相同：`LookSensitivity = 0.10` 度/DIP、`MoveSpeed = 1.5` 世界单位/秒。
+
+取值依据没变：
+
+- 0.10 度/DIP 是固定鼠标之后调小的结果——转半圈从「扫一个半屏宽」变成「横移一千八百多个 DIP」，
+  精细瞄准做得出来了，而大角度转身靠一直往一个方向划仍是一两秒的事。
+- 1.5 是世界单位，而 **1 世界单位 = 1 个 MC 方块**：材质包分辨率（16/256/2048）
+  决定的是一个方块贴多少纹素，不改方块的尺寸，所以按材质包该配的是贴图采样（mipmap、过滤），
+  不是移动速度。
+
+改成属性的理由不是「方便」，是**这两类数本来就不该有唯一答案**：手的大小、鼠标 DPI、
+屏幕尺寸、以及你想用多细的粒度瞄准，每个人都不一样。写成常量的时候，
+换个人用就得改代码——而那个常量还兼着「默认值」这个职责，两件事被绑在了一起。
+
+读它们的地方只有一个约定：做成属性之后不再有「谁抄了一份」这件事，三个控制器、
+侧边栏、将来的设置面板读的都是同一个值。
+
+## 控件属性与侧边栏
+
+### 为什么放在控件上
+
+两个手感参数放在 `Previewer` 上，而不是三个控制器各自持有一个属性：
+
+- 控制器之间唯一的共同引用就是这个控件（它们都拿它订阅事件、推相机）。
+- 侧边栏也要拿到它们。控件属性是 Avalonia 的一等公民：能写在 XAML 里
+  （`<pv:Previewer MoveSpeed="2" />`）、能被滑块绑上、能参与样式。
+
+控件自己不读这两个值——它不移动相机。它们是「这个视口的导航设置」，
+读它们的是挂上来的导航层。硬约束 R1~R8 里没有一条要求属性必须被自己读。
+
+实现的顺序性也有代价：属性没有夹取。滑块区间是 [0.1,8] 与 [0.01,0.6]，
+而属性本身接受任何 float——速度给 0 就是走不动，给负数就是倒着走。
+夹在滑块里是因为那是**界面**该做的事（人不该拖出一个负数），
+而属性是给代码用的，代码给什么就该是什么。
+
+### 滑块为什么不用 XAML 绑定
+
+侧边栏的两个滑块是手写事件接上去的（`ValueChanged` -> 写控件属性），不是 `{Binding}`：
+
+    _moveSpeed.ValueChanged += OnMoveSpeedChanged;
+    _moveSpeed.Value = _previewer.MoveSpeed;     // 顺序：先接事件，再推初值
+
+- **绑定的方向性与回写时机读不出来**。`{Binding}` 的默认模式由控件注册决定，
+  光看那一行 XAML 说不清「拖了之后值到底写没写进控件」——而这是这一步唯一的正确性要求。
+- **先接事件再推初值**，是为了让每次启动的日志里都留下两行「滑块真的接上了」。
+  反过来写的话，接线断没断在日志上完全看不出来：拖了没反应与没拖过长得一模一样。
+  这一次赋值会走一遍处理器、把同一个值写回属性（幂等），代价是零。
+- 初值只从属性取一份。XAML 里再写一个 `Value="1.5"` 就有两个默认值，
+  而它们分叉时「程序里用的是哪个」从界面上看不出来。
+
+### 焦点必须留在视口上
+
+滑块一律 `Focusable="False"`，并且侧边栏上的任何一次按下都会把焦点还给视口
+（在侧边栏那一层用 `RoutingStrategies.Tunnel` 订阅按下）。
+
+理由在键盘那条链上：`KeyDown` 只发给有焦点的元素，而适配器订阅的是**控件**上的
+`KeyDown`。焦点跑到滑块上之后，W/A/S/D 会发给滑块（它不处理，于是冒泡到窗口），
+而窗口不是控件的祖先，事件永远到不了适配器——表现是「按了 W 完全没反应」。
+
+用隧道订阅而不是冒泡：滑块的手柄在处理按下时会把事件标成已处理，冒泡那一趟到不了侧边栏，
+而隧道那一趟是从窗口往下走的，必定先经过它。`handledEventsToo` 救不了这种情况——
+冒泡在源头就停了。
+
+这一条与 `ICustomHitTest` 那条一样，**合成事件验不了**（剧本的 `RaiseEvent` 直接打到控件上，
+不走命中测试也不走焦点），只能靠真机上点一下再按 W。
+
+代价是滑块没有键盘操作。对一个调试用的侧边栏可以接受，写在这里是因为它是个明确的取舍，
+不是没想到。
+
+### 读数怎么刷
+
+fps、帧时、视口尺寸与缩放、相机位置、朝向、视线、距离、以及当前的两个手感值——
+全部每 0.25 秒刷一次，在 `Previewer.Tick` 里攒计数。
+
+- **不逐帧刷**：侧边栏和视口在同一行，文本一变就要重新排版。fps 这个数每秒变四次
+  已经比人眼快了，逐帧改文本只是每帧多一次布局。
+- **帧率用 `Tick` 给的 delta 累加**，不自己起秒表：那是渲染与控制器共用的同一条时间轴，
+  另起一条会让「帧时」里混进两块表之间的偏差，而它看起来像掉帧。
+- **列宽写死 300**。按内容自适应的话，fps 从 9.9 跳到 10.0 就会把视口挤一下——
+  视口每帧改尺寸会连带把视口尺寸断言和画面校验的期望一起搅动。
+- 数据来源是模型与控件本身，侧边栏不自己记一份：「侧边栏显示的值」与「真正生效的值」
+  只能有一个来源，否则总有一刻它们不一致，而那时显示的数字恰好是最不该信的那个。
 
 ## 画面校验的两处失效
 
@@ -270,7 +525,9 @@ Phase C 立起来的那套像素校验有两条隐含前提：
 
 ## 验收结果
 
-    dotnet run --project src/LitematicaViewer.Previewer.Sample -- --selftest 6
+    dotnet run --project src/LitematicaViewer.Previewer.Sample -- --selftest 8
+
+    （6 改 8：剧本加了右键那一步，落在 4.4 秒处，而窗口至少要开到最后一步之后一秒多。）
 
 模型自检（纯计算，早于 GL 上下文）：
 
@@ -279,17 +536,35 @@ Phase C 立起来的那套像素校验有两条隐含前提：
     [SAMPLE][camera.look] yaw/pitch 增量、位置不动、俯仰两端夹取、一来一回全通过 distance=4.7244
     [SAMPLE][camera.pan] 方向/水平面/刚体性/Target 派生全通过 distance=4.7244
 
-转视角那一段的完整链路（合成指针移动 -> 适配器 -> Look* -> 控制器 -> 模型 -> SetCamera）：
+侧边栏：两个滑块接上了，读数开始刷新。
 
-    [PREVIEWER][event.look] started pos=(380,300) handlers=2
-    [SAMPLE][look.start] pos=(380,300) yaw=-37.41 pitch=25.05
-    [SAMPLE][look.move] moves=1 delta=(60.0,30.0) total=(15.00,7.50) yaw=-22.41 pitch=32.55
-    [PREVIEWER][event.look] ended handlers=2
-    [SAMPLE][look.end] moves=2 total=(30.00,15.00) yaw=-7.41 pitch=40.05 distance=3.7795
+    [SAMPLE][sidebar.move] moveSpeed=1.5
+    [SAMPLE][sidebar.look] lookSensitivity=0.1
+    [SAMPLE][sidebar.stats] 侧边栏开始刷新（只打这一条）fps=8.0 frameMs=125.0 pos=(<2.6, 2, 3.4>)
+                            yaw=142.59 pitch=25.05 distance=4.7244 viewport=980x800 scaling=1.00
 
-    yaw 增量 30.00（120 DIP × 0.25）  pitch 增量 15.00
+    头两行是启动时把属性推给滑块那一次走回来的，它们同时证明「事件接上了」与「属性写得进」。
+    第三条里的 fps=8.0 是第一秒的真实值（那一段里首帧的画面校验读回还没走完，强制 GPU 同步），
+    整场平均是 44.2。
+
+命中测试的三个采样点。加了侧边栏之后按**控件自己的坐标系**给点再转到窗口坐标，
+理由见 04：
+
+    [SAMPLE][input.hittest] previewer bounds=300, 0, 980, 800 visible=True ...
+    [SAMPLE][input.hittest] point=(790,400)  local=(490,400) inputHitTest=Previewer#Viewport < Grid < ...
+    [SAMPLE][input.hittest] point=(310,10)   local=(10,10)   inputHitTest=Previewer#Viewport < Grid < ...
+    [SAMPLE][input.hittest] point=(1270,790) local=(970,790) inputHitTest=Previewer#Viewport < Grid < ...
+
+转视角那一步的完整链路（合成指针移动 -> 适配器 -> Look* -> 控制器 -> 模型 -> SetCamera）：
+
+    [SAMPLE][look.start] yaw=-37.41 pitch=25.05 lookSensitivity=0.1
+    [SAMPLE][look.move] moves=1 delta=(60.0,30.0) total=(6.00,3.00) yaw=-31.41 pitch=28.05
+    [SAMPLE][look.end] moves=2 total=(12.00,6.00) yaw=-25.41 pitch=31.05 distance=3.7795 lookSensitivity=0.1
+
+    yaw 增量 12.00（120 DIP × 0.10）  pitch 增量 6.00
     距离 3.7795 -> 3.7795（参考距离不是转视角该碰的东西）
     相机位置一动不动（第一视角；这是这一相位新加的一条断言）
+    灵敏度那一栏取自控件属性——脚本算期望时读的就是它，所以拖滑块不会让这一步变红。
 
 剧本先把适配器手里可能挂着的手势收掉再开始自己的：指针一动就转意味着真实鼠标的每一次移动
 都是一段手势，不先收掉的话脚本第一段移动会被当成「那一段真人手势的延续」，
@@ -299,45 +574,82 @@ Phase C 立起来的那套像素校验有两条隐含前提：
 走动那一段（按住 W 0.8 秒）：
 
     [SAMPLE][camera.wasd] key=W down=True pressed=[W]
-    [SAMPLE][camera.wasd] 开始移动 axis=(0.00,1.00) pos=(-2.076814, 1.6, -2.695487)
+    [SAMPLE][camera.wasd] 开始移动 axis=(0.00,1.00) speed=1.5 pos=(<-2.0693636, 1.6, -2.6976051>)
     [SAMPLE][camera.wasd] key=W down=False pressed=[]
-    [SAMPLE][camera.wasd] 移动结束 seconds=0.801 units=1.2012 expected=1.2012
-    [SAMPLE][selftest.walk] seconds=0.801 expected=1.2012 actual=1.2012 dot=1.000000
+    [SAMPLE][camera.wasd] 移动结束 seconds=0.802 units=1.2035 expected=1.2035 speed=1.5
+    [SAMPLE][selftest.walk] seconds=0.802 speed=1.5 expected=1.2035 actual=1.2035 dot=1.000000
     [SAMPLE][selftest.walk] 松开后 5 帧位移为 0，键状态确实清掉了
 
     位移方向 dot=1.000000：正是按下那一刻视线在水平面上的投影
     松开后位移为 0：键状态清干净了
+    speed 那一栏是按下那一刻读到的控件属性值——拖滑块改速度不会让这一步变红，
+    而走动期间改过速度的话「按了多久走多远」这条关系本来就不成立，所以两边取同一个时刻的值。
 
-画面校验：三次旋转的姿态照旧，新增的掠射姿态是那 34 个像素的回归用例：
+右键那一步（三段：按住 / 抬起 / 抬起事件根本没送到）：
 
-    version=3  yaw=-37.41  pitch=25.05  solid=65537   coverage=8.3%
-    version=6  yaw=-37.41  pitch=25.05  solid=102693  coverage=13.1%
-    version=8  yaw=-7.41   pitch=40.05  跳过（转头之后相机不再看向中心）
-    掠射帧     face=0 pixels=33 expected=34 expectedVisible=True   ← 旧判据下这里是 33 > 90，必崩
+    [PREVIEWER][input.right] 按下 suspended=True note=这一段不转视角、光标自由、不再钉回中心
+    [PREVIEWER][input.right] 抬起 suspended=False note=下一次移动重新起手势并钉住光标
+    [SAMPLE][selftest.right] 按住期间 0 条事件、相机一动不动；抬起后重新起手势并转了 6.00 度
+    [PREVIEWER][input.right] 按下 suspended=True note=这一段不转视角、光标自由、不再钉回中心
+    [PREVIEWER][input.right] 抬起（从指针状态补上）suspended=False
+                             note=抬起事件落在别处了，这一次移动重新起手势并钉住光标
 
+    最后两行是第三步：合成的事件里一条 `PointerReleased` 都没有，
+    适配器从移动事件报的按键状态里补上了这次抬起。
+
+画面校验：三次旋转的姿态照旧，掠射姿态是那 34 个像素的回归用例；
+轴线进了像素分类之后，五帧的 `unmatched` 全是 0：
+
+    version=3  yaw=142.59 pitch=25.05 solid=70947 coverage=9.0%  axisPixels=1244
+    version=6  yaw=-37.41 pitch=25.05 solid=111258 coverage=14.2% axisPixels=1402
+    version=8  yaw=-7.41  pitch=40.05 跳过（转头之后相机不再看向中心）
+    掠射帧     yaw=173.60 pitch=39.52 solid=39921 coverage=4.4% axisPixels=1086
+               face=0 pixels=33 expected=34 expectedVisible=True   ← 旧判据下这里是 33 > 90，必崩
+
+    [PREVIEWER][gl.axes] axes=3 vertices=6 indices=6 length=2 alpha=0.6 lineWidth=2
+                         blend=srcAlpha/oneMinusSrcAlpha alphaChan=kept expected=线宽>=1
+    [PREVIEWER][gl.axes.axis] axis=0 color=255,255,0 pixels=451
+    [PREVIEWER][gl.axes.axis] axis=1 color=0,255,0 pixels=458
+    [PREVIEWER][gl.axes.axis] axis=2 color=0,0,255 pixels=335
     [PREVIEWER][gl.error] code=0x0
-    [SAMPLE][selftest.summary] ticks=320 scrolled=3 wheelIn=2 wheelOut=1 key=2 keyDown=True keyUp=True
-    resizes=2 lastViewport=1184x768 expected=1184x768 cameraSets=3 look=1/2/1 distance=4.7244->3.7795 elapsed=5.89s
-    [PREVIEWER][gl.deinit] frames=320 expected=>0 elapsed=6.05s avgFps=52.9
+
+汇总：
+
+    [SAMPLE][selftest.summary] ticks=355 scrolled=3 wheelIn=2 wheelOut=1 key=2 keyDown=True keyUp=True
+    resizes=2 lastViewport=1140x800 expected=1140x800 client=1440, 800 cameraSets=3 look=3/4/3
+    distance=4.7244->3.7795 elapsed=7.04s
+    [PREVIEWER][gl.deinit] frames=355 expected=>0 elapsed=8.04s avgFps=44.2
+
+`lastViewport` 与 `expected` 是**视口**的尺寸：1440 的客户区减去 300 的侧边栏就是 1140。
+「视口 == 客户区」这个等式只在视口铺满窗口时成立，加了侧边栏之后它不再成立——
+期望改成从控件的 `Bounds` 算，算式与渲染里那一处逐字相同
+（换一个算法就等于把「视口算得对不对」这条断言的前提换掉了）。
 
 `cameraSets=3` 仍然只有剧本自己摆的那三次（两次旋转 + 一次掠射）：滚轮、转视角、走动三种输入
 各自走 `ScrollZoomController` / `MouseLookController` / `WasdCameraController`，都不经过剧本。
 
-连跑四次都是 `look=1/2/1` 且 exit=0。**真实输入也验到了**：跑自检的同时有人在窗口上动鼠标，
-日志里会出现第二段手势（`look=2/11/2` 这种计数），相机确实跟着转了——
+`look=3/4/3`：转视角一程（1/2/1）加右键那一步的两程（各 1/1/1）。连跑三次都是这个数且 exit=0。
+**真实输入也验到了**：跑自检的同时有人在窗口上动鼠标，日志里会出现额外的段数
+（`look=5/256/5` 这种量级，256 条来自真人鼠标划过窗口），相机确实跟着转了——
 合成事件覆盖不了命中测试那一段（见 04），所以这条真实输入的证据有它自己的价值。
 
 ### Release 下的探针
 
 | 程序集 | 探针 | Debug | Release |
 |---|---|---|---|
-| Sample.dll | `camera.look` / `camera.pan` / `camera.wasd` / `look.start` / `selftest.walk` | 有 | 无 |
+| Sample.dll | `camera.look` / `camera.pan` / `camera.wasd` / `look.start` / `look.move` / `look.end` / `selftest.*` | 有 | 无 |
+| Sample.dll | `sidebar.move` / `sidebar.look` / `sidebar.stats` / `sidebar.focus` | 有 | 无 |
+| Sample.dll | `input.probe.window` / `input.hittest` / `input.hittest.tree` | 有 | 无 |
 | Previewer.dll | `camera.convention` / `gl.readback` / `跳过画面校验` / `读回预算用尽` | 有 | 无 |
+| Previewer.dll | `input.attach` / `input.confine` / `input.right` / `input.release` / `gl.axes` / `gl.axes.axis` | 有 | 无 |
 | Sample.dll | `api.probe`（构造签名的临时探针，已删） | 无 | 无 |
 
-前四个来自 `Debug.WriteLine`（`[Conditional("DEBUG")]` 连同插值字符串一起被丢掉）；
+前三类来自 `Debug.WriteLine`（`[Conditional("DEBUG")]` 连同插值字符串一起被丢掉）；
 `VerifyFrame` 整段（含读回）以及 `IsVerifiable` 的调用点在 `#if DEBUG` 里——
 读回那一下 GPU 同步不会因为断言被丢掉而消失，所以连调用点一起包掉。
+
+Release 下跑同一个剧本：`exit=0`，**一行输出都没有**（控制台是空的，因为所有桩都被丢掉了），
+窗口照常开 8 秒、照常画 355 帧。这就是「探针一个字节都不进 Release」的验证。
 
 ## 调试桩
 
@@ -345,10 +657,17 @@ Phase C 立起来的那套像素校验有两条隐含前提：
     camera.wasd                          按键状态变化、开始移动、一段移动的汇总（走了多久多远）
     camera.wasd 释放全部按键              失活时的清场
     camera.look / camera.pan             VerifyCameraMath 的汇总（单发，不逐次打）
+    input.confine                        钉不住时降级（只说一次）、宿主关掉固定鼠标
+    input.right                          右键挂起的三条路：按下 / 抬起 / 抬起落在别处（从按键状态补上）
+    input.release                        宿主在窗口失活时收手势
+    gl.axes / gl.axes.axis               轴线的混合、线宽、每根轴认出来的像素数
+    sidebar.move / sidebar.look          滑块写进了控件属性（每次拖动都打，人手速率不是帧速率）
+    sidebar.stats                        刷新那条链跑起来了（只说一次，逐条打会冲掉终端）
+    sidebar.focus                        侧边栏被按下之后焦点还回了视口
     gl.readback 跳过画面校验              姿态不在校验范围内的原因与数值（每 60 条一条）
     gl.readback 读回预算用尽              预算用尽，之后不再做画面校验（只说一次）
 
-节流的落点（这一相位新增的三处）：
+节流的落点（新增三处）：
 
 - `camera.set` 每 60 条一条。它一行要格式化五个向量加六个标量，而指针一动就是每秒六十行，
   这是全项目最重的一处 IO。
@@ -374,18 +693,27 @@ Phase C 立起来的那套像素校验有两条隐含前提：
 ## 已知取舍
 
 - **动作的方向约定落在模型里**（`Look` 的符号、`Pan` 的左右），控制器只把像素数
-  与「哪个键按着」喂进来。手感参数（灵敏度、速度）在控制器里。
-- **灵敏度与速度是脚本引用得到的常量**（`DegreesPerDip` / `UnitsPerSecond`）。
-  脚本引用它们意味着改了值不会红——那是有意的：脚本钉的是「移多少像素转多少度」、
-  「按了多久走多远」这两条换算关系与方向，不是这两个数本身。
+  与「哪个键按着」喂进来。手感参数（灵敏度、速度）现在是**控件属性**。
+- **两个手感参数是控件属性，不是常量**（`Previewer.MoveSpeed` / `LookSensitivity`）。
+  调它们不再需要改代码：侧边栏的两个滑块直接写它们，改完当场生效。
+  控件自己不读这两个值——它是「这个视口的导航设置」的存放处，读它们的是导航层。
+- **属性本身不夹取**。速度给 0 就是走不动，给负数就是倒着走；区间只在滑块上。
+  夹在界面里是因为人不该拖出一个负数，而属性是给代码用的：代码给什么就该是什么。
+- **滑块不抢键盘焦点**（`Focusable="False"` + 侧边栏按下时把焦点还给视口）。
+  代价是滑块没有键盘操作；换来的是「点过滑块之后 W 还能走」。
+- **固定鼠标之下，把光标从视口挪到侧边栏上要靠右键**：光标被钉在视口中心，
+  光标是程序挪回去的，所以物理上推不过去。按住右键那一段才把指针还给用户
+  （抬起落在侧边栏上也算——这一步改成看指针的按键状态了，见「输入」那一节）。
 - **指针一动就转，不按任何键**。代价是没有「只在想要的时候转」这个开关；
-  真要的话加的是一个修饰键判据，不是回退成必须按住。
+  真要的话加的是一个修饰键判据，不是回退成必须按住。右键按住那一段就是这个开关的雏形。
 - **1 世界单位 = 1 个 MC 方块**（渲染器里那个单位立方体就是按这个画的）。
   材质包的分辨率（16x16 / 256x256 / 2048x2048）不影响它：那决定的是一个方块贴多少纹素，
   方块的世界尺寸始终是 1。要按材质包配的是贴图采样（mipmap、过滤），不是速度。
 - **平移没有上下**，理由见上。**滚轮也没有被改成「按距离比例」以外的任何东西**。
 - `CameraModel.Navigation.cs` 与 `CameraModel.cs` 的分法按**驱动方式**（离散 / 连续），
   不按「读 / 写」或「公开 / 内部」。再往这个类里加东西时按同一条线分。
+- **侧边栏的列宽写死 300**。按内容自适应的话，数字每变一次就把视口挤一下，
+  而视口尺寸是断言与画面校验的参照系。
 - 画面校验的姿态前提是**保守**的：占比窗口 [0.30, 0.85] 比覆盖率断言的 2%~50% 窄，
   两头都留了余量。放宽它意味着放宽那两条断言，那是另一件事。
 - 逐面期望的容差是 0.35 倍，实测偏差在 2%~5%（共边像素归属让实测略高于期望）。
@@ -394,13 +722,22 @@ Phase C 立起来的那套像素校验有两条隐含前提：
 ## 未解决
 
 - **手感仍然没有目视确认过**。第一版的手感问题是「拿给人看」才发现的，
-  所以这一条不是形式：转视角的方向与灵敏度（0.25 度/DIP）、走动速度（1.5 方块/秒）、
-  以及**指针一动就转在真机上会不会太灵敏**，都得在窗口上试。
-- **指针没有锁**。窗口比屏幕小的时候，一次扫动最多转「一屏宽 × 0.25 度」；
-  指针撞到屏幕边缘之后继续移动不再产生位移，转动就停在那儿。
-  真正的无限转动要的是 pointer lock（平台能力），不是这一层能补的。
+  所以这一条不是形式：转视角的方向与灵敏度（0.10 度/DIP）、走动速度（1.5 方块/秒）、
+  固定鼠标在真机上会不会太灵敏——都得在窗口上试。现在试的代价降到了「拖两个滑块」。
+- **焦点那一条只能靠真机**。合成事件绕过命中测试与焦点管理器，
+  所以「拖完滑块之后 W 还能不能走」剧本验不了：它要么作弊（自己调 Focus），
+  要么就得有一套真输入。日志里留了口子（`sidebar.focus` 打出按下之后焦点在谁身上）。
+- **固定鼠标是软件模拟的，不是 pointer lock**。光标被挪回中心（`SetCursorPos`），
+  所以：窗口有一部分在屏幕外时钉不住（降级成「只捕获指针」，只打一次日志）；
+  系统级的「光标在边框上」这类行为（拖窗口边缘、多显示器切换、触控板惯性滚动）
+  都不受我们控制。真正的 pointer lock 是平台能力，这一层补不出来。
+  差别在光标：软件模拟之下光标仍然存在（只是被藏起来并被拽回去），
+  移动距离仍有屏幕边界这个上限，只是我们每次把它拽回来而已。
 - 走动没有碰撞、没有高度约束，可以走到立方体内部。看真实建筑时会需要「别穿进实体」
   或至少一个「按 R 回到原点」。
-- 触控板的惯性、触屏的双指手势都没有接。`LookMoved` 是纯位置，接得进来。
+- 触控板的惯性、触屏的双指手势都没有接。`LookMoved` 是纯增量，接得进来。
 - 多个指针（多指、多鼠标）没有区分：适配器只记「当前这一段的指针」。
   第二根手指按下会被当成同一段手势的移动。
+- **侧边栏只是一个调试面板**：滑块区间是手写的（[0.1,8] / [0.01,0.6]），
+  没有输入框、没有「恢复默认」、没有把值持久化。要变成设置面板的话这三样都得加，
+  而那时该考虑的是「这些值存哪、怎么和配置文件对齐」，不是再加两个滑块。
