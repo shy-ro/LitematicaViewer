@@ -76,17 +76,15 @@ internal sealed class WasdCameraController : IDisposable
             return;
         }
 
-        if (isDown)
+        // 平台自动重复会让同一个键的 KeyDown 一秒来几十条，而它们在集合上是幂等的。
+        // 只在这个键真的改了状态时才打：日志因此天然只剩真实的状态变化，
+        // 不必再套一层节流，也不会把「按住了」这件事打上几十遍。
+        bool changed = isDown ? _pressed.Add(key) : _pressed.Remove(key);
+        if (changed)
         {
-            _pressed.Add(key);
+            Debug.WriteLine(
+                $"[SAMPLE][camera.wasd] key={key} down={isDown} pressed=[{string.Join(',', _pressed)}]");
         }
-        else
-        {
-            _pressed.Remove(key);
-        }
-
-        Debug.WriteLine(
-            $"[SAMPLE][camera.wasd] key={key} down={isDown} pressed=[{string.Join(',', _pressed)}]");
     }
 
     private void OnTick(double delta)
