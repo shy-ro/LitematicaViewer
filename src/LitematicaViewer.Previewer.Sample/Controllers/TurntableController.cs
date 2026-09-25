@@ -22,8 +22,8 @@ internal sealed class TurntableController : IDisposable
     internal const float MinPitch = -60f;
     internal const float MaxPitch = 60f;
 
-    // 取景距离 = 目标的水平半对角线 × 这个数。6.6 让光环（外缘是 1.62 倍）连同模型一起
-    // 舒服地落在画面里——按 fov 45 度竖着算，光环的投影高度约占画面的一半。
+    // 取景距离 = 目标的水平半对角线 × 这个数。6.6 让模型连同外圈光环一起舒服地落在画面里
+    // ——按 fov 45 度竖着算，模型的投影高度约占画面的三分之一。
     private const float FrameFactor = 6.6f;
 
     // 缩放的夹取。太近会推进模型里面去，太远模型就成了一小块。展台的主语是模型，
@@ -162,7 +162,7 @@ internal sealed class TurntableController : IDisposable
         _driftLogged = false;
 
         // 光环的半径就是目标的水平半对角线：网格那一份是按「半径为 1 = 刚好贴住目标外接圆」画的，
-        // 内缘是它的 1.08 倍，留出一点缝。
+        // 内缘贴着它外侧一点点（具体倍数在 GlPedestalRenderer.RingRadii[0]），留出一条细缝。
         _previewer.SetPedestal(true, target.Radius, target.BaseY);
         _previewer.SetCamera(_camera.Camera);
 

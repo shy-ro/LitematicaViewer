@@ -15,7 +15,7 @@ namespace LitematicaViewer.Previewer;
 // 半径与底面高度都是入参（每个展示目标不同），但顶点数据是死的：变换走矩阵，
 // 于是换目标时不重建任何 GPU 资源（R5 要求 GPU 资源只在 Initialize / Dispose 里创建销毁）。
 //
-// alpha 跟着顶点走，而且只有两档：内带与外带各做一次渐变（0.14 ↔ 0.42），中带是常量 0.42。
+// alpha 跟着顶点走，而且只有两档：内带与外带各做一次渐变（暗缘 ↔ 亮芯），中带是常量的亮芯。
 // 软边就是这两段渐变画出来的——整圈同值是一条硬边的带子，和「光环」不是一回事。
 //
 // 注意「两档」说的是**顶点上**只有两个取值，不是说画出来只有两种颜色：带内的 alpha 是插出来的，
@@ -29,10 +29,15 @@ internal sealed class GlPedestalRenderer : IDisposable
 
     // 径向分成四圈顶点、三个带。数值是「目标水平半对角线」的倍数：
     // 1 就是刚好贴住目标的外接圆。内缘必须大于 1（见 DebugPedestal），否则光环压在目标底下被挡掉一段。
-    internal static readonly float[] RingRadii = [1.08f, 1.26f, 1.44f, 1.62f];
+    //
+    // 整圈收得很窄（内外缘只差 0.16 倍）：要的是「能量的环」——一条贴着模型的亮环加
+    // 两道很快落下去的软边，而不是一大片往外摊开的光晕；摊得越开，看起来越像底座，
+    // 而科技感恰恰来自「亮得突然」。
+    internal static readonly float[] RingRadii = [1.03f, 1.09f, 1.13f, 1.19f];
 
-    // 每个圈顶点的 alpha。内带与外带各是一次 0.14 → 0.42 的渐变（软边），中带是平的。
-    internal static readonly float[] RingAlphas = [0.14f, 0.42f, 0.42f, 0.14f];
+    // 每个圈顶点的 alpha。内带与外带各是一次渐变（软边），中带是平的亮芯。
+    // 芯取 0.95：半透明到能看见底下，但整圈读起来是一条发光的线；再高就和实心圆片分不开了。
+    internal static readonly float[] RingAlphas = [0.08f, 0.95f, 0.95f, 0.08f];
 
     // 蓝。取自「半透明蓝色光环」这个要求本身，DebugPedestal 会断言它确实是蓝的。
     internal static readonly Vector3 Color = new(0.25f, 0.65f, 1f);
