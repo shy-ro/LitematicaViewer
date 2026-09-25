@@ -6,18 +6,10 @@ using LitematicaViewer.Previewer.Gpu;
 
 namespace LitematicaViewer.Previewer;
 
-// Phase C 的硬编码立方体。相机是固定的——CameraState 与 SetCamera 属于 Phase D，
-// 这里先写死三个数，等 Phase D 有了状态权威再换成从外面传进来。
+// 硬编码立方体。相机由外面每帧传进来，这里不持有它——
+// 相机状态的权威在控制器侧，渲染器只负责把拿到的状态变成矩阵。
 internal sealed class GlCubeRenderer : IDisposable
 {
-    internal static readonly Vector3 CameraEye = new(2.6f, 2.0f, 3.4f);
-
-    private static readonly Vector3 CameraTarget = Vector3.Zero;
-    private static readonly Vector3 CameraUp = Vector3.UnitY;
-    private const float FieldOfViewDegrees = 45f;
-    private const float NearPlane = 0.1f;
-    private const float FarPlane = 100f;
-
     internal const int FloatsPerVertex = 6;
     private const int PositionFloats = 3;
 
@@ -65,22 +57,18 @@ internal sealed class GlCubeRenderer : IDisposable
 
         Debug.WriteLine(
             $"[PREVIEWER][gl.cube] vertices={Vertices.Length / FloatsPerVertex} indices={Indices.Length} " +
-            $"eye={CameraEye} fov={FieldOfViewDegrees} expected=24/36");
+            $"expected=24/36");
 
         return new GlCubeRenderer(gl, shader, mesh);
     }
 
-    public void Render(int width, int height)
+    public void Render(CameraState camera, int width, int height)
     {
-        // Phase C 用固定相机：CameraState 与 SetCamera 属于 Phase D，
-        // 这里先写死三个数，等 Phase D 有了状态权威再换成从外面传进来。
         float aspect = (float)width / height;
-        Matrix4x4 view = Matrix4x4.CreateLookAt(CameraEye, CameraTarget, CameraUp);
-        Matrix4x4 projection = Matrix4x4.CreatePerspectiveFieldOfView(
-            float.DegreesToRadians(FieldOfViewDegrees), aspect, NearPlane, FarPlane);
+        Matrix4x4 viewProjection = camera.GetViewMatrix() * camera.GetProjectionMatrix(aspect);
 
         _shader.Use();
-        _shader.SetMatrix4("uViewProjection", view * projection);
+        _shader.SetMatrix4("uViewProjection", viewProjection);
         _mesh.Draw();
     }
 

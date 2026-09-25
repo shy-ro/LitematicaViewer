@@ -1,9 +1,10 @@
-# 02 Previewer 审计（Phase B–C）
+# 02 Previewer 审计（Phase B–D）
 
 Phase B：空窗口 + `OpenGlControlBase` + GL 初始化 + 清屏色。
 Phase C：硬编码立方体 + 固定相机。
+Phase D：相机状态 + `SetCamera` + 四个事件 + 输入适配器 + 渲染帧循环。
 
-两阶段都不涉及 Core，Previewer 至今不知道 Core 存在。
+三个阶段都不涉及 Core，Previewer 至今不知道 Core 存在。
 
 ## Phase B：空窗口与清屏色
 
@@ -199,6 +200,165 @@ NuGet 上那个叫 `Avalonia.OpenGL` 的包最新只有 0.7.0，是上古遗留�
 先把立方体提交、后把校验提交，中间那个 commit 的断言必然失败，bisect 到它会得到错误的结论。
 两者只能一起进。
 
+## Phase D：事件骨架
+
+### 文件与职责
+
+    CameraState.cs               相机状态 + yaw/pitch 约定 + 视图 / 投影矩阵
+    Previewer.Events.cs          对外公开面：四个事件 + SetCamera
+    PreviewerInputAdapter.cs     Avalonia 输入 -> Previewer 事件
+    Sample/InputSelfTest.cs      合成输入事件的验收剧本
+
+### 公开面
+
+    CameraState（readonly record struct，六个字段全部不可变）
+      static CameraState Default                          默认视角（Phase C 写死的那一组数）
+      static Vector3 ForwardOf(float yaw, float pitch)
+      static CameraState LookAt(Vector3 eye, Vector3 target, float fov, float near, float far)
+      Vector3 Forward
+      Matrix4x4 GetViewMatrix()
+      Matrix4x4 GetProjectionMatrix(float aspectRatio)
+
+    Previewer
+      event Action<float>? Scrolled
+      event Action<Key, bool>? KeyChanged
+      event Action<int, int>? ViewportResized
+      event Action<double>? Tick
+      void SetCamera(CameraState camera)
+
+没有 `GetCamera`，没有 `PointerMoved` / `PointerPressed`，没有 `SetMeshes`。
+相机状态的权威在控制器侧（Phase E/F 的 `CameraModel`），Previewer 只是它的消费者。
+
+`Key` 直接用 `Avalonia.Input.Key`，不再造一个自己的枚举：Previewer 本来就依赖 Avalonia，
+多一层翻译表只多一个漏项的地方。
+
+### 相机约定（这一相位钉死的接口）
+
+yaw 0 朝 +Z，yaw 增大绕 +Y 转向 -X（俯视图里顺时针），pitch 增大是向下看，单位是度。
+
+    yaw=0    pitch=0     ->  +Z
+    yaw=90   pitch=0     ->  -X
+    yaw=0    pitch=90    ->  近似 -Y（被夹到 89.9，差 0.1 度）
+
+约定必须只有一份实现。画面是这份状态喂给视图矩阵算出来的，将来的屏幕射线拾取是同一份状态
+喂给另一套三角函数算出来的；两边但凡有一点不一致，症状是准星压着 A 却拾到 B——不抛异常、
+不报错，距离永远差一点，而且只有一边存在的时候根本测不出来。所以 `ForwardOf` 是唯一换算入口，
+`LookAt` 是它的逆，往返对拍写成了可执行断言（`CameraState.VerifyConvention`，上下文初始化时跑一次）。
+
+三条断言：
+
+1. 上表前两条精确相等；第三条按「基本朝下」判（`dot(down, -UnitY) > 0.9995`），
+   因为夹取让它不是精确的 -Y。
+2. 夹取之后仍是单位向量。退化成零向量的视图矩阵整个失效，而 GL 一声不吭。
+3. `LookAt` 之后 `Forward` 回到原方向，64 个随机方向，容差 1e-5。随机方向的 y 分量压在 ±0.9 以内：
+   接近正上/正下时 pitch 顶到夹取边界，往返本来就不闭合——那是夹取的必然结果，不是 bug，
+   拿它当反例会掩盖真正的不一致。
+
+pitch 夹在 ±89.9 度，且夹在**取用点**而不是构造点：读 `Forward` 的每一处（视图矩阵、将来的屏幕射线）
+拿到的是同一个方向。在构造点夹会把控制器手里那份状态悄悄改掉，控制器按自己那份算、渲染按夹过的那份画，
+两边越差越远。到 ±90 度时 forward 与 up 共线，`CreateLookAt` 退化，画面整块消失而 GL 不报任何错。
+
+### 事件与帧循环
+
+- `Scrolled` / `KeyChanged` 由输入适配器投递，`ViewportResized` / `Tick` 由 Previewer 自己发。
+- 投递时把订阅者数量一并打出来。没人订阅时的行为和「事件根本没触发」一模一样，
+  而这个相位的验收恰好是「能看到事件触发」——打出 0 就是答案。
+- `ViewportResized` 只在尺寸变化时发，首帧那次是 0x0 到实际尺寸。给的是**物理像素**，与 GL 视口一致。
+- `Tick` 在画之前发：控制器在 `Tick` 里 `SetCamera`，这一帧立刻用得上，少一帧延迟。
+  反过来先画再 tick 也跑得起来，代价是相机永远落后一帧，拖起来像有阻尼。
+- `Tick` 的参数是距上一帧的秒数，**夹在 0.25 秒**。拖窗口、停在断点、切显示器都会让两帧隔上几百毫秒，
+  不夹住的话控制器拿着这个 dt 一积分就是一整段瞬移，滚动缩放会直接跳穿。
+- 帧循环改成自驱动：每帧末尾 `RequestNextFrameRendering()`，节流交给合成器。
+  不改成「只在相机变化时才请求」是因为 `Tick` 是控制器的时间来源：一旦没有输入就不出帧，
+  靠时间推进的东西（惯性、缩放动画）会直接停住。代价是空闲时也按刷新率出帧。
+
+### 输入适配器
+
+宿主构造它，它就订阅控件的 `PointerWheelChanged` / `KeyDown` / `KeyUp` 并转发。
+
+- 构造时打开 `Focusable`，宿主在窗口打开后调一次 `Focus()`。键盘事件只发给获得焦点的元素，
+  控件默认不可聚焦；漏掉这一步的症状是「滚轮有效、按键毫无反应」，看起来像事件没接上。
+- 滚轮只取 `Delta.Y`。横向滚轮要做就另加一个事件，而不是往同一个 delta 里塞两个含义——
+  塞进去之后没人能从签名上看出它到底是哪个。
+- 长按会重复触发 down（平台自动重复）。事件只报告状态，去重是控制器的事：
+  控制器按状态处理时重复的 down 天然幂等，按边沿处理才会踩到。
+- 它不碰 GL，也不碰相机，连 GL 上下文都拿不到，R2 自然成立。
+
+### 画面校验（从「固定 3 个可见面」改成「与当前相机一致」）
+
+`CheckRendered` 现在接受一个 `CameraState`，自己算出哪些面**应该**可见
+（`dot(normal, camera - faceCenter) > 0`），再断言观测到的像素分布与这个集合完全一致。
+
+这比原来那句「可见面恰好 3 个」强得多：渲染器若还在用某个写死的相机，观测集合就会和当前相机
+算出来的对不上，而它自己不会报任何错。判据里减掉面心那 0.5 是必要的——只算 `dot(normal, camera)`
+会把已经侧转过去的面算成可见，相机贴近时才会暴露。
+
+触发时机也跟着改了：**相机一变就重验一帧**，总数封顶 6 次。整张 framebuffer 读回来会强制 GPU 同步，
+逐帧读会把帧率打到地板上；而换了相机就是换了一张画面，值得验一次，没换相机时同一张画面验两遍不给新信息。
+
+### 验收结果
+
+    dotnet run --project src/LitematicaViewer.Previewer.Sample -- --selftest 6
+
+剧本按**秒**推进而不是按帧（帧率随机器与窗口大小变）：0.4s 转 90 度、0.8s 转 180 度、
+1.2s 滚轮三次、1.6s 按下 W、2.0s 松开 W、2.4s 把窗口拉宽 160。
+
+    四帧画面校验，每次都与当前相机一致：
+
+    pos=(2.6, 2, 3.4)        yaw=142.59  可见 {+X,+Y,+Z}  pixels 20864/14317/30355  solid=65537
+    pos=(3.4, 2, -2.6)       yaw=52.59   可见 {+X,+Y,-Z}  pixels 30356/14317/20864  solid=65537
+    pos=(-2.6, 2, -3.4)      yaw=-37.41  可见 {-X,+Y,-Z}  pixels 20864/14317/30355  solid=65537
+    pos=(-2.08, 1.6, -2.72)  yaw=-37.41  可见 {+X,+Y,-Z}  pixels 32660/22416/47538  solid=102693
+
+    [SAMPLE][selftest.summary] ticks=328 scrolled=3 wheelIn=2 wheelOut=1 key=2 keyDown=True keyUp=True
+    resizes=2 lastViewport=1184x768 expected=1184x768 cameraSets=5 elapsed=5.89s
+    [PREVIEWER][gl.deinit] frames=328 elapsed=6.09s avgFps=53.9
+
+三条值得记下来的结果：
+
+- **绕 +Y 转 90 度之后，三个可见面的像素数是同一组数换了个面**（20864/14317/30355），
+  连轮廓总面积都是同一个 `solid=65537`。这不是巧合：投影轮廓面积按正交近似等于
+  Σ|cos θ|，而 90 度旋转把 (x,z) 变成 (-z,x)，|x|+|z| 不变。换个 90 度倍数以外的角度，
+  这组数就会散开。换句话说，这条是「投影方向确实按 yaw 转了 90 度」的定量证据。
+- 推近到 0.8 倍距离后 `solid` 从 65537 涨到 102693，比例 1.567 对得上 1/0.64 = 1.5625——
+  透视下的小偏差正是「相机确实移动了」的痕迹，等比缩放是正交投影才会有的。
+- 四帧的 `unmatched=0`、`backFacePixels ∈ {0,1}`。共边那 1 个像素依旧按占比判。
+
+### 调试桩
+
+    camera.convention  三个轴向、夹取后的单位性、LookAt/Forward 往返 64 次
+    camera.set         每次 SetCamera 的版本号、位置、yaw/pitch、forward、fov/near/far
+    event.scrolled     delta 与订阅者数量
+    event.key          键、按下还是松开、订阅者数量
+    event.resize       新尺寸、旧尺寸、订阅者数量
+    gl.render          帧号、fb、Bounds（DIP）、缩放、视口（像素）、dt、累计秒数
+    gl.cube.render     逐面像素数、期望可见与否、轮廓质心、当前相机
+    gl.deinit          帧数、总时长、平均帧率
+
+代码内的不变量断言（Phase D 新增）：
+
+- `SetCamera` 必须在 UI 线程上被调用（R4 的守卫，同 GL 回调）。将来相机若改由别的线程驱动，
+  这里必须换成 `Channel`：`CameraState` 是六个字段的结构体，两个线程同时读写会撕裂，
+  读到的可能是新 `Position` 配旧 `Yaw`，而那表现成「画面偶尔抖一下」，没人会想到是这里。
+- `SetCamera` 的入参必须合法（位置有限、yaw/pitch 有限、near > 0、far > near、fov ∈ (0,180)）。
+  这些算出 NaN 的话，矩阵会带着 NaN 一路传到 GPU，而 GL 不报错，画面直接空白。
+- 出范围的 `pitch` 只记一笔不判死：夹取发生在取用点，控制器手里的状态和实际生效的本就能不同，
+  这里断言死会把一个合法的调用判成错误。但也不能不响——它会一直生效不了，而日志里什么都没有。
+
+### 验收剧本为什么合成真实路由事件
+
+「事件触发了」光看探针说服力不够：没人订阅时它同样安静，而「安静」和「没接上」在日志里长得一样。
+所以剧本把 Avalonia 的 `KeyEventArgs` / `PointerWheelEventArgs` 合成出来，`RaiseEvent` 打进控件。
+
+合成真事件而不是直接调 `Previewer` 的内部投递方法：这样输入适配器那一层（订阅、映射、方向、
+只取 Y 分量）也在验证范围里。绕过适配器，它把方向接反了剧本照样全绿。
+
+滚轮那一步是**三次**而不是一上一下：一来一回正好抵消，相机回到原位，
+「相机一变就验一帧」看到的是上一张画面，等于什么都没验。净效果是推近到 0.8 倍。
+
+窗口拉宽那一步断言的是 `resizes >= 2` 且最后一次的尺寸等于窗口客户端尺寸乘 `RenderScaling`。
+只断言 `>= 1` 的话，把缩放那一步删掉也能过（首帧那次就够了），那就白验了。
+
 ## 已知取舍
 
 - Sample 用 `Exe` 而不是 `WinExe`。WinExe 会把 stdout 摘掉，探针就只剩挂在调试器上时看得见。
@@ -206,15 +366,16 @@ NuGet 上那个叫 `Avalonia.OpenGL` 的包最新只有 0.7.0，是上古遗留�
 - 显式指定 `Win32RenderingMode.AngleEgl`，不交给平台默认值。Win32 下能提供 GL 上下文的后端
   不止一个（`Software` / `AngleEgl` / `Wgl` / `Vulkan`），而 `OpenGlControlBase` 要的是能直接
   跑 GL 的那一个。
-- `--selftest` 这个开关放在 Sample 而不是 Previewer。Previewer 的公开面要留给 Phase D 定义的
-  那几个成员，不能为了测试往上面挂东西。
+- `--selftest` 这个开关放在 Sample 而不是 Previewer。Previewer 的公开面只留那几个成员，
+  不能为了测试往上面挂东西。
 - 撤销注册用的是 window `Closed` 事件而不是 `Shutdown`，因为 `Shutdown` 会跳过 GL 的 Deinit，
   而那正是帧数断言所在的地方。
 - 清屏色取蓝 `(0.12, 0.30, 0.55)`。不取白：立方体六个面按法线着色，全是浅色，
   白底上会糊成一片。不取纯黑：纯黑和「一帧都没画出来」在截图里分不开。
-- 规范里列的 `Previewer.Events.cs` / `PreviewerInputAdapter.cs` / `CameraState.cs` /
-  `GlCubeRenderer.cs` / `Gpu/*` / `Debug/DebugCube.cs` / `Sample/Controllers/*` 本阶段**没有创建**。
-  它们各自属于 C / D / E / F，现在建就是空文件占位。
+- 规范列的文件里，`Gpu/GlResourceManager.cs` 和 `Sample/Controllers/*` 至今没有创建。
+  前者要等出现第二个 mesh 才有东西可管，后者属于 E / F，现在建就是空文件占位。
+  其余（`Previewer.cs` / `Previewer.Events.cs` / `PreviewerInputAdapter.cs` / `CameraState.cs` /
+  `GlCubeRenderer.cs` / `Gpu/*` / `Debug/DebugCube.cs`）都已就位。
 - 规范里 Sample 的文件清单没有 `App.axaml` / `App.axaml.cs`，但 Avalonia 必须有 `Application`
   子类，所以这两个文件是必需的补充。
 - 立方体顶点由 `(法线, 切向 U, 切向 V)` 表生成，而不是手写 24 个顶点共 144 个浮点数。
@@ -224,19 +385,24 @@ NuGet 上那个叫 `Avalonia.OpenGL` 的包最新只有 0.7.0，是上古遗留�
 - 为 `UniformMatrix4fv` 开了 `AllowUnsafeBlocks`。它只收 `Void*`，没法用 `IntPtr` 绕开
   （除非再走一遍 `GetProcAddress` 取函数地址，为一行代码不值得）。其余地方不用 unsafe。
 - 没开背面剔除。深度测试已经把正确性兜住了，剔除省的是光栅化，等有几十万个三角形再说。
-- 固定相机写在 `GlCubeRenderer` 里而不是 Previewer 里。它属于「这个渲染器怎么摆镜头」，
-  而 Previewer 的责任是上下文与帧循环。Phase D 有了状态权威之后，相机从这里挪到 CameraState。
+- 相机从 `GlCubeRenderer` 挪到了 `CameraState`（Phase D），渲染器每帧从外面拿到它算矩阵，自己一个数都不留。
+  相机状态的权威在消费侧，渲染器不该持有它——持有就会有人以为可以从渲染器读回相机。
 
 ## 未解决
 
 - 没有目视确认。所有结论都来自像素统计：颜色对、位置对、面积比例对、覆盖率对，
   但「看起来像个立方体」这件事没有人看过。你看一眼就能补上。
-- 渲染是**按需**的：4 秒里只画了 1 帧，没人 invalidate 就不会再画。相机由输入驱动以后，
-  必须有东西主动推帧（`RequestNextFrameRendering` 或 Tick 事件），否则转了相机画面不动。
-  这是 Phase D 的第一件事。
+- 鼠标拖拽不做（规范明确排除），所以相机目前只能由程序设置，没有「转视角」的交互。
+  屏幕射线拾取是下一件要接的事：Core 侧的射线与体素求交已经写完验完了，
+  缺的是「屏幕上的点 → 世界射线」那半边，它需要一个能定期喂相机的控制器。
+- 相机还没有由控制器驱动。Phase D 只把入口和事件摆好，`Sample/Controllers/*` 是 E / F 的事，
+  所以现在没有任何东西会持续改相机——转视角只能靠合成事件或者代码。
+- 空闲时也按刷新率出帧（实测 53 fps）。这一条是有意的取舍（`Tick` 是控制器的时间来源），
+  但如果以后发现待机耗电不可接受，就得改成「有订阅者或相机变过才请求下一帧」，
+  同时给靠时间推进的控制器留一个退路。
 - 上下文丢失后的重建没验过。`OnOpenGlLost` 现在只丢引用、不发 GL 调用，
   重建依赖 Avalonia 再来一次 `OnOpenGlInit`。这一条是照契约写的，不是验过的——
   要主动触发得制造 TDR 或者切一次远程桌面，代价太大。
-- 立方体的朝向是否和代码里的固定相机一致，验不了：把相机和立方体一起转 90 度，
-  所有断言照样过。等相机由输入驱动、能对着已知的方块看之后再验。
+- 「立方体朝向与相机一致」这一条现在**有**证据了（四帧的可见面集合随相机变），
+  但仍然是相对证据：真正对着已知方块去点位，要等拾取接上。
 - 没有开背面剔除，也没用深度偏移去消那 1 个共边像素。两者都要等有真实网格之后才有意义。

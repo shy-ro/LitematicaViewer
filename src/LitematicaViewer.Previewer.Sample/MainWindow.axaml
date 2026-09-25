@@ -5,5 +5,7 @@
         Title="Litematica Viewer — Previewer"
         Width="1024"
         Height="768">
-  <pv:Previewer />
+  <!-- 起名是为了让代码里能拿到实例去接输入：宿主是唯一知道「输入从哪来」的一层，
+       输入适配器和验收剧本都要挂在同一个控件上。 -->
+  <pv:Previewer x:Name="Viewport" />
 </Window>
