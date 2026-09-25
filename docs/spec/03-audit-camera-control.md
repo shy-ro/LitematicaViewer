@@ -12,6 +12,12 @@ Phase E：滚轮缩放。相机第一次由控制器驱动，`Sample/Controllers
 
 `WasdCameraController.cs` 属 Phase F，这一相位没有创建。
 
+**期间发现并修掉了一个输入故障**：真实鼠标滚轮在窗口上完全没有反应。根因不在这一相位的
+代码里——控件的画面由 GL 直接画到窗口上，Avalonia 12 的合成层命中测试看不到它，
+指针事件全部落在它下面那层容器上。修复（`ICustomHitTest`）与完整排查过程见 04。
+这一篇里「滚轮走通了」的结论全部来自合成事件，而合成事件绕过命中测试，
+所以那些结论本身都是对的，只是覆盖不到那一段。
+
 `CameraModel` 在 Sample 而不是 Previewer：它要读 `CameraState`、要调 `SetCamera`，
 而 Previewer 的定位是「只画不记」。把模型放进去，等于承认 Previewer 也该知道
 「相机现在在哪」——那正是 Phase D 特意用「没有 GetCamera」关掉的门。

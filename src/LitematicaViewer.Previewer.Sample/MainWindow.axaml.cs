@@ -169,8 +169,9 @@ public partial class MainWindow : Window
 
         foreach (Point point in points)
         {
-            // 两个 API 都问一遍。GetVisualsAt 走的是合成层，InputHitTest 是输入系统自己用的那条，
-            // 两者不一致时，问题就在合成器看不到这个控件——而不是控件被谁挡住。
+            // 两个 API 都问一遍。它们走的是同一条合成层命中路径，正常时结果一致；
+            // 一起打出来是为了在结果异常时能立刻分辨「命中的是谁、它挂在哪」——
+            // 只打一个的话，拿到一个陌生的元素名仍然不知道它是谁。
             IInputElement? inputHit = this.InputHitTest(point);
             Debug.WriteLine(
                 $"[SAMPLE][input.hittest] point=({point.X:F0},{point.Y:F0}) " +
