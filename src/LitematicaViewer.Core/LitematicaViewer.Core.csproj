@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>LitematicaViewer.Core</RootNamespace>
+    <AssemblyName>LitematicaViewer.Core</AssemblyName>
+    <!-- 仅 Debug 下是可执行程序：Core 的验收要在真实文件上跑一遍并断言不变量，
+         而"测试不独立成项目"排除了另建测试工程。Release 回到 Library，
+         免得后续 Previewer 引用到一个 exe 程序集。 -->
+    <OutputType Condition="'$(Configuration)' == 'Debug'">Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Poly.NBT" Version="0.1.0" />
+    <PackageReference Include="PolyType" Version="1.4.1" />
+  </ItemGroup>
+
+</Project>
