@@ -52,6 +52,14 @@ public partial class Previewer
     // 一次自增的代价可以忽略，不值得为它换一个只在 Debug 成立的声明。
     private int _cameraVersion;
 
+    // 每次 SetCamera 打一整行（五个向量加六个标量）的话，拖拽时就是每秒六十行——
+    // 这一条是全项目最重的一处 IO，而它的信息量在相邻两行之间几乎不增。
+    // 首条加每 60 条一条：「相机到底有没有被推过来」是个是非题，抽样足够回答。
+    // 调用方都在 UI 线程上，计数不用原子。
+    private const int CameraSetLogInterval = 60;
+
+    private int _cameraSetLogs;
+
     public void SetCamera(CameraState camera)
     {
         // 现在没有跨线程调用者：控制器（Phase E/F）和 GL 回调都在 UI 线程上，_uiThreadId 守着。
@@ -75,10 +83,14 @@ public partial class Previewer
 
         _camera = camera;
         _cameraVersion++;
-        Debug.WriteLine(
-            $"[PREVIEWER][camera.set] version={_cameraVersion} pos=({camera.Position}) " +
-            $"yaw={camera.Yaw:F2} pitch={camera.Pitch:F2} forward=({camera.Forward}) " +
-            $"fov={camera.Fov} near={camera.Near} far={camera.Far}");
+
+        if (_cameraSetLogs++ % CameraSetLogInterval == 0)
+        {
+            Debug.WriteLine(
+                $"[PREVIEWER][camera.set] version={_cameraVersion} pos=({camera.Position}) " +
+                $"yaw={camera.Yaw:F2} pitch={camera.Pitch:F2} forward=({camera.Forward}) " +
+                $"fov={camera.Fov} near={camera.Near} far={camera.Far} note=每{CameraSetLogInterval}条一条");
+        }
     }
 
     // 只有本程序集里的输入适配器调这两个。事件在别处没法触发，
