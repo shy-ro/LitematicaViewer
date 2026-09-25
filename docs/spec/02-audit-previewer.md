@@ -372,8 +372,8 @@ pitch 夹在 ±89.9 度，且夹在**取用点**而不是构造点：读 `Forwar
   而那正是帧数断言所在的地方。
 - 清屏色取蓝 `(0.12, 0.30, 0.55)`。不取白：立方体六个面按法线着色，全是浅色，
   白底上会糊成一片。不取纯黑：纯黑和「一帧都没画出来」在截图里分不开。
-- 规范列的文件里，`Gpu/GlResourceManager.cs` 和 `Sample/Controllers/*` 至今没有创建。
-  前者要等出现第二个 mesh 才有东西可管，后者属于 E / F，现在建就是空文件占位。
+- 规范列的文件里，`Gpu/GlResourceManager.cs` 那时没有创建：要等出现第二个 mesh 才有东西可管。
+  `Sample/Controllers/*` 属 E / F，在 Phase E 落地了其中两个（见 03）。
   其余（`Previewer.cs` / `Previewer.Events.cs` / `PreviewerInputAdapter.cs` / `CameraState.cs` /
   `GlCubeRenderer.cs` / `Gpu/*` / `Debug/DebugCube.cs`）都已就位。
 - 规范里 Sample 的文件清单没有 `App.axaml` / `App.axaml.cs`，但 Avalonia 必须有 `Application`
@@ -395,8 +395,9 @@ pitch 夹在 ±89.9 度，且夹在**取用点**而不是构造点：读 `Forwar
 - 鼠标拖拽不做（规范明确排除），所以相机目前只能由程序设置，没有「转视角」的交互。
   屏幕射线拾取是下一件要接的事：Core 侧的射线与体素求交已经写完验完了，
   缺的是「屏幕上的点 → 世界射线」那半边，它需要一个能定期喂相机的控制器。
-- 相机还没有由控制器驱动。Phase D 只把入口和事件摆好，`Sample/Controllers/*` 是 E / F 的事，
-  所以现在没有任何东西会持续改相机——转视角只能靠合成事件或者代码。
+- 相机还没有由控制器驱动。Phase D 只把入口和事件摆好，所以那一刻没有任何东西会持续改相机——
+  转视角只能靠合成事件或者代码。`CameraModel` 与 `ScrollZoomController` 在 Phase E 落地（见 03），
+  `WasdCameraController` 在 F。
 - 空闲时也按刷新率出帧（实测 53 fps）。这一条是有意的取舍（`Tick` 是控制器的时间来源），
   但如果以后发现待机耗电不可接受，就得改成「有订阅者或相机变过才请求下一帧」，
   同时给靠时间推进的控制器留一个退路。
