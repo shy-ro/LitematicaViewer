@@ -24,7 +24,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        // 输入适配器接上，但窗口自己不订阅 Scrolled / KeyChanged / Drag*：没人订阅时事件照常触发，
+        // 输入适配器接上，但窗口自己不订阅 Scrolled / KeyChanged / Look*：没人订阅时事件照常触发，
         // 只是什么都不发生。谁在意它们是控制器的事，窗口只负责把零件装到一起。
         _input = new PreviewerInputAdapter(Viewport);
 
@@ -48,7 +48,7 @@ public partial class MainWindow : Window
         _look = new MouseLookController(Viewport, _camera);
         _wasd = new WasdCameraController(Viewport, _camera);
 
-        _selfTest = Program.SelfTestSeconds > 0 ? new InputSelfTest(this, Viewport, _camera) : null;
+        _selfTest = Program.SelfTestSeconds > 0 ? new InputSelfTest(this, Viewport, _camera, _input) : null;
         _selfTest?.Attach();
 
         // 客户端尺寸与 RenderScaling 是「视口算得对不对」的参照系：
@@ -298,9 +298,13 @@ public partial class MainWindow : Window
     private void OnActivated(object? sender, EventArgs e) =>
         Debug.WriteLine($"[SAMPLE][window.activated] client={ClientSize}");
 
-    // 失活时把「按住的键」和「进行中的拖拽」清掉。Alt+Tab 走了之后，抬起的按键与松手
-    // 都送到别的窗口去了，这里不会收到：还按着的 W 会让相机一直往前走，拖到一半的拖拽
-    // 会让画面跟着光标乱转——两种表现都像鼠标键盘坏了，而不是像有个状态没清。
+    // 失活时把「按住的键」和「进行中的看向手势」清掉。Alt+Tab 走了之后，抬起的按键与
+    // 指针的进出/捕获丢失都送到别的窗口去了，这里不会收到：还按着的 W 会让相机一直往前走，
+    // 挂着的看向手势会让光标回来的第一帧跳一下——两种表现都像鼠标键盘坏了，
+    // 而不是像有个状态没清。
+    //
+    // 两者清在不同的地方，因为它们记的状态在谁手里不同：按键记在控制器里（它自己维护那份集合），
+    // 而手势记在输入适配器里（只有它拿得到指针与捕获）。所以这里一个调控制器、一个调适配器。
     //
     // 挂在窗口这一层而不是控件的 LostFocus 上：Win32 下 WM_KILLFOCUS 会不会让元素收到
     // LostFocus 由后端决定，而「失活必须清干净」这件事不该依赖那个细节。
@@ -308,9 +312,9 @@ public partial class MainWindow : Window
     {
         Debug.WriteLine(
             "[SAMPLE][window.deactivated] note=此时滚轮收不到属于预期，不是接线问题；" +
-            "按键与拖拽一并作废，否则抬起事件不会来");
+            "按键与看向手势一并作废，否则抬起与进出事件不会来");
         _wasd.ReleaseKeys();
-        _look.CancelDrag();
+        _input.ReleaseLook();
     }
 
     private void OnClosed(object? sender, EventArgs e)
