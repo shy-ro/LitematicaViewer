@@ -16,18 +16,23 @@ public partial class MainWindow : Window
     private readonly PreviewerInputAdapter _input;
     private readonly CameraModel _camera;
     private readonly ScrollZoomController _scroll;
+    private readonly MouseLookController _look;
+    private readonly WasdCameraController _wasd;
     private readonly InputSelfTest? _selfTest;
 
     public MainWindow()
     {
         InitializeComponent();
 
-        // 输入适配器接上，但窗口自己不订阅 Scrolled / KeyChanged：没人订阅时事件照常触发，
+        // 输入适配器接上，但窗口自己不订阅 Scrolled / KeyChanged / Drag*：没人订阅时事件照常触发，
         // 只是什么都不发生。谁在意它们是控制器的事，窗口只负责把零件装到一起。
         _input = new PreviewerInputAdapter(Viewport);
 
         // 相机的权威从这一行开始就在模型手里。锚点取原点，因为立方体在原点——
         // 而 Phase C 起「轮廓质心落在画面中心」那条校验，正是靠「相机看向原点」才成立的。
+        //
+        // 距离的上下界不设：默认就没有，谁要谁在构造时给。模型在这里替人定一个「最近 2.4」，
+        // 就等于替人决定「凑近看一块砖是不允许的」，而那是个尺度上的偏好。
         _camera = new CameraModel(CameraState.Default, Vector3.Zero);
 
 #if DEBUG
@@ -40,6 +45,8 @@ public partial class MainWindow : Window
         Viewport.SetCamera(_camera.Camera);
 
         _scroll = new ScrollZoomController(Viewport, _camera);
+        _look = new MouseLookController(Viewport, _camera);
+        _wasd = new WasdCameraController(Viewport, _camera);
 
         _selfTest = Program.SelfTestSeconds > 0 ? new InputSelfTest(this, Viewport, _camera) : null;
         _selfTest?.Attach();
@@ -291,9 +298,20 @@ public partial class MainWindow : Window
     private void OnActivated(object? sender, EventArgs e) =>
         Debug.WriteLine($"[SAMPLE][window.activated] client={ClientSize}");
 
-    private void OnDeactivated(object? sender, EventArgs e) =>
+    // 失活时把「按住的键」和「进行中的拖拽」清掉。Alt+Tab 走了之后，抬起的按键与松手
+    // 都送到别的窗口去了，这里不会收到：还按着的 W 会让相机一直往前走，拖到一半的拖拽
+    // 会让画面跟着光标乱转——两种表现都像鼠标键盘坏了，而不是像有个状态没清。
+    //
+    // 挂在窗口这一层而不是控件的 LostFocus 上：Win32 下 WM_KILLFOCUS 会不会让元素收到
+    // LostFocus 由后端决定，而「失活必须清干净」这件事不该依赖那个细节。
+    private void OnDeactivated(object? sender, EventArgs e)
+    {
         Debug.WriteLine(
-            "[SAMPLE][window.deactivated] note=此时滚轮收不到属于预期，不是接线问题");
+            "[SAMPLE][window.deactivated] note=此时滚轮收不到属于预期，不是接线问题；" +
+            "按键与拖拽一并作废，否则抬起事件不会来");
+        _wasd.ReleaseKeys();
+        _look.CancelDrag();
+    }
 
     private void OnClosed(object? sender, EventArgs e)
     {
@@ -302,6 +320,8 @@ public partial class MainWindow : Window
         // 先出验收结论再拆零件：拆完事件就不触发了，
         // 而验收要的正是「到这一刻为止，每个事件都至少走通过一次」。
         _selfTest?.Report();
+        _wasd.Dispose();
+        _look.Dispose();
         _scroll.Dispose();
         _input.Dispose();
     }
