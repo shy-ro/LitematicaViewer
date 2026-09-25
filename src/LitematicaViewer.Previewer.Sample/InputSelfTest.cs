@@ -25,6 +25,7 @@ internal sealed class InputSelfTest
     private const double KeyDownAt = 2.4;
     private const double KeyUpAt = 3.2;
     private const double ResizeAt = 3.6;
+    private const double GrazingAt = 4.0;
 
     // 每步按顺序编号，与 StepTimes 一一对应。
     private const int StepRotate = 0;
@@ -34,9 +35,20 @@ internal sealed class InputSelfTest
     private const int StepKeyDown = 4;
     private const int StepKeyUp = 5;
     private const int StepResize = 6;
+    private const int StepGrazing = 7;
 
     private static readonly double[] StepTimes =
-        [RotateAt, RotateBackAt, WheelAt, DragAt, KeyDownAt, KeyUpAt, ResizeAt];
+        [RotateAt, RotateBackAt, WheelAt, DragAt, KeyDownAt, KeyUpAt, ResizeAt, GrazingAt];
+
+    // 掠射姿态：相机几乎贴着 +X 面的平面，x 只比面心出去 0.008，其余两个方向在几米开外。
+    // 那一张面按判据确实朝向我们（0.508 > 0.5），但视线与它的法线夹着 89.9 度，
+    // 投影下来只剩三十几个像素——这是几何的必然，不是画错了。
+    //
+    // 它不是一个凑出来的怪姿态，而是**真实发生过的崩溃**：相机能自由转视角之后，
+    // 任意一张面扫过镜头都会经过这个位置，而旧判据「可见面至少占画面万分之一」
+    // （1184x768 下是 90 个像素）在那里必然红，Debug.Assert 失败直接终止进程。
+    // 摆在这里是为了让那条判据再也不能退回去。
+    private static readonly Vector3 GrazingPosition = new(0.508f, 3.76f, 4.53f);
 
     private const double ResizeDelta = 160;
 
@@ -176,11 +188,12 @@ internal sealed class InputSelfTest
             $"[SAMPLE][selftest] 最后一次视口尺寸与窗口不符 last={_lastViewport} " +
             $"expected=({expectedWidth},{expectedHeight})");
 
-        // 剧本自己摆的视角只有两次旋转。滚轮、拖拽、走动都不经过这里——它们走各自的控制器，
-        // 那正是这几个相位要验的链路。外部输入也改不了这个计数：只有 ApplyCamera 会动它。
+        // 剧本自己摆的视角只有三次：两次旋转，一次掠射。滚轮、拖拽、走动都不经过这里——
+        // 它们走各自的控制器，那正是这几个相位要验的链路。外部输入也改不了这个计数：
+        // 只有 ApplyCamera 会动它。
         Debug.Assert(
-            _cameraSets == 2,
-            $"[SAMPLE][selftest] 剧本摆视角的次数不对 cameraSets={_cameraSets} expected=2");
+            _cameraSets == 3,
+            $"[SAMPLE][selftest] 剧本摆视角的次数不对 cameraSets={_cameraSets} expected=3");
 
         Debug.WriteLine(
             "[SAMPLE][selftest.summary] 四个事件都至少走通一次，滚轮/拖拽/走动各自经由控制器改了相机");
@@ -280,6 +293,17 @@ internal sealed class InputSelfTest
                 _window.Width += ResizeDelta;
                 break;
 
+            case StepGrazing:
+                // 摆到掠射姿态，让画面校验在「某个面只剩几十个像素」的记录上过一次。
+                // 走模型而不是直接灌给 Previewer，理由同 ApplyCamera。
+                ApplyCamera(CameraState.LookAt(
+                    GrazingPosition,
+                    Vector3.Zero,
+                    _startCamera.Fov,
+                    _startCamera.Near,
+                    _startCamera.Far));
+                break;
+
             default:
                 Debug.Fail($"[SAMPLE][selftest.step] 未知的步骤 step={step}");
                 break;
@@ -288,7 +312,10 @@ internal sealed class InputSelfTest
 
     // 转的是相机位置而不是只改 yaw：绕 +Y 转位置再 LookAt 原点，能保证相机仍然看向立方体中心，
     // 于是「轮廓质心落在画面中心」那条断言继续成立，验的就只剩可见面集合的变化。
-    // 只改 yaw 的话相机会看向别处，画面校验会被一堆无关的原因搞红。
+    //
+    // 第一视角下「转头」会让相机看向别处，那种姿态本来就验不了（IsVerifiable 会明说跳过）。
+    // 所以剧本得自己摆出一个看向中心的姿态，画面校验才有东西可验——这里摆的是位置，
+    // 而拖拽那一步改的是朝向，两者验的不是同一件事。
     private void RotateAroundCube(float degrees)
     {
         Vector3 position = Vector3.Transform(
@@ -341,9 +368,13 @@ internal sealed class InputSelfTest
             0.1f,
             "拖拽的 pitch 增量（往下拖是往下看）");
 
-        // 绕转是刚体的：改的是方向，到 Target 的距离一点不该动。
-        // 距离要是变了，说明绕转写成了「把相机挪到别处再看向 Target」。
-        Expect(_camera.Distance, distanceBefore, 1e-3f, "拖拽后的距离");
+        // 第一视角：拖拽只改朝向，相机位置一个 bit 都不该动。
+        // 位置动了就说明转视角又写成了「把相机挪到别处」（orbit 那个老实现），而单看角度增量、
+        // 灵敏度、方向这些都是对的——只有连着转上一圈才发现画面是在绕着某点公转。
+        Expect((_camera.Camera.Position - before.Position).Length(), 0f, 1e-6f, "拖拽后的相机位置");
+
+        // 参考距离是缩放的尺度，与转视角无关，同样不该动。
+        Expect(_camera.Distance, distanceBefore, 1e-3f, "拖拽后的参考距离");
 
         Debug.Assert(
             _dragStarted == startedBefore + 1,
