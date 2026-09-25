@@ -83,6 +83,8 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
 
     private int _verifiedCameraVersion = -1;
     private int _cameraVerifications;
+    private bool _budgetExhaustedLogged;
+    private int _skipLogs;
 #endif
 
     protected override void OnOpenGlInit(GlInterface gl)
@@ -234,13 +236,42 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
             $"[PREVIEWER][gl.error] code=0x{error:X} expected=0x0 cameraVersion={_cameraVersion}");
         Debug.Assert(error == 0, $"[PREVIEWER][gl.error] 有残留的 GL 错误 code=0x{error:X}");
 
+        // 预算得真的在这里拦一道，而且必须在读回**之前**——读回才是贵的那一步
+        // （强制 GPU 同步加拷几 MB 回来，后面还跟着每帧五百多万次像素距离计算）。
+        //
+        // 这个常量一度只声明、只自增、从没被判断过，于是注释里写的「一次会话封顶 24 次」
+        // 实际是「相机每变一次读回一帧」——拖拽和按住 W 时相机每帧都在变，那就是每秒六十次读回。
+        // 症状是「一动鼠标就卡」，而它看起来像渲染慢，不像校验慢。
+        if (_cameraVerifications >= MaxCameraVerifications)
+        {
+            // 只说一次。用尽之后每个可验的帧都打一条的话，日志反而比没预算之前更长。
+            if (!_budgetExhaustedLogged)
+            {
+                _budgetExhaustedLogged = true;
+                Debug.WriteLine(
+                    $"[PREVIEWER][gl.readback] 读回预算用尽 {MaxCameraVerifications} 次，" +
+                    $"本次会话不再做画面校验 cameraVersion={_cameraVersion}");
+            }
+
+            return;
+        }
+
         // 姿态不在校验适用的范围内就跳过，并且明说跳过了。
-        // 「跳过」和「通过」在日志里必须是两句不同的话：相机现在可以平移、可以无界缩放，
+        // 「跳过」和「通过」在日志里必须是两句不同的话：相机可以自由转向、可以平移、可以无界缩放，
         // 有相当一部分姿态本来就验不了，把两者混成一片安静等于把这条检查整个作废。
         if (!DebugCube.IsVerifiable(_camera, width, height, out string reason))
         {
-            Debug.WriteLine(
-                $"[PREVIEWER][gl.readback] 跳过画面校验 cameraVersion={_cameraVersion} 原因={reason}");
+            // 跳过这件事在自由导航里是**连续**发生的：按住 W 走一秒就是几十帧，帧帧都跳。
+            // 逐帧打的话这几行会把真正有用的东西挤出去（Phase F 之前相机只能沿一条固定的
+            // 体对角线推拉，几乎不会跳过，所以没暴露）。计数在真读回那里清零，
+            // 于是「上一次校验之后的第一跳」一定会打出来，那正是要看的那一条。
+            if (_skipLogs++ % CameraSetLogInterval == 0)
+            {
+                Debug.WriteLine(
+                    $"[PREVIEWER][gl.readback] 跳过画面校验 cameraVersion={_cameraVersion} " +
+                    $"原因={reason} note=每{CameraSetLogInterval}条一条");
+            }
+
             return;
         }
 
@@ -253,6 +284,7 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         // 读了才算一次。预算花在真读回上，而不是花在「判了一下但跳过了」上——
         // 后者一次同步都不产生，却会把名额吃掉，于是真正换相机的那些帧反而没验。
         _cameraVerifications++;
+        _skipLogs = 0;
         DebugCube.CheckRendered(GlCubeRenderer.Vertices, pixels, width, height, _camera, ClearColor);
     }
 
