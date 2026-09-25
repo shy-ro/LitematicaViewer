@@ -100,13 +100,13 @@ internal static class DebugCube
 
     // 整张 framebuffer 读回来，按颜色反推画面上出现了什么。
     // 这一条比「中心像素不是背景色」强得多：它同时证明了几何没画错、
-    // 深度测试生效、投影矩阵没转置反。
+    // 深度测试生效、投影矩阵没转置反，以及——相机确实是从外面传进来的那个。
     public static void CheckRendered(
         float[] vertices,
         byte[] rgba,
         int width,
         int height,
-        Vector3 eye,
+        CameraState camera,
         Vector3 clearColor)
     {
         int faceCount = vertices.Length / (GlCubeRenderer.FloatsPerVertex * 4);
@@ -181,26 +181,45 @@ internal static class DebugCube
 
         for (int face = 0; face < faceCount; face++)
         {
-            if (Vector3.Dot(faceNormals[face], eye) > 0f)
-            {
-                visibleFaces++;
-                smallestVisibleFace = Math.Min(smallestVisibleFace, facePixels[face]);
-            }
-            else
-            {
-                backFacePixels += facePixels[face];
-                if (facePixels[face] > 0 && loggedBackFacePixels < 8)
-                {
-                    loggedBackFacePixels++;
-                    Debug.WriteLine(
-                        $"[PREVIEWER][gl.cube.back] face={face} normal={faceNormals[face]} pixels={facePixels[face]}");
-                }
-            }
+            // 一个面能不能被看到，取决于相机在不在它所在平面的外侧。判据是
+            // dot(normal, camera - faceCenter)，不是 dot(normal, camera)：
+            // 后者漏掉了面心到原点的 0.5，相机贴近时会把已经侧转过去的面也算成可见。
+            bool expectedVisible =
+                Vector3.Dot(faceNormals[face], camera.Position - (faceNormals[face] * 0.5f)) > 0f;
 
             Debug.WriteLine(
                 $"[PREVIEWER][gl.cube.face] face={face} normal={faceNormals[face]} " +
                 $"color={Byte(faceColors[face].R)},{Byte(faceColors[face].G)},{Byte(faceColors[face].B)} " +
-                $"pixels={facePixels[face]} towardCamera={Vector3.Dot(faceNormals[face], eye) > 0f}");
+                $"pixels={facePixels[face]} expectedVisible={expectedVisible}");
+
+            // 观测到的可见面必须与相机推出来的集合完全一致。这条是「SetCamera 真的驱动了渲染」的证据：
+            // 渲染器若还在用某个写死的相机，观测集合就会和当前相机算出来的对不上。
+            // 两边都留 pixelCount/10000 的余量，理由同下：共边处的像素归属不唯一。
+            if (expectedVisible)
+            {
+                visibleFaces++;
+                smallestVisibleFace = Math.Min(smallestVisibleFace, facePixels[face]);
+                Debug.Assert(
+                    facePixels[face] > pixelCount / 10000,
+                    $"[PREVIEWER][gl.cube] 朝向相机的面几乎没画出来 face={face} pixels={facePixels[face]} " +
+                    $"expected=>{pixelCount / 10000}");
+            }
+            else
+            {
+                backFacePixels += facePixels[face];
+                Debug.Assert(
+                    facePixels[face] <= pixelCount / 10000,
+                    $"[PREVIEWER][gl.cube] 背向相机的面画出来了 face={face} normal={faceNormals[face]} " +
+                    $"pixels={facePixels[face]} of {pixelCount}，深度测试或者相机没接上");
+
+                if (facePixels[face] > 0 && loggedBackFacePixels < 8)
+                {
+                    loggedBackFacePixels++;
+                    Debug.WriteLine(
+                        $"[PREVIEWER][gl.cube.back] face={face} normal={faceNormals[face]} pixels={facePixels[face]} " +
+                        $"note=共边像素的归属，GL_LESS 严格小于的语义让先画的留下");
+                }
+            }
         }
 
         float centroidPixelX = solidPixels == 0 ? 0f : (float)centroidX / solidPixels;
@@ -208,26 +227,26 @@ internal static class DebugCube
 
         Debug.WriteLine(
             $"[PREVIEWER][gl.cube.render] solid={solidPixels} clear={clearPixels} unmatched={unmatched} " +
-            $"coverage={(float)solidPixels / pixelCount:P1} visibleFaces={visibleFaces} expected=3");
+            $"coverage={(float)solidPixels / pixelCount:P1} visibleFaces={visibleFaces} " +
+            $"backFacePixels={backFacePixels} pos=({camera.Position}) yaw={camera.Yaw:F2} pitch={camera.Pitch:F2}");
         Debug.WriteLine(
             $"[PREVIEWER][gl.cube.render] centroid=({centroidPixelX:F1},{centroidPixelY:F1}) " +
-            $"expected=({width / 2f:F1},{height / 2f:F1}) y 轴方向无关，立方体的轮廓关于中心对称");
+            $"expected=({width / 2f:F1},{height / 2f:F1}) 前提=相机看向立方体中心，轮廓关于中心对称");
 
         Debug.Assert(solidPixels > 0, "[PREVIEWER][gl.cube] 画面里没有立方体，全是背景色");
-        Debug.Assert(visibleFaces == 3, $"[PREVIEWER][gl.cube] 朝向相机的面是 {visibleFaces} 个，期望 3 个");
+        Debug.Assert(visibleFaces > 0, "[PREVIEWER][gl.cube] 一个朝向相机的面都没有");
         Debug.Assert(
             smallestVisibleFace > solidPixels / 20,
             $"[PREVIEWER][gl.cube] 有可见面几乎没占到像素 smallest={smallestVisibleFace} solid={solidPixels}");
 
-        // 背向相机的面只允许漏出极少量像素。真正会出错的是「一个都不许漏」这条判据本身：
-        // 相邻两面共边，落在边上的像素中心会被两个三角形同时覆盖、深度相等，
-        // 而 GL_LESS 是严格小于，先画的留下。共边处先画的是背向面时，就漏出一个像素。
-        // 实测恰好 1 个。深度测试真失效的样子是整个轮廓只剩一种颜色（几万个），量级差着五个数量级，
-        // 所以判据取占比而不是取零。要做到一个不漏得上多边形偏移，那是后面的事。
+        // 背向相机的面只允许漏出极少量像素（逐面判据在上面，这里只兜总数）。
+        // 真正会出错的是「一个都不许漏」这条判据本身：相邻两面共边，落在边上的像素中心
+        // 会被两个三角形同时覆盖、深度相等，而 GL_LESS 是严格小于，先画的留下；
+        // 共边处先画的是背向面时，就漏出一个像素。实测恰好 1 个。深度测试真失效的样子是
+        // 整个轮廓只剩一种颜色（几万个），量级差着五个数量级。要做到一个不漏得上多边形偏移。
         Debug.Assert(
             backFacePixels <= pixelCount / 10000,
-            $"[PREVIEWER][gl.cube] 画面上出现了大量背向相机的面 pixels={backFacePixels} " +
-            $"of {pixelCount}，深度测试没生效");
+            $"[PREVIEWER][gl.cube] 背向相机的面漏出过多 pixels={backFacePixels} of {pixelCount}");
 
         // 认不出来的像素只应该出现在三角形边缘，超过 1% 就不像是抗锯齿了。
         Debug.Assert(

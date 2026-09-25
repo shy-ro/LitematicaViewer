@@ -15,7 +15,7 @@ namespace LitematicaViewer.Previewer;
 // 顺带记一条后面会咬人的事：基类的 GlVersion 只有 getter，没法要求 3.3 core 之类的具体版本。
 // 上下文版本由 Avalonia 按平台后端决定，所以着色器要按拿到的版本来写指令
 // （实测 ANGLE 给的是 GLES，指令得是 `#version 300 es` 那一套），不能照抄桌面 GL 的写法。
-public class Previewer : OpenGlControlBase
+public partial class Previewer : OpenGlControlBase
 {
     // 背景取蓝不取白：立方体的六个面按法线着色，全是浅色，白底上会糊成一片。
     // 也不取纯黑：纯黑与「这一帧什么都没画出来」在截图里分不开。
@@ -32,9 +32,13 @@ public class Previewer : OpenGlControlBase
     private GlCubeRenderer? _cube;
 
 #if DEBUG
-    // 只读一次。整张 framebuffer 读回来会强制 GPU 同步，逐帧读会把帧率打到地板上，
-    // 而「画出来的到底是什么」只需要答一次。
-    private bool _frameVerified;
+    // 整张 framebuffer 读回来会强制 GPU 同步，逐帧读会把帧率打到地板上，
+    // 所以只在相机变化时读，且总数封顶。换了相机就是换了一张画面，值得验一次；
+    // 相机没变时同一张画面验两遍不给新信息。
+    private const int MaxCameraVerifications = 6;
+
+    private int _verifiedCameraVersion = -1;
+    private int _cameraVerifications;
 #endif
 
     protected override void OnOpenGlInit(GlInterface gl)
@@ -87,10 +91,14 @@ public class Previewer : OpenGlControlBase
         gl.Viewport(0, 0, width, height);
         gl.Clear(GlConsts.GL_COLOR_BUFFER_BIT | GlConsts.GL_DEPTH_BUFFER_BIT);
 
-        _cube?.Render(width, height);
+        _cube?.Render(_camera, width, height);
 
         if (_framesRendered == 1 || _framesRendered % ProbeFrameInterval == 0)
         {
+            Debug.Assert(
+                _framesRendered > 1 || Environment.CurrentManagedThreadId == _uiThreadId,
+                $"[PREVIEWER][gl.render] 首帧不在 UI 线程上 thread={Environment.CurrentManagedThreadId}");
+
             Debug.WriteLine(
                 $"[PREVIEWER][gl.render] frame={_framesRendered} fb={fb} bounds={Bounds.Width}x{Bounds.Height} " +
                 $"scaling={scaling} viewport={width}x{height}");
@@ -99,10 +107,11 @@ public class Previewer : OpenGlControlBase
         // 这一段是约定里说的例外：断言本身在 Release 下会消失，但读回那一下 GPU 同步不会，
         // 所以连调用点一起包掉。其余探针都不需要 #if DEBUG。
 #if DEBUG
-        if (!_frameVerified)
+        if (_cameraVersion != _verifiedCameraVersion && _cameraVerifications < MaxCameraVerifications)
         {
-            _frameVerified = true;
-            VerifyFirstFrame(gl, width, height);
+            _verifiedCameraVersion = _cameraVersion;
+            _cameraVerifications++;
+            VerifyFrame(gl, width, height);
         }
 #endif
     }
@@ -133,11 +142,12 @@ public class Previewer : OpenGlControlBase
     }
 
 #if DEBUG
-    private void VerifyFirstFrame(GlInterface gl, int width, int height)
+    private void VerifyFrame(GlInterface gl, int width, int height)
     {
         int error = ReadGlError(gl);
-        Debug.WriteLine($"[PREVIEWER][gl.error] code=0x{error:X} expected=0x0");
-        Debug.Assert(error == 0, $"[PREVIEWER][gl.error] 首帧之后有残留的 GL 错误 code=0x{error:X}");
+        Debug.WriteLine(
+            $"[PREVIEWER][gl.error] code=0x{error:X} expected=0x0 cameraVersion={_cameraVersion}");
+        Debug.Assert(error == 0, $"[PREVIEWER][gl.error] 有残留的 GL 错误 code=0x{error:X}");
 
         byte[]? pixels = ReadFrameBuffer(gl, width, height);
         if (pixels is null)
@@ -145,7 +155,7 @@ public class Previewer : OpenGlControlBase
             return;
         }
 
-        DebugCube.CheckRendered(GlCubeRenderer.Vertices, pixels, width, height, GlCubeRenderer.CameraEye, ClearColor);
+        DebugCube.CheckRendered(GlCubeRenderer.Vertices, pixels, width, height, _camera, ClearColor);
     }
 
     // 整张 framebuffer 读回来。宽高用物理像素，与视口一致。
