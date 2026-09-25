@@ -27,6 +27,12 @@ public sealed class PreviewerInputAdapter : IDisposable
         previewer.KeyDown += OnKeyDown;
         previewer.KeyUp += OnKeyUp;
 
+#if DEBUG
+        // 原始输入探针挂这儿：「有人打算处理输入了」是它唯一有意义的挂载时机。
+        // 它只记录控件收到了什么，转发仍然由上面三个订阅负责——两段分开才查得动。
+        previewer.AttachInputProbe();
+#endif
+
         Debug.WriteLine(
             $"[PREVIEWER][input.attach] focusable={previewer.Focusable} " +
             $"note=按键还需要控件拿到焦点，宿主在窗口打开后调一次 Focus()");
