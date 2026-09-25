@@ -15,11 +15,11 @@ namespace LitematicaViewer.Previewer;
 // （ANGLE 给的是 GLES，指令得是 `#version 300 es` 那一套），不能照抄桌面 GL 的写法。
 public class Previewer : OpenGlControlBase
 {
-    // 清屏色不取纯黑：纯黑与「这一帧什么都没画出来」在截图里分不开，
-    // 而「背景是不是这个颜色」正是本阶段的验收项。
-    private const float ClearR = 0.10f;
-    private const float ClearG = 0.12f;
-    private const float ClearB = 0.16f;
+    // 背景取蓝不取白：立方体的六个面按法线着色，全是浅色，白底上会糊成一片。
+    // 也不取纯黑：纯黑与「这一帧什么都没画出来」在截图里分不开。
+    private const float ClearR = 0.12f;
+    private const float ClearG = 0.30f;
+    private const float ClearB = 0.55f;
 
     // 逐帧打桩会把终端冲掉，而上下文稳不稳定只要抽样看就够。
     private const int ProbeFrameInterval = 60;
@@ -53,7 +53,7 @@ public class Previewer : OpenGlControlBase
         Debug.WriteLine(
             $"[PREVIEWER][gl.init] version='{gl.Version}' renderer='{gl.Renderer}' vendor='{gl.Vendor}'");
         Debug.WriteLine(
-            $"[PREVIEWER][gl.init] clearColor=({ClearR},{ClearG},{ClearB},1) expected=(0.1,0.12,0.16,1)");
+            $"[PREVIEWER][gl.init] clearColor=({ClearR},{ClearG},{ClearB},1) expected=(0.12,0.3,0.55,1)");
 
         if (gl.ContextInfo is { } info)
         {
@@ -124,13 +124,13 @@ public class Previewer : OpenGlControlBase
             int b = Marshal.ReadByte(pixel, 2);
             int a = Marshal.ReadByte(pixel, 3);
 
-            // 实测读回 (25,31,41,255)。0.10/0.12/0.16 换到 8 位得到 25/31/41，
-            // 三个通道的取整方向并不一致（25.5 落成 25，30.6 落成 31），所以留 1 的余量，
-            // 而不是去猜某个后端的取整规则。
+            // 实测读回 (31,76,140,255)。0.12/0.30/0.55 × 255 = 30.6/76.5/140.25，
+            // 同一批里 30.6 进位成 31 而 76.5 舍成 76，取整规则从数值上推不出来，
+            // 所以留 1 的余量，而不是把某个后端的取整方式当成规范。
             Debug.WriteLine(
-                $"[PREVIEWER][gl.readback] center=({r},{g},{b},{a}) expected=(26,31,41,255)±1");
+                $"[PREVIEWER][gl.readback] center=({r},{g},{b},{a}) expected=(31,76,140,255)±1");
             Debug.Assert(
-                Math.Abs(r - 26) <= 1 && Math.Abs(g - 31) <= 1 && Math.Abs(b - 41) <= 1 && a == 255,
+                Math.Abs(r - 31) <= 1 && Math.Abs(g - 76) <= 1 && Math.Abs(b - 140) <= 1 && a == 255,
                 $"[PREVIEWER][gl.readback] 屏上颜色不是设定的清屏色 center=({r},{g},{b},{a})");
         }
         finally

@@ -64,19 +64,22 @@ NuGet 上那个叫 `Avalonia.OpenGL` 的包最新只有 0.7.0，是上古遗留�
     [SAMPLE][app.start] args=[--selftest 4] baseDir='...bin\Debug\net10.0\'
     [SAMPLE][window.opened] client=1024, 768 scaling=1
     [PREVIEWER][gl.init] version='OpenGL ES 3.0 (ANGLE 2.1.1 ...)' renderer='ANGLE (AMD, ...)' vendor='Google Inc. (AMD)'
-    [PREVIEWER][gl.init] clearColor=(0.1,0.12,0.16,1) expected=(0.1,0.12,0.16,1)
+    [PREVIEWER][gl.init] clearColor=(0.12,0.3,0.55,1) expected=(0.12,0.3,0.55,1)
     [PREVIEWER][gl.init] profile=OpenGLES gl=3.0 compatibility=False extensions=128
     [PREVIEWER][gl.init] cap.vao=True cap.blit=True cap.drawBuffer=False
     [PREVIEWER][gl.render] frame=1 fb=1 bounds=1024x768 scaling=1 viewport=1024x768
-    [PREVIEWER][gl.readback] center=(25,31,41,255) expected=(26,31,41,255)±1
+    [PREVIEWER][gl.readback] center=(31,76,140,255) expected=(31,76,140,255)±1
     [PREVIEWER][gl.deinit] frames=1 expected=>0
     [SAMPLE][window.closed] client=1024, 768 scaling=1
 
 「背景纯色」不是靠看日志成立的：`CheckFrameBufferCenter` 用 `glReadPixels` 把 framebuffer
 中心的像素读回来，断言它等于清屏色换算到 8 位的值。这同时证明了清屏落在 Avalonia 交给我们
-的那个 framebuffer 上。读回实测 `(25,31,41,255)`——0.10/0.12/0.16 换到 8 位得到 25/31/41，
-三个通道的取整方向并不一致（25.5 落成 25，30.6 落成 31），所以断言留 1 的余量，
-而不是去猜后端的取整规则。
+的那个 framebuffer 上。读回实测 `(31,76,140,255)`——0.12/0.30/0.55 × 255 = 30.6/76.5/140.25，
+同一批里 30.6 进位成 31 而 76.5 舍成 76，取整规则从数值上推不出来，所以断言留 1 的余量，
+而不是把某个后端的取整方式当成规范。
+
+从 Phase C 起，屏中间是立方体而不是背景色，这条断言随之改成「四角是背景色 +
+可见面恰好是朝向相机的那三个」，见下一节。
 
 `CheckFrameBufferCenter` 那段是**唯一**用 `#if DEBUG` 包住的地方，而且是连调用点一起包的：
 断言本身在 Release 下会消失，但 `ReadPixels` 强制的那次 GPU 同步不会。判据很简单——
@@ -121,7 +124,8 @@ NuGet 上那个叫 `Avalonia.OpenGL` 的包最新只有 0.7.0，是上古遗留�
   那几个成员，不能为了测试往上面挂东西。
 - 撤销注册用的是 window `Closed` 事件而不是 `Shutdown`，因为 `Shutdown` 会跳过 GL 的 Deinit，
   而那正是帧数断言所在的地方。
-- 清屏色取偏暗的 `(0.10, 0.12, 0.16)` 而不是纯黑：纯黑和「一帧都没画出来」在截图里分不开。
+- 清屏色取蓝 `(0.12, 0.30, 0.55)`。不取白：立方体六个面按法线着色，全是浅色，
+  白底上会糊成一片。不取纯黑：纯黑和「一帧都没画出来」在截图里分不开。
 - 规范里列的 `Previewer.Events.cs` / `PreviewerInputAdapter.cs` / `CameraState.cs` /
   `GlCubeRenderer.cs` / `Gpu/*` / `Debug/DebugCube.cs` / `Sample/Controllers/*` 本阶段**没有创建**。
   它们各自属于 C / D / E / F，现在建就是空文件占位。
