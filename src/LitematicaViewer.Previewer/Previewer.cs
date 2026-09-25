@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.OpenGL;
@@ -28,6 +29,12 @@ public class Previewer : OpenGlControlBase
     private readonly int _uiThreadId = Environment.CurrentManagedThreadId;
 
     private int _framesRendered;
+
+#if DEBUG
+    // 只读一次。ReadPixels 会强制 GPU 同步，逐帧读会把帧率打到地板上，
+    // 而「清屏色对不对」只需要答一次。
+    private bool _frameBufferChecked;
+#endif
 
     protected override void OnOpenGlInit(GlInterface gl)
     {
@@ -82,7 +89,60 @@ public class Previewer : OpenGlControlBase
                 $"[PREVIEWER][gl.render] frame={_framesRendered} fb={fb} bounds={Bounds.Width}x{Bounds.Height} " +
                 $"scaling={scaling} viewport={width}x{height}");
         }
+
+        // 这一段是约定里说的例外：断言本身在 Release 下会消失，但读回那一下 GPU 同步不会，
+        // 所以连调用点一起包掉。其余探针都不需要 #if DEBUG。
+#if DEBUG
+        if (!_frameBufferChecked)
+        {
+            _frameBufferChecked = true;
+            CheckFrameBufferCenter(gl, width, height);
+        }
+#endif
     }
+
+#if DEBUG
+    // 「窗口显示，背景纯色」这条验收项没法靠读日志证明，所以把 framebuffer 中心的像素读回来。
+    // 这同时也证明了绑的是 Avalonia 交给我们的那个 framebuffer：绑错的话读回来的是别处的颜色。
+    private static void CheckFrameBufferCenter(GlInterface gl, int width, int height)
+    {
+        IntPtr entry = gl.GetProcAddress("glReadPixels");
+        if (entry == IntPtr.Zero)
+        {
+            Debug.WriteLine("[PREVIEWER][gl.readback] glReadPixels 取不到，跳过");
+            return;
+        }
+
+        ReadPixels readPixels = Marshal.GetDelegateForFunctionPointer<ReadPixels>(entry);
+        IntPtr pixel = Marshal.AllocHGlobal(4);
+        try
+        {
+            readPixels(width / 2, height / 2, 1, 1, GlConsts.GL_RGBA, GlConsts.GL_UNSIGNED_BYTE, pixel);
+
+            int r = Marshal.ReadByte(pixel, 0);
+            int g = Marshal.ReadByte(pixel, 1);
+            int b = Marshal.ReadByte(pixel, 2);
+            int a = Marshal.ReadByte(pixel, 3);
+
+            // 实测读回 (25,31,41,255)。0.10/0.12/0.16 换到 8 位得到 25/31/41，
+            // 三个通道的取整方向并不一致（25.5 落成 25，30.6 落成 31），所以留 1 的余量，
+            // 而不是去猜某个后端的取整规则。
+            Debug.WriteLine(
+                $"[PREVIEWER][gl.readback] center=({r},{g},{b},{a}) expected=(26,31,41,255)±1");
+            Debug.Assert(
+                Math.Abs(r - 26) <= 1 && Math.Abs(g - 31) <= 1 && Math.Abs(b - 41) <= 1 && a == 255,
+                $"[PREVIEWER][gl.readback] 屏上颜色不是设定的清屏色 center=({r},{g},{b},{a})");
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pixel);
+        }
+    }
+
+    // GlInterface 没有包 glReadPixels，只能自己从上下文里取函数地址。
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void ReadPixels(int x, int y, int width, int height, int format, int type, IntPtr pixels);
+#endif
 
     protected override void OnOpenGlDeinit(GlInterface gl)
     {
