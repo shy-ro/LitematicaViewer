@@ -100,7 +100,7 @@ Phase F：相机能走、能转。拆成三件事——指针移动转视角、W
 
 `Previewer` 新增的两个控件属性（放在 `Previewer.Events.cs` 里，与事件同一处——都是对外表面）：
 
-    float MoveSpeed          // 每秒走多少世界单位（＝方块），默认 1.5
+    float MoveSpeed          // 每秒走多少世界单位（＝方块），默认 5
     float LookSensitivity    // 指针每移过一个 DIP 转多少度，默认 0.10
 
 `PreviewerInputAdapter` 新增的公开面，给宿主用：
@@ -237,8 +237,16 @@ Phase E 里 `MinDistance = 2.4` / `MaxDistance = 7.0` 是写死的常量，取�
 （窗口宽是奇数时差半个 DIP）。用请求值当参照点时，每一次移动都会把这半像素的偏差再加一遍——
 每秒几百次，画面自己就转起来了，而那看起来像灵敏度写爆了。
 
-钉不住时整段放弃（`_pinBroken`）并**只打一次**日志，退回「只捕获指针」：
-视角照转，只是手划到屏幕边上会停。宁可降级也不要一个位置对不上的参照点。
+钉不住时整段放弃（`_pinBroken`，粘住不复位）并**只打一次**日志，退回「只捕获指针」：
+视角照转，只是手划到屏幕边上会停。
+
+**判据只能是「钉完之后光标在不在控件里」，不能是「和请求点是否逐像素相等」。**
+后者是这里原来的写法，它会误杀：手在 `MoveTo` 与 `TryRead` 两次系统调用之间本来就会动。
+实测 `requested=(850,483) actual=(843,476)`——差 7 个像素就判成钉不住，而 `_pinBroken` 是粘住的，
+一整个会话的固定鼠标当场作废。症状正是「鼠标没固定在中心、右键也呼不出鼠标」，
+可它前面已经连续五轮钉得好好的，日志里只有一条 `input.confine`，看起来像平台不支持。
+落点有偏差本身不需要判：参照点用的就是读回来的那个点，偏差不累积。
+（这一条与命中测试那条一样，合成事件覆盖不到，只能在真机上读光标——`--selftest` 全绿也照样漏。）
 
 ### 为什么是 Win32 P/Invoke
 
@@ -357,7 +365,7 @@ Avalonia 的公开面里只有「换一个光标形状」（包括 `StandardCurs
 ## 灵敏度与走动速度
 
 两个数现在是**控件属性**（`Previewer.MoveSpeed` / `Previewer.LookSensitivity`），
-默认值与上一轮相同：`LookSensitivity = 0.10` 度/DIP、`MoveSpeed = 1.5` 世界单位/秒。
+默认值与上一轮相同：`LookSensitivity = 0.10` 度/DIP、`MoveSpeed = 5` 世界单位/秒。
 
 取值依据没变：
 
@@ -538,7 +546,7 @@ Phase C 立起来的那套像素校验有两条隐含前提：
 
 侧边栏：两个滑块接上了，读数开始刷新。
 
-    [SAMPLE][sidebar.move] moveSpeed=1.5
+    [SAMPLE][sidebar.move] moveSpeed=5
     [SAMPLE][sidebar.look] lookSensitivity=0.1
     [SAMPLE][sidebar.stats] 侧边栏开始刷新（只打这一条）fps=8.0 frameMs=125.0 pos=(<2.6, 2, 3.4>)
                             yaw=142.59 pitch=25.05 distance=4.7244 viewport=980x800 scaling=1.00
@@ -574,10 +582,10 @@ Phase C 立起来的那套像素校验有两条隐含前提：
 走动那一段（按住 W 0.8 秒）：
 
     [SAMPLE][camera.wasd] key=W down=True pressed=[W]
-    [SAMPLE][camera.wasd] 开始移动 axis=(0.00,1.00) speed=1.5 pos=(<-2.0693636, 1.6, -2.6976051>)
+    [SAMPLE][camera.wasd] 开始移动 axis=(0.00,1.00) speed=5 pos=(<-2.0454786, 1.6, -2.6473157>)
     [SAMPLE][camera.wasd] key=W down=False pressed=[]
-    [SAMPLE][camera.wasd] 移动结束 seconds=0.802 units=1.2035 expected=1.2035 speed=1.5
-    [SAMPLE][selftest.walk] seconds=0.802 speed=1.5 expected=1.2035 actual=1.2035 dot=1.000000
+    [SAMPLE][camera.wasd] 移动结束 seconds=0.784 units=3.9200 expected=3.9200 speed=5
+    [SAMPLE][selftest.walk] seconds=0.784 speed=5 expected=3.9200 actual=3.9200 dot=1.000000
     [SAMPLE][selftest.walk] 松开后 5 帧位移为 0，键状态确实清掉了
 
     位移方向 dot=1.000000：正是按下那一刻视线在水平面上的投影
@@ -641,7 +649,7 @@ Phase C 立起来的那套像素校验有两条隐含前提：
 | Sample.dll | `sidebar.move` / `sidebar.look` / `sidebar.stats` / `sidebar.focus` | 有 | 无 |
 | Sample.dll | `input.probe.window` / `input.hittest` / `input.hittest.tree` | 有 | 无 |
 | Previewer.dll | `camera.convention` / `gl.readback` / `跳过画面校验` / `读回预算用尽` | 有 | 无 |
-| Previewer.dll | `input.attach` / `input.confine` / `input.right` / `input.release` / `gl.axes` / `gl.axes.axis` | 有 | 无 |
+| Previewer.dll | `input.attach` / `input.pin` / `input.confine` / `input.right` / `input.release` / `gl.axes` / `gl.axes.axis` | 有 | 无 |
 | Sample.dll | `api.probe`（构造签名的临时探针，已删） | 无 | 无 |
 
 前三类来自 `Debug.WriteLine`（`[Conditional("DEBUG")]` 连同插值字符串一起被丢掉）；
@@ -657,6 +665,8 @@ Release 下跑同一个剧本：`exit=0`，**一行输出都没有**（控制台
     camera.wasd                          按键状态变化、开始移动、一段移动的汇总（走了多久多远）
     camera.wasd 释放全部按键              失活时的清场
     camera.look / camera.pan             VerifyCameraMath 的汇总（单发，不逐次打）
+    input.pin                            钉成功了（只说一次）。成功本来完全没声音，而「固定鼠标到底
+                                         有没有生效」正是这条链里唯一看不见的事
     input.confine                        钉不住时降级（只说一次）、宿主关掉固定鼠标
     input.right                          右键挂起的三条路：按下 / 抬起 / 抬起落在别处（从按键状态补上）
     input.release                        宿主在窗口失活时收手势
@@ -722,7 +732,7 @@ Release 下跑同一个剧本：`exit=0`，**一行输出都没有**（控制台
 ## 未解决
 
 - **手感仍然没有目视确认过**。第一版的手感问题是「拿给人看」才发现的，
-  所以这一条不是形式：转视角的方向与灵敏度（0.10 度/DIP）、走动速度（1.5 方块/秒）、
+  所以这一条不是形式：转视角的方向与灵敏度（0.10 度/DIP）、走动速度（5 方块/秒）、
   固定鼠标在真机上会不会太灵敏——都得在窗口上试。现在试的代价降到了「拖两个滑块」。
 - **焦点那一条只能靠真机**。合成事件绕过命中测试与焦点管理器，
   所以「拖完滑块之后 W 还能不能走」剧本验不了：它要么作弊（自己调 Focus），
