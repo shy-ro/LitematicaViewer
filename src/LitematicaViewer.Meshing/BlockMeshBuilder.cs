@@ -89,7 +89,6 @@ public sealed class BlockMeshBuilder
         int[] waterLevels = new int[region.Palette.Length];
         string[] waterSprites = new string[region.Palette.Length];
         float[] waterTints = new float[region.Palette.Length];
-        float[] waterSurface = new float[region.Palette.Length];
         for (int i = 0; i < airFlags.Length; i++)
         {
             airFlags[i] = region.Palette[i].IsAir;
@@ -105,22 +104,18 @@ public sealed class BlockMeshBuilder
             waterTints[i] = FluidMesher.IsPlainFluid(region.Palette[i])
                 ? TintSlotFor(region.Palette[i].ToString())
                 : TintSlotFor("minecraft:water");
-            // 裸流体按 (8-level)/9；含水宿主贴宿主模型顶（水面不再悬空半格）。
-            waterSurface[i] = FluidMesher.IsPlainFluid(region.Palette[i])
-                ? FluidMesher.OwnHeight(waterLevels[i])
-                : HostTopY(region.Palette[i]);
         }
 
         List<float> vertices = [];
         List<int> indices = [];
         int[] blocks = region.BlockIndices.ToArray();
-        FluidMesher.World fluidWorld = new(waterFlags, waterLevels, waterSurface, occludeFlags, blocks, size);
+        FluidMesher.World fluidWorld = new(waterFlags, waterLevels, occludeFlags, blocks, size);
 
         void EmitFluid(int cx, int cy, int cz, int paletteIdx, Vector3 at)
         {
             _fluid ??= new FluidMesher(_atlas);
             _fluid.EmitCell(vertices, indices, at, fluidWorld, cx, cy, cz,
-                waterSprites[paletteIdx], waterTints[paletteIdx]);
+                waterLevels[paletteIdx], waterSprites[paletteIdx], waterTints[paletteIdx]);
         }
 
         for (int y = 0; y < size.Y; y++)
@@ -482,26 +477,6 @@ public sealed class BlockMeshBuilder
     // MC 原版按方块 id 查 colormap 注册表，tintindex 只是槽位号；这里用同一思路把
     // 「哪个方块染什么色」定在网格侧。按 plains 群系的固定色走（litematica 本体
     // 默认也是固定色），不做群系插值。
-    // 含水宿主的水面高：取模型全部部件（multipart 全算）的最高顶点，夹到 1.0——
-    // 墙柱/栅栏臂的模型本身越界到 1.5，水面不能跟着越出格。下半砖 0.5、楼梯 1.0，
-    // 水面贴宿主顶而不是 vanilla 流体渲染器的 8/9 悬空面。
-    private float HostTopY(BlockStateDefinition state)
-    {
-        float top = 0f;
-        foreach (CachedVariant variant in GetState(state).Variants)
-        {
-            foreach (CachedQuad quad in variant.Quads)
-            {
-                top = MathF.Max(top, quad.A.Y);
-                top = MathF.Max(top, quad.B.Y);
-                top = MathF.Max(top, quad.C.Y);
-                top = MathF.Max(top, quad.D.Y);
-            }
-        }
-
-        return top <= 0f ? FluidMesher.OwnHeight(0) : MathF.Min(top, 1f);
-    }
-
     private static float TintSlotFor(string stateId)
     {
         string block = stateId;
