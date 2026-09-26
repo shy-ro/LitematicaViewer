@@ -12,6 +12,14 @@ namespace LitematicaViewer.Core.Picking;
 // 而跳过的那一格表现为"明明点到方块却说没命中"。
 public static class VoxelPicker
 {
+    private static void MaybeLog(bool log, string message)
+    {
+        if (log)
+        {
+            Debug.WriteLine(message);
+        }
+    }
+
     // 射线起点与方向用 System.Numerics.Vector3（float）：方块坐标是整数语义，
     // 但射线本身是连续的。取不到整数的量硬塞进 Vector3I 只会把误差藏起来。
     public const float DefaultMaxDistance = 512f;
@@ -23,12 +31,15 @@ public static class VoxelPicker
     // 挪的方向只能是射线的去向了——盒内一定在进入平面的去侧。
     private const float EntryNudge = 1e-4f;
 
+    // log=false 给悬停拾取用：指针一秒几百条事件，逐条打会把终端冲掉。
+    // 点击式拾取（日志有排查价值）保持默认 true。
     public static bool TryPick(
         LitematicDocument document,
         Vector3 origin,
         Vector3 direction,
         out VoxelHit hit,
-        float maxDistance = DefaultMaxDistance)
+        float maxDistance = DefaultMaxDistance,
+        bool log = true)
     {
         hit = default;
         bool found = false;
@@ -37,7 +48,7 @@ public static class VoxelPicker
         // 后面的区域拿已知命中距离当射程：比已命中的还远就不必走完它的边界。
         foreach (LitematicRegion region in document.Regions)
         {
-            if (TryPick(region, origin, direction, out VoxelHit candidate, best) && candidate.Distance < best)
+            if (TryPick(region, origin, direction, out VoxelHit candidate, best, log) && candidate.Distance < best)
             {
                 hit = candidate;
                 best = candidate.Distance;
@@ -45,9 +56,13 @@ public static class VoxelPicker
             }
         }
 
-        Debug.WriteLine(
-            $"[CORE][pick.document] regions={document.Regions.Length} found={found} " +
-            $"distance={(found ? best : 0f)} expected=最近的那个区域");
+        if (log)
+        {
+            Debug.WriteLine(
+                $"[CORE][pick.document] regions={document.Regions.Length} found={found} " +
+                $"distance={(found ? best : 0f)} expected=最近的那个区域");
+        }
+
         return found;
     }
 
@@ -56,7 +71,8 @@ public static class VoxelPicker
         Vector3 origin,
         Vector3 direction,
         out VoxelHit hit,
-        float maxDistance = DefaultMaxDistance)
+        float maxDistance = DefaultMaxDistance,
+        bool log = true)
     {
         hit = default;
 
@@ -64,14 +80,14 @@ public static class VoxelPicker
         // 一旦谁忘了归一化，拿到的距离会自洽地差一个系数，而且不会以异常的形式暴露。
         if (!TryNormalize(direction, out Vector3 dir) || maxDistance <= 0f)
         {
-            Debug.WriteLine($"[CORE][pick.miss] region='{region.Name}' reason=badRay maxDistance={maxDistance}");
+            MaybeLog(log, $"[CORE][pick.miss] region='{region.Name}' reason=badRay maxDistance={maxDistance}");
             return false;
         }
 
         Vector3I size = region.Bounds.Size;
         if (size.X <= 0 || size.Y <= 0 || size.Z <= 0)
         {
-            Debug.WriteLine($"[CORE][pick.miss] region='{region.Name}' reason=degenerateSize size={size}");
+            MaybeLog(log, $"[CORE][pick.miss] region='{region.Name}' reason=degenerateSize size={size}");
             return false;
         }
 
@@ -81,7 +97,7 @@ public static class VoxelPicker
 
         if (!TryEnterBox(local, dir, limit, maxDistance, out float entry, out int entryAxis))
         {
-            Debug.WriteLine($"[CORE][pick.miss] region='{region.Name}' reason=boxMiss entry={entry} axis={entryAxis}");
+            MaybeLog(log, $"[CORE][pick.miss] region='{region.Name}' reason=boxMiss entry={entry} axis={entryAxis}");
             return false;
         }
 
@@ -133,9 +149,12 @@ public static class VoxelPicker
                     {
                         Vector3I block = new(min.X + cellX, min.Y + cellY, min.Z + cellZ);
                         hit = new VoxelHit(region, block, face, t, paletteIndex, region.Palette[paletteIndex]);
-                        Debug.WriteLine(
-                            $"[CORE][pick.hit] region='{region.Name}' block={block} face={face} " +
-                            $"distance={t} steps={steps} palette={paletteIndex} state={region.Palette[paletteIndex]}");
+                        if (log)
+                        {
+                            Debug.WriteLine(
+                                $"[CORE][pick.hit] region='{region.Name}' block={block} face={face} " +
+                                $"distance={t} steps={steps} palette={paletteIndex} state={region.Palette[paletteIndex]}");
+                        }
                         return true;
                     }
                 }
@@ -171,7 +190,8 @@ public static class VoxelPicker
             // 循环一定会退出，不需要再加步数上限。
             if (t > maxDistance || (uint)cellX >= (uint)size.X || (uint)cellY >= (uint)size.Y || (uint)cellZ >= (uint)size.Z)
             {
-                Debug.WriteLine(
+                MaybeLog(
+                    log,
                     $"[CORE][pick.miss] region='{region.Name}' reason=marchOut t={t} steps={steps} maxDistance={maxDistance}");
                 return false;
             }

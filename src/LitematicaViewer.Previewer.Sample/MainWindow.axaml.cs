@@ -9,6 +9,7 @@ using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using LitematicaViewer.Core.Picking;
 
 namespace LitematicaViewer.Previewer.Sample;
 
@@ -34,6 +35,10 @@ public partial class MainWindow : Window, IViewModeHost
     // 数据源与它的产出。展台目标表在载入文件后被替换成「逐 region」；
     // 没载入时保持演示立方体那份（自检与空启动都走它）。
     private readonly DocumentSource _source = new();
+
+    // 拾取的体素数据源：当前载入的文档。null 表示「没有东西可拾取」
+    //（还没载入、或载入的是没有非空气方块的空文件）。
+    private DocumentSource.LoadedDocument? _loaded;
     private ImmutableArray<ShowcaseTarget> _showcaseTargets = ShowcaseTargets.All;
 
     public MainWindow()
@@ -71,6 +76,7 @@ public partial class MainWindow : Window, IViewModeHost
         // 数字键 1/2 切模式。挂在控件的事件上而不是窗口的 KeyDown 上：按键只发给有焦点的元素，
         // 而这个焦点是宿主自己还给视口的（见 OnSidebarPointerPressed），所以它在这一层看得见。
         Viewport.KeyChanged += OnViewportKeyChanged;
+        Viewport.HoverMoved += OnHoverMoved;
 
         // 侧边栏上的任何一次按下都把焦点还回视口。滑块的 Focusable 已经是 false（拖它不该抢
         // 键盘焦点），但「按一个不可聚焦的元素会不会把焦点清掉」由模板和焦点管理器决定——
@@ -275,6 +281,13 @@ public partial class MainWindow : Window, IViewModeHost
             return;
         }
 
+        // 载入失败/换文件时旧的拾取数据源必须清掉：上一份文档的体素还在，
+        // 高亮框却会指向新模型里完全不相干的位置。
+        if (_loaded is not null && document.Document != _loaded.Document)
+        {
+            Viewport.SetHighlight(null);
+        }
+
         // 空文件（调色板里只有空气）没有顶点可传：传空数组会让 GL 那边建一个零长度的
         // 索引缓冲，传 null 走「清空」语义，画面退回演示立方体。
         bool empty = document.MergedIndices.Length == 0;
@@ -288,6 +301,11 @@ public partial class MainWindow : Window, IViewModeHost
         // 展台目标换成逐 region。region 一个都没有的文件保持演示目标，
         // 否则展台一个目标都没有，进去就是断言。
         _showcaseTargets = document.Targets.IsEmpty ? ShowcaseTargets.All : document.Targets;
+
+        // 拾取的体素数据源。空文件（没有非空气方块）不接：射线永远落空，高亮框清掉。
+        _loaded = empty ? null : document;
+        Viewport.SetHighlight(null);
+        _sidebar.SetPick(empty ? "（空文件）" : "（指向模型）");
 
         // 自由视角的相机对准整体：距离用展台同一条取景算式（系数只有一份），
         // 朝向不动——视线本来就该指向它，位置照 (目标, 视线, 距离) 反解。
@@ -322,6 +340,42 @@ public partial class MainWindow : Window, IViewModeHost
         _sidebar.SetFile(
             $"{document.FileName}  {document.RegionCount} region  {document.TotalBlocks} 方块");
     }
+
+    // 指针悬停拾取：屏幕点 → 射线（PointToRay，与渲染共用同一套矩阵）→ 体素遍历（Core 的
+    // Amanatides & Woo）→ 高亮框 + 侧栏读数。事件一秒几百条，但每条只是一次几百步的遍历
+    // 加一次引用比较；UI 更新只在命中方块变化时发生，指针静止时根本不来事件。
+    // log=false：悬停的逐条命中日志会把终端冲掉，点击式的日志价值在 Core 里保不住这里。
+    private void OnHoverMoved(Avalonia.Vector position)
+    {
+        if (_loaded is null || double.IsNaN(position.X))
+        {
+            Viewport.SetHighlight(null);
+            _sidebar.SetPick(_loaded is null ? "（—）" : _sidebarPickMiss);
+            _lastPickedBlock = new Core.Model.Vector3I(int.MinValue, int.MinValue, int.MinValue);
+            return;
+        }
+
+        (Vector3 origin, Vector3 direction) = Viewport.PointToRay(position);
+        if (!VoxelPicker.TryPick(_loaded.Document, origin, direction, out VoxelHit hit, log: false))
+        {
+            Viewport.SetHighlight(null);
+            _sidebar.SetPick(_sidebarPickMiss);
+            _lastPickedBlock = new Core.Model.Vector3I(int.MinValue, int.MinValue, int.MinValue);
+            return;
+        }
+
+        Viewport.SetHighlight(new Vector3(hit.BlockPosition.X, hit.BlockPosition.Y, hit.BlockPosition.Z));
+        if (hit.BlockPosition != _lastPickedBlock)
+        {
+            _lastPickedBlock = hit.BlockPosition;
+            _sidebar.SetPick(
+                $"{hit.State.Name}  ({hit.BlockPosition.X},{hit.BlockPosition.Y},{hit.BlockPosition.Z})  " +
+                $"{hit.Face}  {hit.Distance:F1}m");
+        }
+    }
+
+    private Core.Model.Vector3I _lastPickedBlock = new(int.MinValue, int.MinValue, int.MinValue);
+    private const string _sidebarPickMiss = "（未指向方块）";
 
     private void OnViewportKeyChanged(Key key, bool isDown)
     {

@@ -911,6 +911,32 @@ internal sealed class InputSelfTest
         Debug.WriteLine(
             $"[SAMPLE][selftest.showcase] 滚轮推近 {ZoomInSteps} 档、推远 {ZoomOutSteps} 档，" +
             $"距离 {start:F4} -> {_camera.Distance:F4}（步长 {step}，无上下限）");
+
+        CheckPointToRay();
+    }
+
+    // 拾取的相机侧：屏幕中心的射线必须与相机视线同向。这条钉住的是「画面上指哪儿」与
+    // 「拾取问哪儿」是同一条线——PointToRay 与渲染各写一套矩阵换算的话，症状是准星
+    // 压着 A 却拾到 B，而且只在某些视角下出现，人工盯不出来。
+    private void CheckPointToRay()
+    {
+        (Vector3 origin, Vector3 direction) = _previewer.PointToRay(
+            new Avalonia.Vector(_previewer.Bounds.Width / 2, _previewer.Bounds.Height / 2));
+
+        Vector3 forward = _camera.Camera.Forward;
+        Debug.Assert(
+            Vector3.Dot(direction, forward) > 0.999f,
+            $"[SAMPLE][selftest.pick] 屏幕中心射线与视线不同向 dir=({direction}) forward=({forward})");
+
+        // 原点必须就是相机位置：射线从眼睛出发，而不是从某个矩阵求逆算出的奇怪处出发。
+        Debug.Assert(
+            (origin - _camera.Camera.Position).Length() < 1e-3f,
+            $"[SAMPLE][selftest.pick] 射线原点不是相机位置 origin=({origin}) " +
+            $"pos=({_camera.Camera.Position})");
+
+        Debug.WriteLine(
+            $"[SAMPLE][selftest.pick] 屏幕中心射线 = 视线（dir=({direction:F2}) 从 " +
+            $"({origin:F1}) 出发）——拾取与渲染共用同一套相机换算");
     }
 
     // 两次 yaw 之间的真实增量。

@@ -45,6 +45,7 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
     private GlCubeRenderer? _cube;
     private GlAxesRenderer? _axes;
     private GlPedestalRenderer? _pedestal;
+    private GlHighlightRenderer? _highlight;
     private GlMeshRenderer? _meshRenderer;
 
     // 指针能不能选中本控件，由这一条说了算，而默认答案是「不能」。
@@ -134,6 +135,9 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         // 光环和另外两个一起建、常驻，只在展台模式下画：模式切换不该创建或销毁 GPU 资源（R5）。
         _pedestal = GlPedestalRenderer.Create(gl);
 
+        // 拾取高亮框：常驻，只有 SetHighlight 传了位置才画。
+        _highlight = GlHighlightRenderer.Create(gl);
+
         // 网格渲染器跨上下文持有数据：OnOpenGlLost 之后宿主不需要重新装填，
         // 所以这里只在第一次建，恢复场景下沿用旧实例（渲染器内部自愈）。
         if (_meshRenderer is null)
@@ -205,6 +209,12 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         // 轴线接着画：落在立方体里的那一段被深度测试挡住，露在外面的是从方块里伸出来的三根轴。
         _axes?.Render(_camera, width, height);
 
+        // 拾取高亮框：线框 + 深度测试，被模型挡住的边自然看不见。位置没设就不画。
+        if (_highlightPosition is { } highlightBlock)
+        {
+            _highlight?.Render(_camera, width, height, highlightBlock);
+        }
+
         // 光环最后画。半透明的三个东西（轴线、光环）只有按「从远到近」画才对得上，
         // 而光环压在底面上、比它绕着的那块模型更靠前，所以它在轴线之后。
         // 反过来时，光环与轴线交叠的那几百个像素会先被光环写一遍、再被轴线混一遍，
@@ -258,6 +268,8 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         // 上下文还在，可以正常走 GL 的删除路径。
         _pedestal?.Dispose();
         _pedestal = null;
+        _highlight?.Dispose();
+        _highlight = null;
         _axes?.Dispose();
         _axes = null;
         _cube?.Dispose();
@@ -275,6 +287,8 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         Debug.WriteLine($"[PREVIEWER][gl.lost] frames={_framesRendered} expected=之后会再来一次 gl.init");
         _pedestal?.Abandon();
         _pedestal = null;
+        _highlight?.Abandon();
+        _highlight = null;
         _axes?.Abandon();
         _axes = null;
         _cube?.Abandon();
@@ -417,14 +431,18 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         PointerMoved += (_, e) =>
         {
             _pointerMoves++;
+            Point position = e.GetPosition(this);
             if (_pointerMoves == 1 || _pointerMoves % 60 == 0)
             {
-                Point position = e.GetPosition(this);
                 Debug.WriteLine(
                     $"[PREVIEWER][input.probe] pointer.moved count={_pointerMoves} " +
                     $"pos=({position.X:F0},{position.Y:F0})");
             }
+
+            HoverMoved?.Invoke(new Avalonia.Vector(position.X, position.Y));
         };
+
+        PointerExited += (_, _) => HoverMoved?.Invoke(new Avalonia.Vector(double.NaN, double.NaN));
     }
 
     // 这里原本还有 ReadFrameBuffer 与 ReadGlError：GlInterface 没有包 glReadPixels 与 glGetError，

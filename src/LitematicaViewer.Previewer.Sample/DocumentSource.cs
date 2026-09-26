@@ -31,6 +31,7 @@ internal sealed class DocumentSource
         ImmutableArray<ShowcaseTarget> Targets,
         Vector3 WholeCentre,
         float WholeRadius,
+        LitematicDocument Document,
         string DebugNotes);
 
     private int _generation;
@@ -216,6 +217,7 @@ internal sealed class DocumentSource
             [.. targets],
             wholeCentre,
             wholeRadius,
+            document,
             notes);
     }
 

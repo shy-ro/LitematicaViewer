@@ -1,7 +1,9 @@
 using System.Diagnostics;
 using Avalonia;
 using Avalonia.Input;
+using Matrix4x4 = System.Numerics.Matrix4x4;
 using Vector3 = System.Numerics.Vector3;
+using Vector4 = System.Numerics.Vector4;
 
 namespace LitematicaViewer.Previewer;
 
@@ -42,6 +44,11 @@ public partial class Previewer
     // 长按会重复触发 down（平台自动重复），事件只报告状态，去重是控制器的事——
     // 控制器按状态处理时重复的 down 天然幂等，按边沿处理才会踩到。
     public event Action<Key, bool>? KeyChanged;
+
+    // 指针悬停位置（控件 DIP 坐标），不需要按键。拾取链路的入口：宿主把它换算成
+    // 射线去问体素数据「鼠标指到了哪个方块」。移动一秒几百条，宿主自己节流——
+    // 每次都做完整拾取的话可以在 Tick 里做（存最新位置，每帧算一次）。
+    public event Action<Avalonia.Vector>? HoverMoved;
 
     // 物理像素尺寸，与 GL 视口一致（不是 DIP）。首帧会发一次（从 0x0 到实际尺寸），
     // 之后每次尺寸变化各发一次。
@@ -165,6 +172,50 @@ public partial class Previewer
     private Vector3 _pedestalCentre;
     private float _pedestalRadius = 1f;
     private float _pedestalBaseY;
+
+    // 拾取高亮框（画不画、哪个方块）。null 是清掉。位置是世界坐标（与网格顶点同一坐标系）。
+    // 用 float 而不是 Core 的 Vector3I：Previewer 不引用 Core（分层单向），
+    // 方块坐标是整数语义，float 到百万量级都装得下精确值。
+    public void SetHighlight(Vector3? blockPosition)
+    {
+        if (Nullable.Equals(_highlightPosition, blockPosition))
+        {
+            return;
+        }
+
+        _highlightPosition = blockPosition;
+        Debug.WriteLine(
+            $"[PREVIEWER][gl.highlight.set] " +
+            $"block={(blockPosition is { } p ? $"{p.X:F0},{p.Y:F0},{p.Z:F0}" : "null")}");
+    }
+
+    private Vector3? _highlightPosition;
+
+    // 屏幕点 → 世界射线。拾取链路的相机侧：与渲染共用同一份 (view * proj) 矩阵求逆，
+    // 于是「画面上鼠标指着的那条线」与「拾取问体素数据的那条线」必然是同一条——
+    // 两套换算各自为政的话，症状是准星压着 A 却拾到 B，且只在某些视角下出现。
+    // 入参用控件 DIP 坐标（与 HoverMoved 一致），宽高也用 DIP：比例与物理像素一致。
+    public (Vector3 Origin, Vector3 Direction) PointToRay(Vector point)
+    {
+        double width = Math.Max(1.0, Bounds.Width);
+        double height = Math.Max(1.0, Bounds.Height);
+        float ndcX = (float)(2.0 * point.X / width - 1.0);
+        float ndcY = (float)(1.0 - 2.0 * point.Y / height);
+
+        // System.Numerics 的投影是右手的：NDC z=-1 是近平面、+1 是远平面。
+        // 用 GL 深度那套 [0,1] 会得到两条完全不一样的射线，而且不报错。
+        Matrix4x4 viewProjection = _camera.GetViewMatrix() * _camera.GetProjectionMatrix((float)(width / height));
+        Debug.Assert(Matrix4x4.Invert(viewProjection, out Matrix4x4 inverse), "[PREVIEWER][pick] 视图投影矩阵不可逆");
+        Vector4 nearPoint = Vector4.Transform(new Vector4(ndcX, ndcY, -1f, 1f), inverse);
+        Vector4 farPoint = Vector4.Transform(new Vector4(ndcX, ndcY, 1f, 1f), inverse);
+
+        // 反投影 z=-1 得到的是**近平面上**的点，不是相机本身——原点必须显式用相机位置。
+        // 方向取近平面点到远平面点的连线：透视下这条线必然穿过相机，方向不受近平面影响。
+        Vector3 origin = _camera.Position;
+        Vector3 nearWorld = new(nearPoint.X / nearPoint.W, nearPoint.Y / nearPoint.W, nearPoint.Z / nearPoint.W);
+        Vector3 farWorld = new(farPoint.X / farPoint.W, farPoint.Y / farPoint.W, farPoint.Z / farPoint.W);
+        return (origin, Vector3.Normalize(farWorld - nearWorld));
+    }
 
     // 装填一个有贴图的网格（pos3+normal3+uv2 交错）与它采样的 RGBA 图集。
     // 这是宿主把投影数据送进渲染的唯一口子：网格与图集一次装齐——uv 是按那张图集算出来的，

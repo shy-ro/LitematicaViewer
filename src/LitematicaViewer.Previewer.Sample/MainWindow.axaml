@@ -71,6 +71,12 @@
 
           <Separator Margin="0,8,0,0" />
 
+          <!-- 指针悬停拾取的读数：方块名 / 坐标 / 命中面。没指到方块（或没载入）时是占位文本。 -->
+          <TextBlock Text="拾取" FontWeight="SemiBold" />
+          <TextBlock x:Name="PickText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" Text="（—）" />
+
+          <Separator Margin="0,8,0,0" />
+
           <TextBlock Text="运行数据" FontWeight="SemiBold" />
           <TextBlock x:Name="FpsText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" />
           <TextBlock x:Name="ViewportText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" />
