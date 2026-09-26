@@ -265,6 +265,7 @@ public static class MeshSmoke
         CheckSingleBlock();
         CheckFaceCulling();
         CheckLogAxisRotation();
+        CheckFluidRules();
         foreach (string path in litematics)
         {
             CheckRealFile(path);
@@ -380,6 +381,163 @@ public static class MeshSmoke
         Debug.Assert(endCapFaces == 2, $"[MESH][smoke] 端面帽应 2 个面（两端）实得 {endCapFaces}");
         Debug.WriteLine("[MESH][smoke] oak_log[axis=x]: 端面帽 ±X ✓（旋转约定钉住）");
         _checks++;
+    }
+
+    private static BlockStateDefinition WaterState(int level) =>
+        new("minecraft:water", BlockStateDefinition.NoProperties.SetItem("level", level.ToString()));
+
+    // 水面高与邻居规则，加上 BuildRegion 集成：高度曲线、贴墙不塌边、相邻水格
+    // 连通不画壁（面数守恒）、下落柱满格、waterlogged 宿主双层渲染。
+    private static void CheckFluidRules()
+    {
+        // 高度曲线：源 8/9，随 level 单调降到 level7 的 1/9 薄膜，8+ 下落柱满格。
+        float own0 = FluidMesher.OwnHeight(0);
+        Debug.Assert(MathF.Abs(own0 - (8f / 9f)) < 1e-5f, $"[MESH][smoke] OwnHeight(0)={own0} expected=8/9");
+        // 单调只在流动段 0..7 内成立；8..15 是下落柱，设计上就是满格。
+        for (int level = 1; level <= 7; level++)
+        {
+            Debug.Assert(
+                FluidMesher.OwnHeight(level) <= FluidMesher.OwnHeight(level - 1) + 1e-6f,
+                $"[MESH][smoke] OwnHeight 在 level={level} 回升");
+        }
+
+        Debug.Assert(FluidMesher.OwnHeight(7) > 0f, "[MESH][smoke] level7 应剩薄膜");
+        Debug.Assert(FluidMesher.OwnHeight(8) == 1f && FluidMesher.OwnHeight(15) == 1f, "[MESH][smoke] 下落柱应满格");
+
+        // palette 0=石头(遮挡) 1=水L0 2=水L2 3=空气；遮挡标记手填，不依赖 resolver。
+        BlockStateDefinition[] palette = [Stone, WaterState(0), WaterState(2), Air];
+        bool[] water = new bool[palette.Length];
+        int[] levels = new int[palette.Length];
+        bool[] occ = new bool[palette.Length];
+        for (int i = 0; i < palette.Length; i++)
+        {
+            water[i] = FluidMesher.IsWaterCell(palette[i]);
+            levels[i] = FluidMesher.LevelOf(palette[i]);
+            occ[i] = i == 0;
+        }
+
+        // 贴墙：3x3x3 全石头，中心一格水。四角两侧都不是流体 → 保持自身高，
+        // 池边贴实心墙的池面是平的，不往墙上塌。
+        int[] solidBlocks = new int[27];
+        FluidMesher.World solidWorld = new(water, levels, occ, solidBlocks, new Vector3I(3, 3, 3));
+        solidBlocks[(1 * 3 + 1) * 3 + 1] = 1;
+        foreach ((int dx, int dz) in new[] { (-1, -1), (1, -1), (1, 1), (-1, 1) })
+        {
+            float corner = FluidMesher.Corner(solidWorld, 1, 1, 1, 0, dx, dz);
+            Debug.Assert(
+                MathF.Abs(corner - own0) < 1e-5f,
+                $"[MESH][smoke] 贴实心墙的角高应保持自身高 dx={dx} dz={dz} got={corner}");
+        }
+
+        // 阶梯：L0 与 L2 相邻，共享边的角高是两格平均 → 倾斜水面。
+        int[] rowBlocks = [1, 2, 3];
+        FluidMesher.World rowWorld = new(water, levels, occ, rowBlocks, new Vector3I(3, 1, 1));
+        float slope = FluidMesher.Corner(rowWorld, 0, 0, 0, 0, +1, -1);
+        Debug.Assert(
+            MathF.Abs(slope - ((own0 + FluidMesher.OwnHeight(2)) / 2f)) < 1e-5f,
+            $"[MESH][smoke] 相邻水格的角高应是平均 got={slope}");
+
+        // 集成：4x1x1 的 level 0..3 水阶梯。18 面 = 两头各 5 + 中间两格各 4
+        // （相邻水格之间不画壁——连通标记失灵就会多出面，交界上两片重合 z-fight）。
+        BlockStateDefinition[] wPalette = [WaterState(0), WaterState(1), WaterState(2), WaterState(3)];
+        LitematicRegion wRegion = MakeRegion(new Vector3I(4, 1, 1), wPalette, [0, 1, 2, 3]);
+        BlockMeshBuilder collector = new(_resolver, TextureAtlas.Build(_packs, []));
+        HashSet<string> wSprites = [];
+        collector.CollectSprites([wRegion], wSprites);
+        Debug.Assert(
+            wSprites.Contains("minecraft:block/water_still"),
+            $"[MESH][smoke] 水调色板没收集到 water_still: [{string.Join(", ", wSprites)}]");
+        BlockMeshBuilder wBuilder = CreateBuilder([.. wSprites]);
+        MeshData wMesh = wBuilder.BuildRegion(wRegion);
+        Debug.Assert(
+            wMesh.Indices.Length == 108,
+            $"[MESH][smoke] 水阶梯索引={wMesh.Indices.Length} expected=108");
+        CheckVerticesWellFormed(wMesh);
+        Debug.Assert(
+            MathF.Abs(MaxYInCell(wMesh, 0, 1) - own0) < 1e-4f,
+            $"[MESH][smoke] L0 水面应 8/9 got={MaxYInCell(wMesh, 0, 1)}");
+        // L3 格：靠 L2 的共享边角高是两格平均（倾斜），远端角保持自身高。
+        // 两个值都得在，少了平均就是没向低处倾斜，少了自身高就是角算错了。
+        float slopeExpect = (FluidMesher.OwnHeight(2) + FluidMesher.OwnHeight(3)) / 2f;
+        bool hasSelf = false, hasSlope = false;
+        for (int v = 0; v < wMesh.VertexCount; v++)
+        {
+            int o = v * MeshData.FloatsPerVertex;
+            float vx = wMesh.Vertices[o];
+            float vy = wMesh.Vertices[o + 1];
+            if (vx >= 3f)
+            {
+                hasSelf |= MathF.Abs(vy - FluidMesher.OwnHeight(3)) < 1e-4f;
+                hasSlope |= MathF.Abs(vy - slopeExpect) < 1e-4f;
+            }
+        }
+
+        Debug.Assert(hasSelf, $"[MESH][smoke] L3 格缺自身高 {FluidMesher.OwnHeight(3)} 的角顶点");
+        Debug.Assert(hasSlope, $"[MESH][smoke] L3 格缺共享边平均高 {slopeExpect} 的角顶点（没倾斜）");
+        for (int v = 0; v < wMesh.VertexCount; v++)
+        {
+            float tint = wMesh.Vertices[(v * MeshData.FloatsPerVertex) + MeshData.TintOffset];
+            Debug.Assert(MathF.Abs(tint - 3f) < 0.5f, $"[MESH][smoke] 水顶点 tint 槽应 3 got={tint}");
+        }
+
+        // 下落柱：L8 在下、L0 源在上。10 面：源 top+4 侧（无底，下面是水），
+        // 下落格 4 侧+底（下端在区域边界，按空气口径出面）；下落格侧壁顶边满格 y=1.0。
+        LitematicRegion fRegion = MakeRegion(new Vector3I(1, 2, 1), [WaterState(8), WaterState(0)], [0, 1]);
+        MeshData fMesh = wBuilder.BuildRegion(fRegion);
+        Debug.Assert(fMesh.Indices.Length == 60, $"[MESH][smoke] 下落柱索引={fMesh.Indices.Length} expected=60");
+        bool fallingFull = false;
+        for (int v = 0; v < fMesh.VertexCount; v++)
+        {
+            float vy = fMesh.Vertices[(v * MeshData.FloatsPerVertex) + 1];
+            fallingFull |= MathF.Abs(vy - 1f) < 1e-4f;
+        }
+
+        Debug.Assert(fallingFull, "[MESH][smoke] 下落柱侧壁应满格 y=1.0");
+
+        // waterlogged 宿主：本体照画，8/9 水面叠在格里且染水色；
+        // CollectSprites 必须补 water_still（只有宿主没有裸水的调色板场景）。
+        BlockStateDefinition slab = new(
+            "minecraft:oak_slab",
+            BlockStateDefinition.NoProperties.SetItem("type", "bottom").SetItem("waterlogged", "true"));
+        LitematicRegion sRegion = MakeRegion(new Vector3I(1, 1, 1), [slab], [0]);
+        HashSet<string> sSprites = [];
+        collector.CollectSprites([sRegion], sSprites);
+        Debug.Assert(
+            sSprites.Contains("minecraft:block/water_still"),
+            $"[MESH][smoke] waterlogged 宿主没补水面贴图: [{string.Join(", ", sSprites)}]");
+        BlockMeshBuilder sBuilder = CreateBuilder([.. sSprites]);
+        MeshData sMesh = sBuilder.BuildRegion(sRegion);
+        bool hasWaterTop = false, hasHost = false;
+        for (int v = 0; v < sMesh.VertexCount; v++)
+        {
+            int o = v * MeshData.FloatsPerVertex;
+            float vy = sMesh.Vertices[o + 1];
+            float tint = sMesh.Vertices[o + MeshData.TintOffset];
+            hasWaterTop |= MathF.Abs(vy - own0) < 1e-4f && MathF.Abs(tint - 3f) < 0.5f;
+            hasHost |= vy < 0.5f;
+        }
+
+        Debug.Assert(hasWaterTop, "[MESH][smoke] waterlogged 台阶里没有 8/9 水面（tint=3）");
+        Debug.Assert(hasHost, "[MESH][smoke] waterlogged 台阶本体丢了");
+        Debug.WriteLine("[MESH][smoke] 流体: 高度曲线/贴墙/阶梯/连通面数/下落柱/waterlogged ✓");
+        _checks++;
+    }
+
+    // 网格坐标 x ∈ [x0, x1) 里的最高顶点 y（流体表面高度断言用）。
+    private static float MaxYInCell(MeshData mesh, int x0, int x1)
+    {
+        float max = float.MinValue;
+        for (int v = 0; v < mesh.VertexCount; v++)
+        {
+            int o = v * MeshData.FloatsPerVertex;
+            float vx = mesh.Vertices[o];
+            if (vx >= x0 && vx <= x1 && mesh.Vertices[o + 1] > max)
+            {
+                max = mesh.Vertices[o + 1];
+            }
+        }
+
+        return max;
     }
 
     private static void CheckRealFile(string path)
