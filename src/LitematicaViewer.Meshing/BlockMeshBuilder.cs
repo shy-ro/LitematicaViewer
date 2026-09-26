@@ -14,6 +14,7 @@ public sealed class BlockMeshBuilder
     private readonly BlockStateResolver _resolver;
     private readonly TextureAtlas _atlas;
     private readonly Dictionary<string, CachedState> _cache = new(StringComparer.Ordinal);
+    private FluidMesher? _fluid;
 
     private int _skippedFaces;
     private int _emptySpriteFaces;
@@ -44,6 +45,20 @@ public sealed class BlockMeshBuilder
                     continue;
                 }
 
+                // 流体本体不走模型路径（elements 为空，形状在 BuildRegion 现算），
+                // 贴图在这里登记；waterlogged 宿主本体照常解析，但只有宿主没有
+                // 裸水的调色板也得有水面贴图，补一次。
+                if (FluidMesher.IsPlainFluid(state))
+                {
+                    output.Add(FluidMaterial.SpriteFor(state.Name));
+                    continue;
+                }
+
+                if (FluidMesher.IsWaterlogged(state))
+                {
+                    output.Add(FluidMaterial.SpriteFor("minecraft:water"));
+                }
+
                 foreach (ResolvedVariant variant in _resolver.Resolve(state.ToString()).Variants)
                 {
                     foreach (ModelElement element in variant.Model.Elements)
@@ -70,15 +85,38 @@ public sealed class BlockMeshBuilder
         // 大模型（几百万体素 × 6 邻居）全靠这里。
         bool[] airFlags = new bool[region.Palette.Length];
         bool[] occludeFlags = new bool[region.Palette.Length];
+        bool[] waterFlags = new bool[region.Palette.Length];
+        int[] waterLevels = new int[region.Palette.Length];
+        string[] waterSprites = new string[region.Palette.Length];
+        float[] waterTints = new float[region.Palette.Length];
         for (int i = 0; i < airFlags.Length; i++)
         {
             airFlags[i] = region.Palette[i].IsAir;
             occludeFlags[i] = !airFlags[i] && OccludesNeighbours(region.Palette[i].ToString());
+            // waterlogged 宿主也标水：相邻水格共享连通标记才不会在交界上画两片
+            // 重合的侧壁互相 z-fight。贴图与 tint 同样一次备齐。
+            waterFlags[i] = !airFlags[i] && FluidMesher.IsWaterCell(region.Palette[i]);
+            waterLevels[i] = FluidMesher.LevelOf(region.Palette[i]);
+            waterSprites[i] = FluidMesher.IsPlainFluid(region.Palette[i])
+                ? FluidMaterial.SpriteFor(region.Palette[i].Name)
+                : FluidMaterial.SpriteFor("minecraft:water");
+            // waterlogged 宿主的水面按水染色（宿主自己的 tint 与水无关）。
+            waterTints[i] = FluidMesher.IsPlainFluid(region.Palette[i])
+                ? TintSlotFor(region.Palette[i].ToString())
+                : TintSlotFor("minecraft:water");
         }
 
         List<float> vertices = [];
         List<int> indices = [];
         int[] blocks = region.BlockIndices.ToArray();
+        FluidMesher.World fluidWorld = new(waterFlags, waterLevels, occludeFlags, blocks, size);
+
+        void EmitFluid(int cx, int cy, int cz, int paletteIdx, Vector3 at)
+        {
+            _fluid ??= new FluidMesher(_atlas);
+            _fluid.EmitCell(vertices, indices, at, fluidWorld, cx, cy, cz,
+                waterLevels[paletteIdx], waterSprites[paletteIdx], waterTints[paletteIdx]);
+        }
 
         for (int y = 0; y < size.Y; y++)
         {
@@ -97,9 +135,25 @@ public sealed class BlockMeshBuilder
                     }
 
                     BlockStateDefinition state = region.Palette[paletteIndex];
+                    Vector3 origin = new(region.Bounds.Min.X + x, region.Bounds.Min.Y + y, region.Bounds.Min.Z + z);
+
+                    if (FluidMesher.IsPlainFluid(state))
+                    {
+                        // 流体本体：模型 elements 是空的，形状按邻居现算，不进
+                        // GetState 的模型缓存。
+                        EmitFluid(x, y, z, paletteIndex, origin);
+                        continue;
+                    }
+
                     CachedState cached = GetState(state);
                     if (cached.Variants.Count == 0)
                     {
+                        // 没有模型的宿主也可能带水（罕见），水面照出。
+                        if (waterFlags[paletteIndex])
+                        {
+                            EmitFluid(x, y, z, paletteIndex, origin);
+                        }
+
                         continue;
                     }
 
@@ -110,7 +164,6 @@ public sealed class BlockMeshBuilder
                         ? cached.Variants
                         : [cached.Variants[
                             (int)(((uint)(x * 73856093) ^ ((uint)y * 19349663) ^ ((uint)z * 83492791)) % (uint)cached.Variants.Count)]];
-                    Vector3 origin = new(region.Bounds.Min.X + x, region.Bounds.Min.Y + y, region.Bounds.Min.Z + z);
                     foreach (CachedVariant variant in chosen)
                     {
                         foreach (CachedQuad quad in variant.Quads)
@@ -130,8 +183,14 @@ public sealed class BlockMeshBuilder
                                 continue;
                             }
 
-                            EmitQuad(vertices, indices, origin, quad);
-                        }
+                        EmitQuad(vertices, indices, origin, quad);
+                    }
+
+                    // waterlogged 宿主：本体已画，水面叠在宿主格里（vanilla 双层渲染）。
+                    if (waterFlags[paletteIndex])
+                    {
+                        EmitFluid(x, y, z, paletteIndex, origin);
+                    }
                     }
                 }
             }
