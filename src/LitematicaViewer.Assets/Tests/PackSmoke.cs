@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using LitematicaViewer.Assets.Model;
 
 namespace LitematicaViewer.Assets.Tests;
@@ -13,7 +14,7 @@ public static class PackSmoke
     {
         if (args.Length < 1)
         {
-            Console.WriteLine("用法: PackSmoke <原版包(jar/zip/文件夹)> [覆盖包...]");
+            Console.WriteLine("用法: PackSmoke <原版包(jar/zip/文件夹)> [覆盖包...] 或 PackSmoke --scan <原版包> [覆盖包...]");
             return 2;
         }
 
@@ -21,8 +22,14 @@ public static class PackSmoke
         Trace.Listeners.Add(listener);
         Trace.AutoFlush = true;
 
+        // --scan 模式：全量扫包栈里的 blockstate，把「解不出 variant / 解不出面 /
+        // sprite 缺图」的方块一次点名。画面上「某方块整块消失」时先跑这个，
+        // 比对着截图猜快得多。
+        bool scan = args[0] == "--scan";
+        string[] packPaths = scan ? args[1..] : args;
+
         using PackStack packs = new();
-        foreach (string path in args)
+        foreach (string path in packPaths)
         {
             ResourcePack pack = Directory.Exists(path) ? ResourcePack.OpenFolder(path) : ResourcePack.OpenZip(path);
             packs.Add(pack);
@@ -30,6 +37,11 @@ public static class PackSmoke
         }
 
         BlockStateResolver resolver = new(packs);
+
+        if (scan)
+        {
+            return ScanAllBlocks(packs, resolver);
+        }
 
         CheckPackStack(packs);
         CheckStone(resolver);
@@ -254,5 +266,226 @@ public static class PackSmoke
         Debug.WriteLine(
             $"[ASSETS][smoke] 图集 {atlas.Width}x{atlas.Height}，{atlas.Rects.Count} 个 sprite（缺 {atlas.MissingCount}），装箱无重叠 ✓");
         _checks++;
+    }
+
+    // ---------- --scan：全量 blockstate 体检 ----------
+
+    // 遍历栈里全部 blockstate，逐个 resolve，点名三类故障：
+    // noVariants=解不出任何 variant（parent 链断、multipart 全不命中）；
+    // noFaces=有 variant 但一个面都没有（elements 空、引用解不开全被丢）；
+    // 缺图=sprite 不在包栈里（渲染出来是棋盘，名单里能看出缺哪张）。
+    private static int ScanAllBlocks(PackStack packs, BlockStateResolver resolver)
+    {
+        List<string> ids = packs
+            .Enumerate("assets/")
+            .Where(path => path.EndsWith("/blockstates/", StringComparison.Ordinal) is false
+                && path.Contains("/blockstates/", StringComparison.Ordinal)
+                && path.EndsWith(".json", StringComparison.Ordinal))
+            .Select(path =>
+            {
+                // assets/<ns>/blockstates/<name>.json → <ns>:<name>
+                int nsStart = "assets/".Length;
+                int slash = path.IndexOf('/', nsStart);
+                int marker = path.IndexOf("/blockstates/", nsStart, StringComparison.Ordinal);
+                string ns = path[nsStart..marker];
+                string name = path[(marker + "/blockstates/".Length)..^".json".Length];
+                return $"{ns}:{name}";
+            })
+            .Distinct()
+            .OrderBy(id => id, StringComparer.Ordinal)
+            .ToList();
+
+        List<string> noVariants = [];
+        List<string> noFaces = [];
+        HashSet<string> allSprites = new(StringComparer.Ordinal);
+        Dictionary<string, int> faceCountById = new(StringComparer.Ordinal);
+
+        foreach (string id in ids)
+        {
+            // 无属性 id 解 multipart/全属性 variants 必然 0 面（26.3 的键是全属性匹配），
+            // 那是姿势问题不是资产问题：从 blockstate JSON 里挖属性组合再逐个 resolve。
+            (string Ns, string Path) = SplitId(id);
+            List<string> combos = [];
+            if (packs.TryRead($"assets/{Ns}/blockstates/{Path}.json", out byte[] stateJson))
+            {
+                combos = DigPropertyCombos(stateJson);
+            }
+
+            if (combos.Count == 0)
+            {
+                combos = [""];
+            }
+
+            int faces = 0;
+            foreach (string combo in combos)
+            {
+                string probe = combo.Length == 0 ? id : $"{id}[{combo}]";
+                ResolvedBlockState state;
+                try
+                {
+                    state = resolver.Resolve(probe);
+                }
+                catch (Exception ex)
+                {
+                    noVariants.Add($"{id} ({ex.GetType().Name})");
+                    faces = -1;
+                    break;
+                }
+
+                foreach (ResolvedVariant variant in state.Variants)
+                {
+                    foreach (ModelElement element in variant.Model.Elements)
+                    {
+                        faces += element.Faces.Count;
+                        foreach (ElementFace face in element.Faces)
+                        {
+                            if (face.Sprite.Length > 0)
+                            {
+                                if (face.Sprite.EndsWith("all", StringComparison.Ordinal))
+                                {
+                                    Console.WriteLine($"[ASSETS][scan]   裸all来源 {probe} model={variant.ModelId}");
+                                }
+
+                                allSprites.Add(face.Sprite);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (faces < 0)
+            {
+                continue; // resolve 抛过异常，上面已点名
+            }
+
+            faceCountById[id] = faces;
+            if (faces == 0)
+            {
+                noFaces.Add(id);
+            }
+        }
+
+        // 全量图集：把缺图名单一次拿全。
+        TextureAtlas atlas = TextureAtlas.Build(packs, allSprites);
+
+        Console.WriteLine($"[ASSETS][scan] blockstates={ids.Count} 有面={faceCountById.Count} " +
+            $"sprites={allSprites.Count} atlas={atlas.Width}x{atlas.Height}");
+        Console.WriteLine($"[ASSETS][scan] noVariants={noVariants.Count}");
+        foreach (string id in noVariants)
+        {
+            Console.WriteLine($"[ASSETS][scan]   noVariants {id}");
+        }
+
+        Console.WriteLine($"[ASSETS][scan] noFaces={noFaces.Count}");
+        foreach (string id in noFaces)
+        {
+            Console.WriteLine($"[ASSETS][scan]   noFaces {id}");
+        }
+
+        Console.WriteLine($"[ASSETS][scan] missingSprites={atlas.MissingCount}");
+        foreach (string sprite in atlas.MissingSprites)
+        {
+            Console.WriteLine($"[ASSETS][scan]   missing {sprite}");
+        }
+
+        return 0;
+    }
+
+    private static (string Ns, string Path) SplitId(string raw)
+    {
+        int colon = raw.IndexOf(':');
+        return colon < 0 ? ("minecraft", raw) : (raw[..colon], raw[(colon + 1)..]);
+    }
+
+    // 从 blockstate JSON 挖出一组属性组合（k=v,k=v），足够让 variants/multipart
+    // 至少命中一次。variants 模式取键里的属性；multipart 递归挖 when（含 OR/AND），
+    // 每个属性取第一个见到的值（值带 | 取第一段）。挖不出就返回空，调用方按无属性兜底。
+    private static List<string> DigPropertyCombos(byte[] json)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            JsonElement root = doc.RootElement;
+            Dictionary<string, string> props = new(StringComparer.Ordinal);
+            if (root.TryGetProperty("variants", out JsonElement variants))
+            {
+                foreach (JsonProperty entry in variants.EnumerateObject())
+                {
+                    foreach (string pair in entry.Name.Split(',', StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        int eq = pair.IndexOf('=');
+                        if (eq > 0)
+                        {
+                            props.TryAdd(pair[..eq], pair[(eq + 1)..]);
+                        }
+                    }
+                }
+            }
+            else if (root.TryGetProperty("multipart", out JsonElement multipart))
+            {
+                foreach (JsonElement part in multipart.EnumerateArray())
+                {
+                    if (part.TryGetProperty("when", out JsonElement when))
+                    {
+                        DigWhen(when, props);
+                    }
+                }
+            }
+
+            return [string.Join(",", props.Select(p => $"{p.Key}={p.Value}"))];
+        }
+        catch (Exception)
+        {
+            return [];
+        }
+    }
+
+    private static void DigWhen(JsonElement when, Dictionary<string, string> props)
+    {
+        if (when.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        foreach (JsonProperty entry in when.EnumerateObject())
+        {
+            if (entry.Name is "OR" or "AND")
+            {
+                if (entry.Value.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement sub in entry.Value.EnumerateArray())
+                    {
+                        DigWhen(sub, props);
+                    }
+                }
+                else
+                {
+                    DigWhen(entry.Value, props);
+                }
+
+                continue;
+            }
+
+            if (props.ContainsKey(entry.Name))
+            {
+                continue;
+            }
+
+            string value = entry.Value.ValueKind switch
+            {
+                JsonValueKind.String => entry.Value.GetString() ?? "",
+                JsonValueKind.True => "true",
+                JsonValueKind.False => "false",
+                JsonValueKind.Array => entry.Value.GetArrayLength() > 0 ? entry.Value[0].GetString() ?? "" : "",
+                _ => "",
+            };
+            int bar = value.IndexOf('|');
+            if (bar >= 0)
+            {
+                value = value[..bar];
+            }
+
+            props[entry.Name] = value;
+        }
     }
 }
