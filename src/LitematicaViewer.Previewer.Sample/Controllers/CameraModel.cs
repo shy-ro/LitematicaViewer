@@ -25,11 +25,10 @@ namespace LitematicaViewer.Previewer.Sample;
 // 转视角与平移在 CameraModel.Navigation.cs：它们由连续输入驱动，打桩与节流的落点不一样。
 internal sealed partial class CameraModel
 {
-    // 一档滚轮推进的距离。固定步长而不是等比：缩放的本质是推摄像机，距离只是位置，
-    // 没有理由替它设上限；等比模式在拉近时每档推进量递减，手感是「越想凑近越推不动」。
-    // 合适的步长取决于模型的尺度，所以做成属性由宿主按模型设置（Sample 载入后按半径定），
-    // 而不是在这里替所有模型定死。
-    internal float ZoomStep { get; set; } = 1f;
+    // 一档滚轮推进的距离，单位是方块。固定值不随模型缩放：缩放的本质是推人物的位置，
+    // 手感必须统一；合适的默认值按「一秒连滚五六档能走出 MC 飞行的速度」取。
+    // 做成属性是为了让宿主能按自己的尺度改它（Sample 目前不覆盖）。
+    internal float ZoomStep { get; set; } = 2f;
 
     // 距离的上下界可选，默认两个都不设——「能推多近、能拉多远」是尺度上的偏好，
     // 取决于看的是什么、镜头多宽，模型没有立场替宿主定一个。
@@ -155,18 +154,17 @@ internal sealed partial class CameraModel
 
         float current = _zoomDistance;
 
-        // 参考距离为 0 意味着「看着的那个点」压在相机上，视线方向还在但深度已经退化，
-        // 这是构造时就该排除的状态。这里只是别让 0 除进来变成 NaN 再一路传到 GPU——
-        // GL 对 NaN 一声不吭，画面直接空白。
+        // 距离可以为负（人物穿过了原来看着的点），只有非有限值才是失效状态——
+        // 那会让视图矩阵带着 NaN 走完 GL 全程都不报错，只留一块空白。
         Debug.Assert(
-            float.IsFinite(current) && current > 0f,
-            $"[SAMPLE][camera.zoom] 缩放前的参考距离不是正数 distance={current} " +
+            float.IsFinite(current),
+            $"[SAMPLE][camera.zoom] 缩放前的参考距离不是有限值 distance={current} " +
             $"pos=({_camera.Position}) forward=({_camera.Forward})");
 
-        // 固定步长：一档滚轮沿视线走 ZoomStep 距离。没有按比例缩放，也没有距离上限——
-        // 推拉就是移动摄像机，模型内外都到得了，尺度决策留给宿主（ZoomStep 属性）。
-        // Pow 在极端档位上的溢出问题也随之消失：线性运算只有 wanted 可能越到 0 以下，
-        // 由下面的兜底拦住。
+        // 人物位置推进：一档滚轮沿视线走 ZoomStep 距离，距离变为负值（相机穿过了
+        // 原来看着的点）是合法状态——位置继续前移就是了。按方块统一而不按模型缩放：
+        // 大模型按比例放步长的话，滚轮在画面上的推进感反而跟不上，而且用户在展台和
+        // 自由视角之间得到的手感必须一致。
         wanted = current - (ZoomStep * steps);
 
         float next = wanted;
@@ -180,13 +178,13 @@ internal sealed partial class CameraModel
             next = MathF.Min(next, max);
         }
 
-        // 没有距离上限（推拉就是移动摄像机，尺度决策归宿主），唯一的兜底是「穿过目标
-        // 点跑到负距离」：那不是某个边界，是距离失去了几何意义，此时这次缩放不发生。
-        // 推远方向永远合法——再远也只是位置数值变大，浮点装得下就画得出来。
-        if (!float.IsFinite(next) || next <= 0f)
+        // 兜底只剩「算不出有限数」一种（线性运算只有步长×档数极大时才可能溢出）。
+        // 负距离不再拦：那是「人物穿过了原来看着的点、继续往前飞」，位置推进语义下
+        // 完全正常——旧实现把这里当成失效停住，症状是推到近处再滚就没反应。
+        if (!float.IsFinite(next))
         {
             Debug.WriteLine(
-                $"[SAMPLE][camera.zoom] 距离算不出有限正数，维持原状 steps={steps} " +
+                $"[SAMPLE][camera.zoom] 距离算不出有限数，维持原状 steps={steps} " +
                 $"current={current} wanted={wanted}");
             return current;
         }
@@ -294,9 +292,9 @@ internal sealed partial class CameraModel
             $"[SAMPLE][camera.zoom] 方向/步长/夹取/Target 不动全通过 start={start:F4} " +
             $"step={camera.ZoomStep} range=[2.4,7]");
 
-        // 7. 默认不设界：推近是线性的，没有「推到底的边界」；唯一的停靠点是被推到
-        //    穿过 0 的那一档（距离失去意义，该次缩放不发生）。两条都钉住——
-        //    哪天有人把界写回默认值，或者把穿零兜底改掉，这里立刻红。
+        // 7. 默认不设界：推近是线性的，没有「推到底的边界」。穿过 0（相机越过了
+        //    原来看着的点）之后继续推进，距离变负、位置继续前移——人物位置推进语义。
+        //    哪天有人把界写回默认值、或者把穿越改成停住，这里立刻红。
         CameraModel unbounded = new(CameraState.Default, Vector3.Zero);
         float unboundedStart = unbounded.Distance;
         for (int i = 0; i < 3; i++)
@@ -314,32 +312,33 @@ internal sealed partial class CameraModel
             unbounded.ZoomCore(1f, out _);
         }
 
-        float zeroFloor = unbounded.Distance;
-        for (int i = 0; i < 10; i++)
-        {
-            unbounded.ZoomCore(1f, out _);
-        }
-
         Debug.Assert(
-            unbounded.Distance == zeroFloor,
-            $"[SAMPLE][camera.zoom] 穿零之后距离仍在变 before={zeroFloor} after={unbounded.Distance}");
+            unbounded.Distance < unboundedStart - (3f * unbounded.ZoomStep),
+            $"[SAMPLE][camera.zoom] 穿过 0 之后推进停住了 distance={unbounded.Distance}");
+        Debug.Assert(
+            IsFinite(unbounded.Camera.Position),
+            $"[SAMPLE][camera.zoom] 穿过 0 之后位置不是有限值 pos=({unbounded.Camera.Position})");
 
-        // 8. 推近方向穿过 0 时这次缩放不发生（线性运算不会再溢出成 Inf，
-        //    唯一的无意义值是被推到负距离）。推远方向没有对应的失效路径：
-        //    任何有限档位都只会让位置数值变大，浮点装得下就画得出来。
-        float before = unbounded.Distance;
+        // 8. 兜底只拦「算不出有限数」：档数大到 step*steps 溢出时该次缩放不发生。
+        //    有限的大档位（1e9）则照常线性推进——位置仍然是有限值。
+        float before8 = unbounded.Distance;
         unbounded.ZoomCore(1e9f, out float wanted);
         Debug.Assert(
-            wanted <= 0f,
-            $"[SAMPLE][camera.zoom] 1e9 档本该把距离推成负数 wanted={wanted}");
+            unbounded.Distance == before8 - (1e9f * unbounded.ZoomStep),
+            $"[SAMPLE][camera.zoom] 巨大但有限的档位没有线性推进 " +
+            $"before={before8} after={unbounded.Distance}");
+
+        unbounded.ZoomCore(float.MaxValue, out float overflowWanted);
         Debug.Assert(
-            unbounded.Distance == before,
-            $"[SAMPLE][camera.zoom] 算不出有意义的距离时没有维持原状 " +
-            $"before={before} after={unbounded.Distance}");
+            !float.IsFinite(overflowWanted),
+            $"[SAMPLE][camera.zoom] MaxValue 档本该把步长积溢出成非有限值 wanted={overflowWanted}");
+        Debug.Assert(
+            unbounded.Distance == before8 - (1e9f * unbounded.ZoomStep),
+            $"[SAMPLE][camera.zoom] 溢出档位没有维持原状 after={unbounded.Distance}");
 
         Debug.WriteLine(
-            $"[SAMPLE][camera.zoom] 无界：连推 50 档到 {unbounded.Distance:E3}（无界时不会停在边界），" +
-            "穿零档维持原状一次");
+            $"[SAMPLE][camera.zoom] 无界：线性推近/穿过 0/巨大档位/溢出档全通过，" +
+            $"穿过后距离 {unbounded.Distance:E3}");
     }
 
     private static bool IsFinite(Vector3 v) =>

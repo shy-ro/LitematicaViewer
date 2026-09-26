@@ -101,6 +101,9 @@ internal sealed partial class CameraModel
             $"maxpitch=±{CameraState.MaxPitch}");
 
         Vector3 pivot = Target;
+        // 半径可以为负：滚轮推进（人物位置语义）穿过 pivot 之后距离就是负的。
+        // 位置公式 pivot - forward*radius 对负半径自动给出「pivot 前方 |radius| 处」，
+        // 与穿过前的轨迹连续，所以公转不需要为负值另写一条路。
         float radius = _zoomDistance;
 
         float yaw = Wrap(_camera.Yaw + deltaYaw);
@@ -117,17 +120,20 @@ internal sealed partial class CameraModel
             Pitch = pitch,
         };
 
-        // 公转不改半径。
+        // 公转不改半径的绝对值。radius<=0 时阈值按 1 给：距离接近 0 的圈上 1e-3*0=0
+        // 会让浮点噪声炸断言，而那个量级本来就该放行。
         Debug.Assert(
-            MathF.Abs(Vector3.Distance(_camera.Position, pivot) - radius) < 1e-3f * radius,
+            MathF.Abs(Vector3.Distance(_camera.Position, pivot) - MathF.Abs(radius))
+            < 1e-3f * MathF.Max(1f, MathF.Abs(radius)),
             $"[SAMPLE][camera.orbit] 公转改了半径 pivot=({pivot}) pos=({_camera.Position}) " +
             $"radius={radius:F4} actual={Vector3.Distance(_camera.Position, pivot):F4}");
 
-        // 视线仍然指着圆心。这一条和上面那条一起把「绕着一个不是自己看着的点转」这种状态挡掉。
-        Vector3 toCamera = Vector3.Normalize(pivot - _camera.Position);
+        // 视线严格沿着 pivot 与相机的连线（正半径从外看，负半径从内看）。
+        // 这一条和上面那条一起把「绕着一个不是自己看着的点转」这种状态挡掉。
+        Vector3 toCamera = pivot - _camera.Position;
         Debug.Assert(
-            Vector3.Dot(_camera.Forward, toCamera) > 0.999f,
-            $"[SAMPLE][camera.orbit] 公转之后视线不再指着圆心 pos=({_camera.Position}) " +
+            MathF.Abs(Vector3.Dot(_camera.Forward, Vector3.Normalize(toCamera))) > 0.999f,
+            $"[SAMPLE][camera.orbit] 公转之后视线不再沿圆心连线 pos=({_camera.Position}) " +
             $"pivot=({pivot}) forward=({_camera.Forward})");
     }
 

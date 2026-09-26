@@ -298,8 +298,7 @@ public partial class MainWindow : Window, IViewModeHost
         // radius*20 再加余量：覆盖最大缩放 + 模型半径 + 光环。
         float far = MathF.Max(100f, document.WholeRadius * 20f + 64f);
         _camera.Reset(_camera.Camera with { Far = far });
-        // 滚轮步长跟着模型尺度走：固定步长（不再按比例递减），大模型的每档推进量相应放大。
-        _camera.ZoomStep = MathF.Max(1f, document.WholeRadius * 0.15f);
+        // 滚轮步长按方块统一（不随模型缩放），滚轮语义 = 人物位置沿视线推进。
         _camera.FrameTurntable(
             document.WholeCentre,
             TurntableController.DefaultPitch,
