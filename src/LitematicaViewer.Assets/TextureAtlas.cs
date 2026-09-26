@@ -36,6 +36,12 @@ public sealed class TextureAtlas
 
     public bool TryGetRect(string sprite, out SpriteRect rect) => _rects.TryGetValue(sprite, out rect!);
 
+    // 每个 sprite 四周的留白像素数。开 mipmap 后缩小采样会越出 sprite 边界采到
+    // 隔壁的颜色：留白 + 边缘外扩让 mip 链前几级的越界采样仍然落在自己颜色的复制上。
+    // 2px 养到 mip level 2（4 合 1）不串味，更深的级别影响的是缩到极小时的画面，
+    // 那时贴图本身已不到 2px，串味不可见。
+    private const int Pad = 2;
+
     // 逐个从包栈里读 PNG 并装箱。缺的贴图给品红/黑棋盘（MC missingno 的样式），
     // 网格照常生成，缺什么在画面上一眼能认出来——比静默用白块好查得多。
     public static TextureAtlas Build(PackStack packs, IEnumerable<string> sprites)
@@ -79,14 +85,16 @@ public sealed class TextureAtlas
         // 行式装箱：按高降序排，一行放不下就换行。图集宽先定（容纳最宽的 sprite，
         // 抬到 2 的幂，GLES 3.0 对 NPOT 其实宽容，但 2 的幂将来开 mipmap 不用重排），
         // 高度随行数增长，最后同样抬到 2 的幂。
+        // 装箱按「sprite + 四周留白」占格子，rect 记录的是内区：uv 永远落不进留白，
+        // 留白只给 mipmap 的越界采样兜底。
         decoded.Sort((a, b) => (b.H - a.H) != 0 ? b.H - a.H : string.CompareOrdinal(a.Sprite, b.Sprite));
 
         // 宽度按总面积估一个接近正方的值（夹在 [最宽 sprite, 2048] 里）：
         // 只按最宽 sprite 定宽的话，几十张 16px 的小图会摞成 16x1024 的细高条，
         // 采样与将来开 mipmap 都难看。
-        long totalArea = decoded.Sum(d => (long)d.W * d.H);
+        long totalArea = decoded.Sum(d => (long)(d.W + Pad * 2) * (d.H + Pad * 2));
         int targetSide = Pow2Ceiling((int)MathF.Sqrt(totalArea));
-        int widest = Pow2Ceiling(decoded.Count == 0 ? 16 : decoded.Max(d => d.W));
+        int widest = Pow2Ceiling(decoded.Count == 0 ? 16 + Pad * 2 : decoded.Max(d => d.W) + Pad * 2);
         int atlasWidth = Math.Max(widest, Math.Min(targetSide, 2048));
         int cursorX = 0;
         int cursorY = 0;
@@ -94,16 +102,17 @@ public sealed class TextureAtlas
         Dictionary<string, SpriteRect> rects = new(StringComparer.Ordinal);
         foreach ((string sprite, _, int w, int h) in decoded)
         {
-            if (cursorX + w > atlasWidth && cursorX > 0)
+            int cellWidth = w + Pad * 2;
+            if (cursorX + cellWidth > atlasWidth && cursorX > 0)
             {
                 cursorX = 0;
                 cursorY += rowHeight;
                 rowHeight = 0;
             }
 
-            rects[sprite] = new SpriteRect(sprite, cursorX, cursorY, w, h);
-            cursorX += w;
-            rowHeight = Math.Max(rowHeight, h);
+            rects[sprite] = new SpriteRect(sprite, cursorX + Pad, cursorY + Pad, w, h);
+            cursorX += cellWidth;
+            rowHeight = Math.Max(rowHeight, h + Pad * 2);
         }
 
         int atlasHeight = Pow2Ceiling(cursorY + rowHeight);
@@ -127,9 +136,49 @@ public sealed class TextureAtlas
                     $"atlas={atlasWidth}x{atlasHeight}");
                 Buffer.BlockCopy(rgba, source, pixels, target, w * 4);
             }
+
+            ExtrudeEdges(pixels, atlasWidth, atlasHeight, rect.X, rect.Y, w, h, Pad);
         }
 
         return new TextureAtlas(atlasWidth, atlasHeight, pixels, rects, missing);
+    }
+
+    // 把 sprite 内区的边缘像素向外复制 pad 圈（含四角）。mipmap 缩小采样时
+    // 越出 sprite 的 UV 落在这些复制出来的像素上，采到的是自己的边缘色而不是邻居的。
+    private static void ExtrudeEdges(byte[] pixels, int atlasWidth, int atlasHeight, int x, int y, int w, int h, int pad)
+    {
+        for (int dy = -pad; dy < h + pad; dy++)
+        {
+            int targetY = y + dy;
+            if ((uint)targetY >= (uint)atlasHeight)
+            {
+                continue;
+            }
+
+            // 源行 clamp 进内区：留白圈之外的 dy 全部取内区最靠边的行。
+            int sourceY = y + Math.Clamp(dy, 0, h - 1);
+            for (int dx = -pad; dx < w + pad; dx++)
+            {
+                if (dx >= 0 && dx < w && dy >= 0 && dy < h)
+                {
+                    continue; // 内区本体不动
+                }
+
+                int targetX = x + dx;
+                if ((uint)targetX >= (uint)atlasWidth)
+                {
+                    continue;
+                }
+
+                int sourceX = x + Math.Clamp(dx, 0, w - 1);
+                int source = ((sourceY * atlasWidth) + sourceX) * 4;
+                int target = ((targetY * atlasWidth) + targetX) * 4;
+                pixels[target] = pixels[source];
+                pixels[target + 1] = pixels[source + 1];
+                pixels[target + 2] = pixels[source + 2];
+                pixels[target + 3] = pixels[source + 3];
+            }
+        }
     }
 
     // 动画贴图（水、熔岩、火）是竖排的多帧 + 同名 .mcmeta。首版只要静止画面：

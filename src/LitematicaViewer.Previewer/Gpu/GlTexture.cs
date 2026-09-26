@@ -18,6 +18,9 @@ internal sealed class GlTexture : IDisposable
         _handle = handle;
     }
 
+    // GlConsts 只收了 GL_NEAREST/GL_LINEAR 这组，缩小带 mip 的三档没有，数值来自 GL 规范。
+    private const int GlNearestMipmapLinear = 0x2702;
+
     public static GlTexture Create(GlInterface gl, byte[] rgba, int width, int height)
     {
         Debug.Assert(
@@ -32,10 +35,11 @@ internal sealed class GlTexture : IDisposable
         int handle = gl.GenTexture();
         gl.BindTexture(GlConsts.GL_TEXTURE_2D, handle);
 
-        // 图集里相邻 sprite 的边缘互相挨着，双线性过滤会在接缝处采到隔壁 sprite 的颜色；
-        // NEAREST 没有这个问题，代价是缩小到很小时会闪烁——那要等 sprite padding 方案
-        // 一起做，不是单独换过滤就能好的。
-        gl.TexParameteri(GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_MIN_FILTER, GlConsts.GL_NEAREST);
+        // 放大保持 NEAREST：MC 的像素风要的是棱角，双线性放大会糊。
+        // 缩小走 mipmap：图集装箱时每个 sprite 留了边距并外扩了边缘（见 TextureAtlas.Pad），
+        // 这里才敢把 MIN_FILTER 打开——没有 padding 的图集开 mipmap 会让 sprite 接缝互相串色。
+        // NEAREST_MIPMAP_LINEAR 在 mip 层间也取最近：既压住缩小时的闪烁，又不引入模糊。
+        gl.TexParameteri(GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_MIN_FILTER, GlNearestMipmapLinear);
         gl.TexParameteri(GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_MAG_FILTER, GlConsts.GL_NEAREST);
         // 图集边缘的 sprite 越过边采样会包到对面去，夹住。
         gl.TexParameteri(GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_WRAP_S, GlConsts.GL_CLAMP_TO_EDGE);
@@ -61,9 +65,13 @@ internal sealed class GlTexture : IDisposable
             Marshal.FreeHGlobal(staging);
         }
 
+        // mip 链现在建好，之后不更新：图集是一次性数据，改图就整个重建。
+        bool generated = GlRaw.GenerateMipmap(gl, GlConsts.GL_TEXTURE_2D);
+        Debug.Assert(generated, "[PREVIEWER][gl.texture] glGenerateMipmap 入口缺失，mip 链没建");
+
         gl.BindTexture(GlConsts.GL_TEXTURE_2D, 0);
 
-        Debug.WriteLine($"[PREVIEWER][gl.texture] created size={width}x{height} bytes={rgba.Length}");
+        Debug.WriteLine($"[PREVIEWER][gl.texture] created size={width}x{height} bytes={rgba.Length} mipmap={(generated ? "on" : "off")}");
         return new GlTexture(gl, handle);
     }
 
