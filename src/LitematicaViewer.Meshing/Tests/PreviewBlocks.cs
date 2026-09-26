@@ -6,6 +6,7 @@ using System.Text.Json;
 using LitematicaViewer.Assets;
 using LitematicaViewer.Assets.Model;
 using LitematicaViewer.Core.Model;
+using LitematicaViewer.Core.Parsing;
 
 namespace LitematicaViewer.Meshing.Tests;
 
@@ -22,6 +23,99 @@ internal static class PreviewBlocks
 {
     private const int Side = 192;
     public static int Run(string outDir, string[] packPaths) => RunCore(outDir, null, packPaths);
+
+    // ---------- --regionrender：把真实 litematic 的整个 region 用软件光栅化画出来 ----------
+
+    // 用途：GPU 截帧看着不对时，把同一条 BuildRegion 网格用软件光栅化再画一遍。
+    // 软件这张用 level0 NEAREST 采样、无 mipmap、无混合——两边不一致就是 GPU 侧的问题；
+    // 软件这张本身就花，就是网格/sprite 落位的问题。与 --montage 一样复用 RunCore 的
+    // 装包与 atlas 构建，只是渲染对象从「单方块」换成「整个文档的每个 region」。
+    public static int RunRegionRender(string[] args)
+    {
+        // args：--regionrender <out.png> <litematic> [边长] <资源包...>
+        string outPath = args[1];
+        string litematicPath = args[2];
+        int scan = 3;
+        int side = 768;
+        if (scan < args.Length && int.TryParse(args[scan], out int parsedSide))
+        {
+            side = Math.Max(128, parsedSide);
+            scan++;
+        }
+
+        List<string> packPaths = [.. args.Skip(scan)];
+        using PackStack packs = new();
+        foreach (string path in packPaths)
+        {
+            packs.Add(Directory.Exists(path) ? ResourcePack.OpenFolder(path) : ResourcePack.OpenZip(path));
+        }
+
+        BlockStateResolver resolver = new(packs);
+        LoadResult result = LitematicLoader.TryLoadFile(litematicPath);
+        if (!result.Success)
+        {
+            Console.Error.WriteLine($"[MESH][regionrender] 载入失败: {result.Error}");
+            return 1;
+        }
+
+        // sprite 收集走文档调色板的真实状态（带属性），与 Sample 的 CollectSprites 同口径。
+        HashSet<string> sprites = new(StringComparer.Ordinal);
+        BlockMeshBuilder builder;
+        foreach (LitematicRegion region in result.Document!.Regions)
+        {
+            foreach (BlockStateDefinition state in region.Palette)
+            {
+                try
+                {
+                    foreach (ResolvedVariant variant in resolver.Resolve(state.ToString()).Variants)
+                    {
+                        foreach (ModelElement element in variant.Model.Elements)
+                        {
+                            foreach (ElementFace face in element.Faces)
+                            {
+                                if (face.Sprite.Length > 0)
+                                {
+                                    sprites.Add(face.Sprite);
+                                }
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // 解析失败的状态真渲染时同样失败，网格期会跳过，这里不重复点名。
+                }
+            }
+        }
+
+        TextureAtlas atlas = TextureAtlas.Build(packs, sprites);
+        Console.Out.WriteLine(
+            $"[MESH][regionrender] 图集 {atlas.Width}x{atlas.Height} sprites={atlas.Rects.Count} 缺失={atlas.MissingCount}");
+        builder = new BlockMeshBuilder(resolver, atlas);
+
+        int regionIndex = 0;
+        foreach (LitematicRegion region in result.Document.Regions)
+        {
+            MeshData mesh = builder.BuildRegion(region);
+            Vector3 centre = new(
+                (region.Bounds.Min.X + region.Bounds.Max.X + 1f) / 2f,
+                (region.Bounds.Min.Y + region.Bounds.Max.Y + 1f) / 2f,
+                (region.Bounds.Min.Z + region.Bounds.Max.Z + 1f) / 2f);
+            float radius = MathF.Max(
+                region.Bounds.Size.X, MathF.Max(region.Bounds.Size.Y, region.Bounds.Size.Z)) / 2f;
+            byte[] rgb = RenderRegionToBuffer(mesh, atlas, side, centre, radius);
+            string path = regionIndex == 0
+                ? outPath
+                : Path.Combine(
+                    Path.GetDirectoryName(Path.GetFullPath(outPath)) ?? ".",
+                    $"{Path.GetFileNameWithoutExtension(outPath)}_r{regionIndex}{Path.GetExtension(outPath)}");
+            WritePng(path, side, side, rgb);
+            Console.Out.WriteLine($"[MESH][regionrender] {path} faces={mesh.Indices.Length / 6}");
+            regionIndex++;
+        }
+
+        return 0;
+    }
 
     // ---------- --montage：把 Render 的产物拼成一张网格大图 ----------
 
@@ -369,21 +463,35 @@ internal static class PreviewBlocks
     private static readonly Vector3 EyeDir = Vector3.Normalize(new Vector3(1f, 0.85f, 1f));
     private static readonly Vector3 Light = Vector3.Normalize(new Vector3(0.35f, 0.9f, 0.2f));
 
-    private static (byte[] Rgb, bool IsFullCube, int HolePixels) RenderToBuffer(MeshData mesh, TextureAtlas atlas, int side)
+    // region 模式入口：不关心完整方块判据，只要像素。
+    private static byte[] RenderRegionToBuffer(MeshData mesh, TextureAtlas atlas, int side, Vector3 centre, float radius) =>
+        RenderGeneral(mesh, atlas, side, centre, radius, keepFullCubeInfo: false).Rgb;
+
+    private static (byte[] Rgb, bool IsFullCube, int HolePixels) RenderToBuffer(MeshData mesh, TextureAtlas atlas, int side) =>
+        RenderGeneral(mesh, atlas, side, new Vector3(0.5f, 0.5f, 0.5f), 0.5f, keepFullCubeInfo: true);
+
+    // 通用软件光栅化：等距视角（yaw 45°、pitch≈33.7°），正交投影，centre/radius 决定取景。
+    // keepFullCubeInfo 只在单方块模式下有意义，region 模式恒 false。
+    private static (byte[] Rgb, bool IsFullCube, int HolePixels) RenderGeneral(
+        MeshData mesh, TextureAtlas atlas, int side, Vector3 centre, float radius, bool keepFullCubeInfo)
     {
         byte[] rgb = new byte[side * side * 3];
         float[] zbuf = new float[side * side];
         Array.Fill(zbuf, float.NegativeInfinity);
 
-        Vector3 centre = new(0.5f, 0.5f, 0.5f);
         // right = up × eyeDir（lookAt 的 x 轴）；up 由两者叉积闭合。
         Vector3 right = Vector3.Normalize(Vector3.Cross(new Vector3(0, 1, 0), EyeDir));
         Vector3 up = Vector3.Cross(EyeDir, right);
         // 边距按比例留（5%）：montage 的 96px 格和单图的 192px 共用同一个取景逻辑。
-        float scale = (side / 2f) * 0.9f;
+        float scale = (side / 2f) * 0.9f / radius;
 
         int vertexCount = mesh.Vertices.Length / MeshData.FloatsPerVertex;
-        Span<Vector3> screen = stackalloc Vector3[vertexCount > 0 ? vertexCount : 1];
+        Span<Vector3> screen = vertexCount > 0 ? stackalloc Vector3[vertexCount] : default;
+        if (vertexCount == 0)
+        {
+            return (rgb, false, 0);
+        }
+
         for (int i = 0; i < vertexCount; i++)
         {
             Vector3 p = new(
@@ -397,43 +505,47 @@ internal static class PreviewBlocks
                 Vector3.Dot(rel, EyeDir));
         }
 
-        // 完整方块判据：恰好 6 个面、法线全部轴向对齐、包围盒占满单位立方体。
-        bool isFullCube = (mesh.Indices.Length / 6) == 6 && vertexCount == 24;
-        if (isFullCube)
+        bool isFullCube = false;
+        if (keepFullCubeInfo)
         {
-            Vector3 min = new(float.MaxValue), max = new(float.MinValue);
-            for (int i = 0; i < vertexCount; i++)
+            // 完整方块判据：恰好 6 个面、法线全部轴向对齐、包围盒占满单位立方体。
+            isFullCube = (mesh.Indices.Length / 6) == 6 && vertexCount == 24;
+            if (isFullCube)
             {
-                Vector3 normal = new(
-                    mesh.Vertices[(i * MeshData.FloatsPerVertex) + 3],
-                    mesh.Vertices[(i * MeshData.FloatsPerVertex) + 4],
-                    mesh.Vertices[(i * MeshData.FloatsPerVertex) + 5]);
-                float length = normal.Length();
-                if (length < 0.9f || length > 1.1f ||
-                    !(MathF.Abs(normal.X) is > 0.9f or < 0.1f) ||
-                    !(MathF.Abs(normal.Y) is > 0.9f or < 0.1f) ||
-                    !(MathF.Abs(normal.Z) is > 0.9f or < 0.1f))
+                Vector3 min = new(float.MaxValue), max = new(float.MinValue);
+                for (int i = 0; i < vertexCount; i++)
                 {
-                    isFullCube = false;
-                    break;
+                    Vector3 normal = new(
+                        mesh.Vertices[(i * MeshData.FloatsPerVertex) + 3],
+                        mesh.Vertices[(i * MeshData.FloatsPerVertex) + 4],
+                        mesh.Vertices[(i * MeshData.FloatsPerVertex) + 5]);
+                    float length = normal.Length();
+                    if (length < 0.9f || length > 1.1f ||
+                        !(MathF.Abs(normal.X) is > 0.9f or < 0.1f) ||
+                        !(MathF.Abs(normal.Y) is > 0.9f or < 0.1f) ||
+                        !(MathF.Abs(normal.Z) is > 0.9f or < 0.1f))
+                    {
+                        isFullCube = false;
+                        break;
+                    }
+
+                    min = Vector3.Min(min, new Vector3(
+                        mesh.Vertices[(i * MeshData.FloatsPerVertex) + 0],
+                        mesh.Vertices[(i * MeshData.FloatsPerVertex) + 1],
+                        mesh.Vertices[(i * MeshData.FloatsPerVertex) + 2]));
+                    max = Vector3.Max(max, new Vector3(
+                        mesh.Vertices[(i * MeshData.FloatsPerVertex) + 0],
+                        mesh.Vertices[(i * MeshData.FloatsPerVertex) + 1],
+                        mesh.Vertices[(i * MeshData.FloatsPerVertex) + 2]));
                 }
 
-                min = Vector3.Min(min, new Vector3(
-                    mesh.Vertices[(i * MeshData.FloatsPerVertex) + 0],
-                    mesh.Vertices[(i * MeshData.FloatsPerVertex) + 1],
-                    mesh.Vertices[(i * MeshData.FloatsPerVertex) + 2]));
-                max = Vector3.Max(max, new Vector3(
-                    mesh.Vertices[(i * MeshData.FloatsPerVertex) + 0],
-                    mesh.Vertices[(i * MeshData.FloatsPerVertex) + 1],
-                    mesh.Vertices[(i * MeshData.FloatsPerVertex) + 2]));
-            }
-
-            if (isFullCube &&
-                (min.X < -0.01f || min.Y < -0.01f || min.Z < -0.01f ||
-                 max.X > 1.01f || max.Y > 1.01f || max.Z > 1.01f ||
-                 max.X - min.X < 0.98f || max.Y - min.Y < 0.98f || max.Z - min.Z < 0.98f))
-            {
-                isFullCube = false;
+                if (isFullCube &&
+                    (min.X < -0.01f || min.Y < -0.01f || min.Z < -0.01f ||
+                     max.X > 1.01f || max.Y > 1.01f || max.Z > 1.01f ||
+                     max.X - min.X < 0.98f || max.Y - min.Y < 0.98f || max.Z - min.Z < 0.98f))
+                {
+                    isFullCube = false;
+                }
             }
         }
 
@@ -498,9 +610,9 @@ internal static class PreviewBlocks
                     float u = (l0 * UvX(mesh, i0)) + (l1 * UvX(mesh, i1)) + (l2 * UvX(mesh, i2));
                     float v = (l0 * UvY(mesh, i0)) + (l1 * UvY(mesh, i1)) + (l2 * UvY(mesh, i2));
 
-                    // 与 GL 一致：v 已在网格期翻转，图集行 0 在顶，行 = (1-v)*H。
+                    // 与 GL 一致：v 不翻转，t=0 对应上传数据第一行（图集顶行），行 = v*H。
                     int tx = Math.Clamp((int)(u * atlas.Width), 0, atlas.Width - 1);
-                    int ty = Math.Clamp((int)((1f - v) * atlas.Height), 0, atlas.Height - 1);
+                    int ty = Math.Clamp((int)(v * atlas.Height), 0, atlas.Height - 1);
                     int texel = ((ty * atlas.Width) + tx) * 4;
                     if (atlas.Pixels[texel + 3] < 128)
                     {

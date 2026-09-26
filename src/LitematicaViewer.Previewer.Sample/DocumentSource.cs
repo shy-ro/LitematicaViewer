@@ -205,6 +205,30 @@ internal sealed class DocumentSource
                     : "") +
                 $"sprites={sprites.Count} {builder.Stats}";
 
+        // 截帧模式的取证口：GPU 收到的每一层 mip + rect 表落盘。
+        // GPU 画面花而软件渲染正常时，先确认上传数据的每一层都对。
+        if (Program.ShotPath is not null)
+        {
+            string dumpDir = Path.GetDirectoryName(Path.GetFullPath(Program.ShotPath)) ?? ".";
+            string stem = Path.GetFileNameWithoutExtension(Program.ShotPath);
+            for (int level = 0; level < atlas.Levels.Length; level++)
+            {
+                int lw = Math.Max(1, atlas.Width >> level);
+                int lh = Math.Max(1, atlas.Height >> level);
+                ShotWriter.WriteAtlas(
+                    Path.Combine(dumpDir, $"{stem}_L{level}.ppm"), atlas.Levels[level], lw, lh);
+                if (level == 0)
+                {
+                    ShotWriter.WriteAtlasAlpha(
+                        Path.Combine(dumpDir, $"{stem}_alpha.pgm"), atlas.Levels[0], lw, lh);
+                }
+            }
+
+            File.WriteAllLines(
+                Path.Combine(dumpDir, $"{stem}_rects.txt"),
+                atlas.Rects.Select(r => $"{r.Sprite} cell=({r.X - 8},{r.Y - 8}) inner=({r.X},{r.Y}) {r.Width}x{r.Height}"));
+        }
+
         return new LoadedDocument(
             Path.GetFileName(path),
             document.Regions.Length,

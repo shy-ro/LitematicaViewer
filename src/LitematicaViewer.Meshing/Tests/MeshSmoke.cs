@@ -30,6 +30,187 @@ public static class MeshSmoke
             return PreviewBlocks.RunMontage(args);
         }
 
+        // --probe <litematic> <资源包...>：按网格层的读序打印角上 5x5x5 的状态串，
+        // 给「渲染器和第三方解码器谁对」做逐坐标对账用。资源包参数其实用不上，
+        // 接着只是让分流统一。
+        if (args.Length >= 2 && args[0] == "--probe")
+        {
+            using TextWriterTraceListener probeListener = new(Console.Out);
+            Trace.Listeners.Add(probeListener);
+            Trace.AutoFlush = true;
+            LoadResult probeResult = LitematicLoader.TryLoadFile(args[1]);
+            if (!probeResult.Success)
+            {
+                Debug.WriteLine($"[MESH][probe] 载入失败 {probeResult.Error}");
+                return 1;
+            }
+
+            LitematicRegion probeRegion = probeResult.Document!.Regions[0];
+            Vector3I probeSize = probeRegion.Bounds.Size;
+            // 全区域状态计数：与第三方解码器的逐状态计数对账。
+            // 非空气计数一致不证明空间映射一致（计数与布局无关），逐状态计数才抓得住错位。
+            // 逐非空气坐标 dump：第三方解码器同序 dump 后 diff，
+            // 抓「计数一致但空间错位」这类布局 bug 的唯一硬证据。
+            for (int py = 0; py < probeSize.Y; py++)
+            {
+                for (int pz = 0; pz < probeSize.Z; pz++)
+                {
+                    for (int px = 0; px < probeSize.X; px++)
+                    {
+                        BlockStateDefinition st = probeRegion.GetState(new Vector3I(px, py, pz));
+                        if (!st.IsAir)
+                        {
+                            Debug.WriteLine($"[MESH][probe] {px},{py},{pz}={st}");
+                        }
+                    }
+                }
+            }
+
+            return 0;
+        }
+
+        // --regionrender <out.png> <litematic> [边长] <资源包...>：真实 region 的软件光栅化，
+        // 与 GPU 截帧对照用（见 PreviewBlocks.RunRegionRender）。
+        if (args.Length >= 3 && args[0] == "--regionrender")
+        {
+            return PreviewBlocks.RunRegionRender(args);
+        }
+
+        // --dumpverts <litematic> <资源包...>：打印头几个面的顶点原始数据，
+        // 查面退化（四角几乎重合）时用。
+        if (args.Length >= 3 && args[0] == "--dumpverts")
+        {
+            using TextWriterTraceListener dvListener = new(Console.Out);
+            Trace.Listeners.Add(dvListener);
+            Trace.AutoFlush = true;
+            LoadResult dvResult = LitematicLoader.TryLoadFile(args[1]);
+            if (!dvResult.Success)
+            {
+                Debug.WriteLine($"[MESH][dumpverts] 载入失败 {dvResult.Error}");
+                return 1;
+            }
+
+            _packs = new PackStack();
+            foreach (string path in args.Skip(2))
+            {
+                _packs.Add(Directory.Exists(path) ? ResourcePack.OpenFolder(path) : ResourcePack.OpenZip(path));
+            }
+
+            _resolver = new BlockStateResolver(_packs);
+            BlockMeshBuilder dvCollector = new(_resolver, TextureAtlas.Build(_packs, []));
+            HashSet<string> dvSprites = [];
+            dvCollector.CollectSprites(dvResult.Document!.Regions, dvSprites);
+            TextureAtlas dvAtlas = TextureAtlas.Build(_packs, dvSprites);
+            BlockMeshBuilder dvBuilder = new(_resolver, dvAtlas);
+            MeshData dvMesh = dvBuilder.BuildRegion(dvResult.Document.Regions[0]);
+            int fpv = MeshData.FloatsPerVertex;
+            Debug.WriteLine($"[MESH][dumpverts] verts={dvMesh.Vertices.Length / fpv} indices={dvMesh.Indices.Length} atlas={dvAtlas.Width}x{dvAtlas.Height}");
+            for (int face = 0; face < Math.Min(48, dvMesh.Indices.Length); face += 6)
+            {
+                for (int k = 0; k < 4; k++)
+                {
+                    int v = dvMesh.Indices[face + k] * fpv;
+                    Debug.WriteLine($"[MESH][dumpverts] face{face / 6} v{k} pos=({dvMesh.Vertices[v]:F3},{dvMesh.Vertices[v + 1]:F3},{dvMesh.Vertices[v + 2]:F3}) n=({dvMesh.Vertices[v + 3]:F2},{dvMesh.Vertices[v + 4]:F2},{dvMesh.Vertices[v + 5]:F2}) uv=({dvMesh.Vertices[v + 6]:F5},{dvMesh.Vertices[v + 7]:F5}) tint={dvMesh.Vertices[v + 8]:F0}");
+                }
+            }
+
+            return 0;
+        }
+
+        // --uvhist <litematic> <资源包...>：复刻 Sample 的 LoadCore 全流程
+        // （CollectSprites → 建图集 → BuildRegion → MergeMeshes），然后逐面取 uv 中心，
+        // 统计落在每个 sprite rect 内的面数。铁块 rect 应该有几千个面；
+        // 如果铁块名下只有个位数，就是 uv 映射错位，而不是 GPU 的问题。
+        if (args.Length >= 3 && args[0] == "--uvhist")
+        {
+            using TextWriterTraceListener uvListener = new(Console.Out);
+            Trace.Listeners.Add(uvListener);
+            Trace.AutoFlush = true;
+            LoadResult uvResult = LitematicLoader.TryLoadFile(args[1]);
+            if (!uvResult.Success)
+            {
+                Debug.WriteLine($"[MESH][uvhist] 载入失败 {uvResult.Error}");
+                return 1;
+            }
+
+            _packs = new PackStack();
+            foreach (string path in args.Skip(2))
+            {
+                _packs.Add(Directory.Exists(path) ? ResourcePack.OpenFolder(path) : ResourcePack.OpenZip(path));
+            }
+
+            _resolver = new BlockStateResolver(_packs);
+            BlockMeshBuilder uvCollector = new(_resolver, TextureAtlas.Build(_packs, []));
+            HashSet<string> uvSprites = [];
+            uvCollector.CollectSprites(uvResult.Document!.Regions, uvSprites);
+            TextureAtlas uvAtlas = TextureAtlas.Build(_packs, uvSprites);
+            BlockMeshBuilder uvBuilder = new(_resolver, uvAtlas);
+
+            List<float> uvVerts = [];
+            List<int> uvIndices = [];
+            int uvBase = 0;
+            foreach (LitematicRegion uvRegion in uvResult.Document.Regions)
+            {
+                MeshData uvMesh = uvBuilder.BuildRegion(uvRegion);
+                uvVerts.AddRange(uvMesh.Vertices);
+                foreach (int i in uvMesh.Indices)
+                {
+                    uvIndices.Add(i + uvBase);
+                }
+
+                uvBase += uvMesh.Vertices.Length / MeshData.FloatsPerVertex;
+            }
+
+            // 每 4 个连续顶点是一个面（四边形），uv 中心取四顶点平均。
+            Dictionary<string, int> rectHits = new(StringComparer.Ordinal);
+            int straddleFaces = 0;
+            for (int face = 0; face < uvIndices.Count; face += 6)
+            {
+                float uSum = 0, vSum = 0;
+                for (int k = 0; k < 6; k++)
+                {
+                    int vertex = uvIndices[face + k];
+                    uSum += uvVerts[(vertex * MeshData.FloatsPerVertex) + MeshData.UvOffset];
+                    vSum += uvVerts[(vertex * MeshData.FloatsPerVertex) + MeshData.UvOffset + 1];
+                }
+
+                // 6 个索引只有 4 个独立顶点；四点平均直接用头 4 个索引去重即可，
+                // 这里偷懒用 6 个索引的平均（对中心位置没有影响，权重差可忽略）。
+                float u = uSum / 6f;
+                // v 不翻转（v = 图集 y/H），反推图集行：py = v*H。
+                float v = vSum / 6f;
+                float px = u * uvAtlas.Width;
+                float py = v * uvAtlas.Height;
+                string? hit = null;
+                foreach (SpriteRect rect in uvAtlas.Rects)
+                {
+                    if (px >= rect.X && px < rect.X + rect.Width && py >= rect.Y && py < rect.Y + rect.Height)
+                    {
+                        hit = rect.Sprite;
+                        break;
+                    }
+                }
+
+                if (hit is null)
+                {
+                    straddleFaces++;
+                }
+                else
+                {
+                    rectHits[hit] = rectHits.GetValueOrDefault(hit) + 1;
+                }
+            }
+
+            Debug.WriteLine($"[MESH][uvhist] 图集 {uvAtlas.Width}x{uvAtlas.Height} sprites={uvAtlas.Rects.Count}");
+            foreach ((string sprite, int count) in rectHits.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+            {
+                Debug.WriteLine($"[MESH][uvhist] {sprite} faces={count}");
+            }
+
+            Debug.WriteLine($"[MESH][uvhist] rect 外的面={straddleFaces}");
+            return 0;
+        }
+
         using TextWriterTraceListener listener = new(Console.Out);
         Trace.Listeners.Add(listener);
         Trace.AutoFlush = true;
@@ -134,9 +315,9 @@ public static class MeshSmoke
         atlas.TryGetRect("minecraft:block/oak_log_top", out SpriteRect topRect);
         float uLow = (float)topRect.X / atlas.Width;
         float uHigh = (float)(topRect.X + topRect.Width) / atlas.Width;
-        // v 已翻转：rect 越靠上（Y 小）翻转后数值越大，区间要按 min/max 摆正。
-        float vLow = 1f - ((float)(topRect.Y + topRect.Height) / atlas.Height);
-        float vHigh = 1f - ((float)topRect.Y / atlas.Height);
+        // v 不翻转（v = 图集 y/H）：Y 小的 rect v 也小，区间直接按 Y 摆。
+        float vLow = (float)topRect.Y / atlas.Height;
+        float vHigh = (float)(topRect.Y + topRect.Height) / atlas.Height;
 
         // 按「面的 uv 中心」分类，不按单顶点：两个 rect 上下堆叠时共享 v=0.5 这条边，
         // 侧面底边的顶点恰好压线，按顶点判会把侧面误判成端帽。

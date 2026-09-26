@@ -34,4 +34,42 @@ internal static class ShotWriter
             writer.Write(row);
         }
     }
+
+    // alpha 通道单独落盘（P5 灰度）：RGB 正确不代表 alpha 正确，
+    // 而片元着色器按 alpha<0.5 discard——alpha 坏了的表现就是「面凭空消失」。
+    internal static void WriteAtlasAlpha(string path, byte[] rgbaLevel0, int width, int height)
+    {
+        using FileStream file = new(path, FileMode.Create, FileAccess.Write);
+        using BinaryWriter writer = new(file);
+        writer.Write("P5\n"u8);
+        writer.Write(System.Text.Encoding.ASCII.GetBytes($"{width} {height}\n255\n"));
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                writer.Write(rgbaLevel0[((y * width) + x) * 4 + 3]);
+            }
+        }
+    }
+
+    // 把上传给 GPU 的图集层 0 dump 成 PPM（RGBA 丢 alpha，原点已在左上不用翻）。
+    // 用途：GPU 画面花 vs 软件渲染正常时，先确认 GPU 收到的纹素本身是对的——
+    // 上传链（Copy/staging/TexImage2D）与 CPU 侧的图集是两份数据，都得验。
+    internal static void WriteAtlas(string path, byte[] rgbaLevel0, int width, int height)
+    {
+        using FileStream file = new(path, FileMode.Create, FileAccess.Write);
+        using BinaryWriter writer = new(file);
+        writer.Write("P6\n"u8);
+        writer.Write(System.Text.Encoding.ASCII.GetBytes($"{width} {height}\n255\n"));
+        for (int y = 0; y < height; y++)
+        {
+            int source = y * width * 4;
+            for (int x = 0; x < width; x++)
+            {
+                writer.Write(rgbaLevel0[source + x * 4 + 0]);
+                writer.Write(rgbaLevel0[source + x * 4 + 1]);
+                writer.Write(rgbaLevel0[source + x * 4 + 2]);
+            }
+        }
+    }
 }

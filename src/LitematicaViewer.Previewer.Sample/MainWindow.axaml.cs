@@ -298,6 +298,16 @@ public partial class MainWindow : Window, IViewModeHost
         // 空文件（调色板里只有空气）没有顶点可传：传空数组会让 GL 那边建一个零长度的
         // 索引缓冲，传 null 走「清空」语义，画面退回演示立方体。
         bool empty = document.MergedIndices.Length == 0;
+        if (Program.ShotPath is not null && !empty)
+        {
+            // 截帧模式的取证口：GPU 收到的图集层 0 落盘，和 CPU 侧产物对账。
+            ShotWriter.WriteAtlas(
+                Program.ShotPath + ".atlas.ppm",
+                document.AtlasLevels![0],
+                document.AtlasWidth,
+                document.AtlasHeight);
+        }
+
         Viewport.SetMesh(
             empty ? null : document.MergedVertices,
             empty ? null : document.MergedIndices,
