@@ -103,31 +103,35 @@ public sealed class BlockMeshBuilder
                         continue;
                     }
 
-                    // 多 variant 的花色（stone 的 4 个旋转）按位置散列轮换，
-                    // 与 MC 的随机取法一样是逐方块变化，但这里是确定性的：
-                    // 同一文件每次载入画面完全一致，像素校验才有稳定的参照物。
-                    CachedVariant variant = cached.Variants[
-                        (int)(((uint)(x * 73856093) ^ ((uint)y * 19349663) ^ ((uint)z * 83492791)) % (uint)cached.Variants.Count)];
-
+                    // variants 型花色（stone 的 4 个旋转）按位置散列轮换，与 MC 的随机
+                    // 取法一样逐方块变化但确定性（同一文件每次载入画面一致）；
+                    // multipart 型全部部件一起画，不挑。
+                    IEnumerable<CachedVariant> chosen = cached.IsMultipart
+                        ? cached.Variants
+                        : [cached.Variants[
+                            (int)(((uint)(x * 73856093) ^ ((uint)y * 19349663) ^ ((uint)z * 83492791)) % (uint)cached.Variants.Count)]];
                     Vector3 origin = new(region.Bounds.Min.X + x, region.Bounds.Min.Y + y, region.Bounds.Min.Z + z);
-                    foreach (CachedQuad quad in variant.Quads)
+                    foreach (CachedVariant variant in chosen)
                     {
-                        if (quad.Cullface is Vector3 cull
-                            && IsNeighborOccluding(blocks, occludeFlags, size, x, y, z, cull))
+                        foreach (CachedQuad quad in variant.Quads)
                         {
-                            _skippedFaces++;
-                            continue;
-                        }
+                            if (quad.Cullface is Vector3 cull
+                                && IsNeighborOccluding(blocks, occludeFlags, size, x, y, z, cull))
+                            {
+                                _skippedFaces++;
+                                continue;
+                            }
 
-                        if (quad.Sprite.Length == 0)
-                        {
-                            // 引用解不开的面直接丢（日志在资产层打过一次）；
-                            // 补一块棋盘占位反而需要把它塞进图集，不值得。
-                            _emptySpriteFaces++;
-                            continue;
-                        }
+                            if (quad.Sprite.Length == 0)
+                            {
+                                // 引用解不开的面直接丢（日志在资产层打过一次）；
+                                // 补一块棋盘占位反而需要把它塞进图集，不值得。
+                                _emptySpriteFaces++;
+                                continue;
+                            }
 
-                        EmitQuad(vertices, indices, origin, quad);
+                            EmitQuad(vertices, indices, origin, quad);
+                        }
                     }
                 }
             }
@@ -151,7 +155,11 @@ public sealed class BlockMeshBuilder
 
     private sealed record CachedVariant(List<CachedQuad> Quads);
 
-    private sealed record CachedState(List<CachedVariant> Variants);
+    // Multipart=true：Variants 是同一格要一起画的部件（墙 = post + 连接臂），
+    // 全部输出；false：Variants 是互斥花色（stone 的 4 个旋转），按位置挑一个。
+    // 挑一个的旧逻辑曾把 multipart 也当花色处理，墙和栅栏每次只画一个部件，
+    // 连接臂整条消失。
+    private sealed record CachedState(bool IsMultipart, List<CachedVariant> Variants);
 
     private CachedState GetState(BlockStateDefinition state)
     {
@@ -185,7 +193,7 @@ public sealed class BlockMeshBuilder
             variants.Add(new CachedVariant(quads));
         }
 
-        CachedState result = new(variants);
+        CachedState result = new(resolved.IsMultipart, variants);
         _cache[key] = result;
         return result;
     }

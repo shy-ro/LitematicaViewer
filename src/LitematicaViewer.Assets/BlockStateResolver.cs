@@ -78,7 +78,7 @@ public sealed class BlockStateResolver
         }
 
         _resolveCount++;
-        return new ResolvedBlockState(blockId, variants);
+        return new ResolvedBlockState(blockId, variants, IsMultipart: root.TryGetProperty("multipart", out _));
     }
 
     public string Stats => $"resolveCount={_resolveCount} missCount={_missCount}";

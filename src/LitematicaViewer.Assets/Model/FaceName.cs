@@ -42,4 +42,6 @@ public sealed record ResolvedVariant(string ModelId, ResolvedBlockModel Model, f
 
 public sealed record ResolvedBlockModel(string ModelId, IReadOnlyList<ModelElement> Elements);
 
-public sealed record ResolvedBlockState(string BlockId, IReadOnlyList<ResolvedVariant> Variants);
+// multipart 的所有命中部件都要同格渲染（墙 = post + 两条连接臂），Variants 里
+// 装的是「要一起画的部件」；variants 型装的是「互斥花色」，由网格层挑一个。
+public sealed record ResolvedBlockState(string BlockId, IReadOnlyList<ResolvedVariant> Variants, bool IsMultipart = false);
