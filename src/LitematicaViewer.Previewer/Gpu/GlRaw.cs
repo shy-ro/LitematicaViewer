@@ -26,6 +26,11 @@ internal static class GlRaw
     internal const int GL_ZERO = 0x0000;
     internal const int GL_ONE = 0x0001;
 
+    // 半透明 pass 的深度语义。LEQUAL 与 LESS 只差「相等时也过」：共面的宿主面和
+    // 水壁深度相同，LESS 会让胜负落到插值噪声上逐像素抖（z-fight），LEQUAL 让
+    // 后画的水稳定地叠上去——vanilla 的半透明 pass 用的也是 LEQUAL。
+    internal const int GL_LEQUAL = 0x0203;
+
     // 半透明绘制需要的两件事：开混合、把因子设成 srcAlpha / oneMinusSrcAlpha。
     //
     // 抽成一个入口是因为用它的人不止一个（轴线、展台光环），而「谁先建谁顺手设一下」是隐式依赖：
@@ -120,10 +125,30 @@ internal static class GlRaw
         }
     }
 
+    // void glUniform1f(GLint location, GLfloat v0)
+    //
+    // 两 pass 的开关（uOpaquePass）每帧要设两次，入口指针缓存一份：GetProcAddress
+    // 每帧查表没必要。指针与上下文无关（同进程同驱动），缓存跨上下文安全。
+    internal static void Uniform1f(GlInterface gl, int location, float value)
+    {
+        if (_uniform1f is null)
+        {
+            IntPtr entry = gl.GetProcAddress("glUniform1f");
+            _uniform1f = Marshal.GetDelegateForFunctionPointer<Uniform1fDelegate>(entry);
+        }
+
+        _uniform1f(location, value);
+    }
+
     // GL 的 C 原型在 Windows 上就是 stdcall（x64 上只有一种调用约定，这一栏写什么都一样，
     // 但签名本身必须与原型逐项对上）。这与项目里已有那条 glReadPixels 的写法保持一致。
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate void BlendFuncSeparateDelegate(int sourceRgb, int destinationRgb, int sourceAlpha, int destinationAlpha);
+
+    private static Uniform1fDelegate? _uniform1f;
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void Uniform1fDelegate(int location, float value);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate void LineWidthDelegate(float width);

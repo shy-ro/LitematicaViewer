@@ -41,6 +41,13 @@ internal sealed class GlShader : IDisposable
 
     public void Use() => _gl.UseProgram(_program);
 
+    public void SetFloat(string name, float value)
+    {
+        int location = _gl.GetUniformLocationString(_program, name);
+        Debug.Assert(location >= 0, $"[PREVIEWER][gl.shader] uniform '{name}' 没找到");
+        GlRaw.Uniform1f(_gl, location, value);
+    }
+
     public unsafe void SetMatrix4(string name, Matrix4x4 matrix)
     {
         int location = _gl.GetUniformLocationString(_program, name);

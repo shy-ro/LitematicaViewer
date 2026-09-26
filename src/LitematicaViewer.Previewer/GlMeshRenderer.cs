@@ -119,7 +119,18 @@ internal sealed class GlMeshRenderer : IDisposable
         _atlas!.Bind(0);
         _shader.Use();
         _shader.SetMatrix4("uViewProjection", viewProjection);
+
+        // 两 pass：vanilla 的 opaque + translucent 同构。不透明先画并写深度，
+        // 半透明后画、LEQUAL、不写深度——水的半透明才不会把后画的不透明方块
+        // 挡成「隔着水看到背景洞」，共面的宿主面与水壁也稳定成「湿面」而不是
+        // z-fight。glClear 的深度清空受 depth mask 影响，第二个 pass 结束必须还原。
+        _shader.SetFloat("uOpaquePass", 1f);
         _mesh!.Draw();
+
+        _shader.SetFloat("uOpaquePass", 0f);
+        gl.DepthMask(0);
+        _mesh.Draw();
+        gl.DepthMask(1);
     }
 
     private void RebuildGpu(GlInterface gl)
@@ -139,6 +150,17 @@ internal sealed class GlMeshRenderer : IDisposable
 
         _atlas = GlTexture.Create(gl, _atlasLevels!, _atlasWidth, _atlasHeight);
         _mesh = GlMesh.Create(gl, _vertices!, _vertices!.Length / FloatsPerVertex, _indices!, [3, 3, 2, 1]);
+
+        // 混合与深度语义是本渲染器的前置条件，自己设一遍（幂等），不赌别的渲染器
+        // 的 Initialize 恰好先跑：alpha 输出靠 (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) 混合
+        // 才上屏，fb 的 alpha 通道由 (ZERO, ONE) 保护；半透明 pass 的稳定叠色要
+        // LEQUAL（LESS 会让共面的宿主面与水壁落到插值噪声上互相抖）。
+        bool blended = GlRaw.EnableAlphaBlend(gl);
+        Debug.Assert(
+            blended,
+            "[PREVIEWER][gl.mesh] 这个上下文里没有 glBlendFuncSeparate，水的半透明会被画成不透明色块");
+        gl.DepthFunc(GlRaw.GL_LEQUAL);
+
         _gpuDirty = false;
 
         Debug.WriteLine(
@@ -215,8 +237,13 @@ internal sealed class GlMeshRenderer : IDisposable
         in float vTint;
 
         uniform sampler2D uAtlas;
+        uniform float uOpaquePass;
 
         out vec4 fragColor;
+
+        // 半透明与不透明的分界：水贴图 alpha=180（≈0.71），染色玻璃 ~0.75，
+        // 挖孔贴图（树叶/玻璃板）是 0/255 二值。0.99 以上按不透明处理。
+        const float TranslucentThreshold = 0.99;
 
         void main()
         {
@@ -230,8 +257,23 @@ internal sealed class GlMeshRenderer : IDisposable
             vec4 texel = texture(uAtlas, vUv);
 
             // alpha cutout：玻璃、树叶这类挖孔贴图，孔洞的 alpha 是 0，直接丢片元。
-            // 阈值取 0.5 与 MC 一致；半透明纹理（水 ~0.8）不受影响照常画。
+            // 阈值取 0.5 与 MC 一致。
             if (texel.a < 0.5)
+            {
+                discard;
+            }
+
+            // 两个 pass 分流（vanilla 的 opaque + translucent 同构）：
+            // 不透明 pass 丢掉半透明片元并写深度；半透明 pass 只画水这类片元、
+            // 不写深度。混在一个 pass 里的话，半透明水写进的深度会把之后画的
+            // 不透明方块挡掉——隔着水看到背景洞，谁挡谁全看图元顺序。
+            bool translucent = texel.a < TranslucentThreshold;
+            if (uOpaquePass > 0.5 && translucent)
+            {
+                discard;
+            }
+
+            if (uOpaquePass < 0.5 && !translucent)
             {
                 discard;
             }
@@ -253,7 +295,10 @@ internal sealed class GlMeshRenderer : IDisposable
                 tint = vec3(0.247, 0.463, 0.894);
             }
 
-            fragColor = vec4(texel.rgb * tint * shade, 1.0);
+            // alpha 原样输出：贴图里的半透明（水 180≈0.71）是画面的真实信息，
+            // 写死 1.0 会把水变成不透明色块吞掉带水宿主。帧缓冲的 alpha 通道由
+            // glBlendFuncSeparate 的 (ZERO, ONE) 保护，不会漏进窗口合成。
+            fragColor = vec4(texel.rgb * tint * shade, texel.a);
         }
         """;
 }
