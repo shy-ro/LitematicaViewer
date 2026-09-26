@@ -73,7 +73,9 @@ internal sealed class InputSelfTest
     private const float ShowcaseDamping = 0.1f;
 
     // 滚轮那两个方向各推多少档。推到底要十几档（一档 0.8 倍），而两头的界各自是几十倍的距离差。
-    private const int ZoomInSteps = 12;
+    // 推近档数必须满足 start - 档数×步长 > 0（demo 起点 ≈4.7，步长 1）：
+    // 无界模式下穿过 0 的那次缩放不发生，档数太大期望值就成了负数。
+    private const int ZoomInSteps = 3;
     private const int ZoomOutSteps = 24;
 
     // 掠射姿态：相机几乎贴着 +X 面的平面，x 只比面心出去 0.008，其余两个方向在几米开外。
@@ -331,12 +333,12 @@ internal sealed class InputSelfTest
                 // 滚轮走完整条链路：合成事件 -> 适配器 -> Scrolled -> 控制器 -> 模型 -> SetCamera。
                 // 三次而不是一上一下：一来一回正好抵消，相机回到原位，
                 // 「相机一变就验一帧」的那一帧看到的还是上一张画面，等于什么都没验。
-                // 净效果是推近到 0.8 倍距离，画面确实变了。
+                // 净效果是推近一个步长的距离，画面确实变了。
                 _distanceBeforeZoom = _camera.Distance;
 
                 // 期望值按「净一档」算，而不是把每一步的距离记下来逐个比：
                 // 逐个比等于把控制器的实现抄一遍，抄错了也照样通过。
-                _expectedDistanceAfterZoom = _distanceBeforeZoom * CameraModel.ZoomRatioPerStep;
+                _expectedDistanceAfterZoom = _distanceBeforeZoom - _camera.ZoomStep;
 
                 RaiseWheel(WheelIn);
                 RaiseWheel(WheelIn);
@@ -867,11 +869,13 @@ internal sealed class InputSelfTest
     }
 
     // 滚轮：只许缩放，不许把相机推进模型里面——这是展台「只允许缩放大小」那句话的落点。
-    // 两头的界都是「目标的水平半对角线 × 一个因子」，所以期望值是算出来的而不是抄的；
-    // 手感值改了，这里跟着改，不需要人来对数字。
+    // 缩放没有上下限（推拉就是移动摄像机），所以期望值是「起点 ± 步长×档数」的算术，
+    // 不再有「推到底夹住」这回事。手感的步长改了，这里跟着改，不需要人来对数字。
     private void CheckShowcaseZoom()
     {
         ShowcaseTarget target = ShowcaseTargets.Demo;
+        float start = _camera.Distance;
+        float step = _camera.ZoomStep;
 
         for (int i = 0; i < ZoomInSteps; i++)
         {
@@ -880,23 +884,15 @@ internal sealed class InputSelfTest
 
         Expect(
             _camera.Distance,
-            target.Radius * TurntableController.MinZoomFactor,
+            start - (ZoomInSteps * step),
             1e-3f,
-            "展台推到底之后的距离");
-
-        // 这条才是「穿不过去」本身：距离被夹住还不够，因为圆心到相机的距离才是位置。
-        // 判据用「目标的外接圆」而不是更小的数：光环按设计就落在它外面，相机不该跑到模型那一侧去。
-        float toCentre = (_camera.Camera.Position - _showcaseCentre).Length();
-        Debug.Assert(
-            toCentre > target.Radius,
-            $"[SAMPLE][selftest.showcase] 展台推到底之后相机进到目标里面了 " +
-            $"|pos-centre|={toCentre:F4} radius={target.Radius:F4} distance={_camera.Distance:F4}");
+            "展台推近之后的距离");
 
         Expect(
             Vector3.Dot(_camera.Camera.Forward, Vector3.Normalize(_showcaseCentre - _camera.Camera.Position)),
             1f,
             1e-3f,
-            "推到底之后视线是否仍指向圆心");
+            "推近之后视线是否仍指向圆心");
 
         for (int i = 0; i < ZoomOutSteps; i++)
         {
@@ -905,14 +901,13 @@ internal sealed class InputSelfTest
 
         Expect(
             _camera.Distance,
-            target.Radius * TurntableController.MaxZoomFactor,
+            start + ((ZoomOutSteps - ZoomInSteps) * step),
             1e-3f,
-            "展台推到头之后的距离");
+            "展台推远之后的距离");
 
         Debug.WriteLine(
-            $"[SAMPLE][selftest.showcase] 滚轮 {ZoomInSteps} 档推到底 distance={target.Radius * TurntableController.MinZoomFactor:F4}、" +
-            $"{ZoomOutSteps} 档推到头 distance={target.Radius * TurntableController.MaxZoomFactor:F4}，" +
-            $"两头都夹住了，相机始终在目标外接圆之外（{target.Radius:F4}）");
+            $"[SAMPLE][selftest.showcase] 滚轮推近 {ZoomInSteps} 档、推远 {ZoomOutSteps} 档，" +
+            $"距离 {start:F4} -> {_camera.Distance:F4}（步长 {step}，无上下限）");
     }
 
     // 两次 yaw 之间的真实增量。

@@ -234,21 +234,8 @@ internal sealed class TurntableController : IDisposable
     {
         _camera.Zoom(steps);
 
-        ShowcaseTarget target = Current;
-        float min = target.Radius * MinZoomFactor;
-        float max = target.Radius * MaxZoomFactor;
-
-        if (_camera.Distance < min || _camera.Distance > max)
-        {
-            // 夹住时用取景那条路复位，而不是自己算一遍位置：公转的几何（位置 = 目标 − 视线 × 距离）
-            // 只有那一份实现，第二份迟早和第一份分叉。
-            float clamped = Math.Clamp(_camera.Distance, min, max);
-            _camera.FrameTurntable(target.Centre, _camera.Camera.Pitch, clamped);
-
-            Debug.WriteLine(
-                $"[SAMPLE][showcase.zoom] 距离夹住 wanted={_camera.Distance:F4} clamped={clamped:F4} " +
-                $"range=[{min:F4},{max:F4}] target={target.Name}");
-        }
+        // 不设距离上下限：缩放就是推拉摄像机，模型内外都到得了；
+        // 曾经的 [radius*3, radius*12] 夹取把「凑近看一块砖」「拉远看全景」都挡了。
 
         _previewer.SetCamera(_camera.Camera);
     }
