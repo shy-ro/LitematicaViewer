@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Numerics;
 using LitematicaViewer.Assets;
+using LitematicaViewer.Assets.Model;
 using LitematicaViewer.Core.Model;
 using LitematicaViewer.Core.Parsing;
 
@@ -181,6 +182,31 @@ public static class MeshSmoke
         Stopwatch clock = Stopwatch.StartNew();
         foreach (LitematicRegion region in document.Regions)
         {
+            // 诊断：调色板里解不出任何面的状态。这种方块整块消失，和剔除误删长得一样，
+            // 但关剔除救不了它，所以单独列出来。
+            SortedSet<string> zeroFaceStates = [];
+            foreach (BlockStateDefinition def in region.Palette)
+            {
+                if (def.IsAir)
+                {
+                    continue;
+                }
+
+                ResolvedBlockState resolved = _resolver.Resolve(def.ToString());
+                int faceCount = resolved.Variants.Sum(v => v.Model.Elements.Sum(e => e.Faces.Count));
+                if (faceCount == 0)
+                {
+                    zeroFaceStates.Add(def.ToString());
+                }
+            }
+
+            if (zeroFaceStates.Count > 0)
+            {
+                Debug.WriteLine(
+                    $"[MESH][smoke] {region.Name} 有 {zeroFaceStates.Count} 个零面状态: " +
+                    string.Join(", ", zeroFaceStates));
+            }
+
             MeshData mesh = builder.BuildRegion(region);
             totalVerts += mesh.VertexCount;
             totalFaces += mesh.Indices.Length / 6;
