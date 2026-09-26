@@ -27,6 +27,44 @@ internal sealed class GlPedestalRenderer : IDisposable
     // 位置 3 + 颜色 4。第四个分量是 alpha，所以顶点格式和轴线那里不一样。
     internal const int FloatsPerVertex = 7;
 
+    // 一圈的段数。96 段下半径 1.6 的圆每段弦长 0.1 个世界单位，
+    // 在相机的默认距离下不到一个像素的误差——再多只是白费顶点。
+    internal const int Segments = 96;
+
+    private const string VertexShaderSource = """
+                                              #version 300 es
+                                              precision highp float;
+
+                                              layout(location = 0) in vec3 aPosition;
+                                              layout(location = 1) in vec4 aColor;
+
+                                              uniform mat4 uViewProjection;
+
+                                              out vec4 vColor;
+
+                                              void main()
+                                              {
+                                                  vColor = aColor;
+                                                  gl_Position = uViewProjection * vec4(aPosition, 1.0);
+                                              }
+                                              """;
+
+    // alpha 完全跟着顶点走。写成常量会丢掉那圈软边，而软边正是「光环」和「一个圆盘」的区别。
+    // 透明通道由混合函数里的 (ZERO, ONE) 原样留下，这里的 alpha 只作用于颜色。
+    private const string FragmentShaderSource = """
+                                                #version 300 es
+                                                precision highp float;
+
+                                                in vec4 vColor;
+
+                                                out vec4 fragColor;
+
+                                                void main()
+                                                {
+                                                    fragColor = vColor;
+                                                }
+                                                """;
+
     // 径向分成四圈顶点、三个带。数值是「目标水平半对角线」的倍数：
     // 1 就是刚好贴住目标的外接圆。内缘必须大于 1（见 DebugPedestal），否则光环压在目标底下被挡掉一段。
     //
@@ -42,13 +80,9 @@ internal sealed class GlPedestalRenderer : IDisposable
     // 蓝。取自「半透明蓝色光环」这个要求本身，DebugPedestal 会断言它确实是蓝的。
     internal static readonly Vector3 Color = new(0.25f, 0.65f, 1f);
 
-    // 一圈的段数。96 段下半径 1.6 的圆每段弦长 0.1 个世界单位，
-    // 在相机的默认距离下不到一个像素的误差——再多只是白费顶点。
-    internal const int Segments = 96;
-
     private readonly GlInterface _gl;
-    private readonly GlShader _shader;
     private readonly GlMesh _mesh;
+    private readonly GlShader _shader;
     private bool _disposed;
 
     private GlPedestalRenderer(GlInterface gl, GlShader shader, GlMesh mesh)
@@ -63,10 +97,19 @@ internal sealed class GlPedestalRenderer : IDisposable
 
     internal static int[] Indices { get; } = BuildIndices();
 
+    public void Dispose()
+    {
+        if (_disposed) return;
+
+        _disposed = true;
+        _mesh.Dispose();
+        _shader.Dispose();
+    }
+
     public static GlPedestalRenderer Create(GlInterface gl)
     {
-        GlShader shader = GlShader.Create(gl, VertexShaderSource, FragmentShaderSource);
-        GlMesh mesh = GlMesh.Create(
+        var shader = GlShader.Create(gl, VertexShaderSource, FragmentShaderSource);
+        var mesh = GlMesh.Create(
             gl,
             Vertices,
             Vertices.Length / FloatsPerVertex,
@@ -78,7 +121,7 @@ internal sealed class GlPedestalRenderer : IDisposable
         // 而那看起来像模型没了。开两次是幂等的。
         gl.Enable(GlConsts.GL_DEPTH_TEST);
 
-        bool blended = GlRaw.EnableAlphaBlend(gl);
+        var blended = GlRaw.EnableAlphaBlend(gl);
         Debug.Assert(
             blended,
             "[PREVIEWER][gl.pedestal] 这个上下文里没有 glBlendFuncSeparate，alpha 会被当成不透明画出去");
@@ -98,13 +141,13 @@ internal sealed class GlPedestalRenderer : IDisposable
     // 圆心缺了 X/Z 的话圆环钉在世界原点，模型一挪位置圈就和模型分家。
     public void Render(CameraState camera, int width, int height, Vector3 centre, float radius, float baseY)
     {
-        float aspect = (float)width / height;
-        Matrix4x4 viewProjection = camera.GetViewMatrix() * camera.GetProjectionMatrix(aspect);
+        var aspect = (float)width / height;
+        var viewProjection = camera.GetViewMatrix() * camera.GetProjectionMatrix(aspect);
 
         // 顶点是「半径为 1、圆心在原点、落在 y=0 平面上」的那一份，平移缩放抬升折进矩阵。
         // 折进矩阵而不是重建网格：重建意味着换目标就删一次 VBO 再建一次，而 R5 把
         // GPU 资源的创建销毁只留给 Initialize / Dispose。
-        Matrix4x4 transform =
+        var transform =
             Matrix4x4.CreateScale(radius, 1f, radius) *
             Matrix4x4.CreateTranslation(centre.X, baseY, centre.Z);
 
@@ -113,46 +156,34 @@ internal sealed class GlPedestalRenderer : IDisposable
         _mesh.Draw();
     }
 
-    public void Dispose()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        _disposed = true;
-        _mesh.Dispose();
-        _shader.Dispose();
-    }
-
     // 上下文丢失时用：GPU 侧的对象已经不在了，只能丢引用，不能发 Delete*。
     public void Abandon()
     {
-        if (_disposed)
-        {
-            return;
-        }
+        if (_disposed) return;
 
         _disposed = true;
         _mesh.Abandon();
         _shader.Abandon();
     }
 
-    private static byte Byte(float value) => (byte)Math.Clamp((int)Math.Round(value * 255f), 0, 255);
+    private static byte Byte(float value)
+    {
+        return (byte)Math.Clamp((int)Math.Round(value * 255f), 0, 255);
+    }
 
     private static float[] BuildVertices()
     {
-        float[] vertices = new float[RingRadii.Length * Segments * FloatsPerVertex];
-        int cursor = 0;
+        var vertices = new float[RingRadii.Length * Segments * FloatsPerVertex];
+        var cursor = 0;
 
-        for (int ring = 0; ring < RingRadii.Length; ring++)
+        for (var ring = 0; ring < RingRadii.Length; ring++)
         {
-            float radius = RingRadii[ring];
-            float alpha = RingAlphas[ring];
+            var radius = RingRadii[ring];
+            var alpha = RingAlphas[ring];
 
-            for (int segment = 0; segment < Segments; segment++)
+            for (var segment = 0; segment < Segments; segment++)
             {
-                float angle = MathF.Tau * segment / Segments;
+                var angle = MathF.Tau * segment / Segments;
                 vertices[cursor++] = MathF.Cos(angle) * radius;
                 vertices[cursor++] = 0f;
                 vertices[cursor++] = MathF.Sin(angle) * radius;
@@ -170,62 +201,26 @@ internal sealed class GlPedestalRenderer : IDisposable
     // 接缝处两个顶点位置相同而法线/颜色相同，重复一列只是多一段退化的三角形。
     private static int[] BuildIndices()
     {
-        int[] indices = new int[(RingRadii.Length - 1) * Segments * 6];
-        int cursor = 0;
+        var indices = new int[(RingRadii.Length - 1) * Segments * 6];
+        var cursor = 0;
 
-        for (int ring = 0; ring < RingRadii.Length - 1; ring++)
+        for (var ring = 0; ring < RingRadii.Length - 1; ring++)
+        for (var segment = 0; segment < Segments; segment++)
         {
-            for (int segment = 0; segment < Segments; segment++)
-            {
-                int next = (segment + 1) % Segments;
-                int inner = (ring * Segments) + segment;
-                int innerNext = (ring * Segments) + next;
-                int outer = ((ring + 1) * Segments) + segment;
-                int outerNext = ((ring + 1) * Segments) + next;
+            var next = (segment + 1) % Segments;
+            var inner = ring * Segments + segment;
+            var innerNext = ring * Segments + next;
+            var outer = (ring + 1) * Segments + segment;
+            var outerNext = (ring + 1) * Segments + next;
 
-                indices[cursor++] = inner;
-                indices[cursor++] = innerNext;
-                indices[cursor++] = outerNext;
-                indices[cursor++] = inner;
-                indices[cursor++] = outerNext;
-                indices[cursor++] = outer;
-            }
+            indices[cursor++] = inner;
+            indices[cursor++] = innerNext;
+            indices[cursor++] = outerNext;
+            indices[cursor++] = inner;
+            indices[cursor++] = outerNext;
+            indices[cursor++] = outer;
         }
 
         return indices;
     }
-
-    private const string VertexShaderSource = """
-        #version 300 es
-        precision highp float;
-
-        layout(location = 0) in vec3 aPosition;
-        layout(location = 1) in vec4 aColor;
-
-        uniform mat4 uViewProjection;
-
-        out vec4 vColor;
-
-        void main()
-        {
-            vColor = aColor;
-            gl_Position = uViewProjection * vec4(aPosition, 1.0);
-        }
-        """;
-
-    // alpha 完全跟着顶点走。写成常量会丢掉那圈软边，而软边正是「光环」和「一个圆盘」的区别。
-    // 透明通道由混合函数里的 (ZERO, ONE) 原样留下，这里的 alpha 只作用于颜色。
-    private const string FragmentShaderSource = """
-        #version 300 es
-        precision highp float;
-
-        in vec4 vColor;
-
-        out vec4 fragColor;
-
-        void main()
-        {
-            fragColor = vColor;
-        }
-        """;
 }

@@ -1,7 +1,3 @@
-using System.Diagnostics;
-using System.Numerics;
-using LitematicaViewer.Previewer;
-
 namespace LitematicaViewer.Previewer.Sample;
 
 // 展台的自转与惯性。全是标量算术，所以是静态纯函数：可以单元式地验，也不必碰 GL、窗口、事件。
@@ -24,7 +20,10 @@ internal static class TurntableSpin
     private const float MinDamping = 1e-3f;
 
     // 自转速度的绝对值。方向由 IdleDirection 定，取用时相乘。
-    internal static float IdleSpeed(float degreesPerSecond) => IdleDirection * degreesPerSecond;
+    internal static float IdleSpeed(float degreesPerSecond)
+    {
+        return IdleDirection * degreesPerSecond;
+    }
 
     // 一阶滞后：每帧走掉剩余差的 (1 − exp(−dt/τ))。
     //
@@ -33,17 +32,14 @@ internal static class TurntableSpin
     // 而那看起来像手感问题，不像公式问题。
     internal static float Decay(float velocity, float target, double seconds, float damping)
     {
-        if (seconds <= 0d || !float.IsFinite(velocity) || !float.IsFinite(target))
-        {
-            return velocity;
-        }
+        if (seconds <= 0d || !float.IsFinite(velocity) || !float.IsFinite(target)) return velocity;
 
-        float tau = MathF.Max(damping, MinDamping);
-        float blend = 1f - MathF.Exp((float)(-seconds / tau));
+        var tau = MathF.Max(damping, MinDamping);
+        var blend = 1f - MathF.Exp((float)(-seconds / tau));
 
         // blend 落在 [0,1) 里，所以结果必然在速度与目标之间——不会冲过头。
         // 冲过头的样子是「甩一下转半圈，停下之前先往回倒一点」，而那看起来像回弹。
-        return velocity + ((target - velocity) * blend);
+        return velocity + (target - velocity) * blend;
     }
 
     // 手速估计：这一帧攒下的角度除以这一帧的时长，再做一次低通。
@@ -53,18 +49,12 @@ internal static class TurntableSpin
     // 「猛一甩」在随机的一帧上取到同一个数。
     internal static float Measure(float accumulatedDegrees, double seconds, float previous, float blend)
     {
-        if (seconds <= 0d || !float.IsFinite(accumulatedDegrees))
-        {
-            return previous;
-        }
+        if (seconds <= 0d || !float.IsFinite(accumulatedDegrees)) return previous;
 
-        float measured = accumulatedDegrees / (float)seconds;
-        if (!float.IsFinite(measured))
-        {
-            return previous;
-        }
+        var measured = accumulatedDegrees / (float)seconds;
+        if (!float.IsFinite(measured)) return previous;
 
-        return previous + ((measured - previous) * Math.Clamp(blend, 0f, 1f));
+        return previous + (measured - previous) * Math.Clamp(blend, 0f, 1f);
     }
 
 #if DEBUG

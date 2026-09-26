@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Numerics;
 
 namespace LitematicaViewer.Previewer;
@@ -49,9 +48,9 @@ public readonly record struct CameraState(
 
     public static Vector3 ForwardOf(float yawDegrees, float pitchDegrees)
     {
-        float yaw = float.DegreesToRadians(yawDegrees);
-        float pitch = float.DegreesToRadians(Math.Clamp(pitchDegrees, -MaxPitch, MaxPitch));
-        float cosPitch = MathF.Cos(pitch);
+        var yaw = float.DegreesToRadians(yawDegrees);
+        var pitch = float.DegreesToRadians(Math.Clamp(pitchDegrees, -MaxPitch, MaxPitch));
+        var cosPitch = MathF.Cos(pitch);
 
         return new Vector3(-MathF.Sin(yaw) * cosPitch, -MathF.Sin(pitch), MathF.Cos(yaw) * cosPitch);
     }
@@ -65,23 +64,28 @@ public readonly record struct CameraState(
         float near = DefaultNear,
         float far = DefaultFar)
     {
-        Vector3 direction = Vector3.Normalize(target - eye);
+        var direction = Vector3.Normalize(target - eye);
 
         // pitch 前面那个负号：约定里 pitch 增大是向下看，而 direction.Y 向下是负的。
-        float pitch = float.RadiansToDegrees(MathF.Asin(-direction.Y));
+        var pitch = float.RadiansToDegrees(MathF.Asin(-direction.Y));
 
         // atan2(-x, z) 是 -sin(yaw) 与 cos(yaw) 的逆。yaw 因此落在 (-180,180]，正负 180 附近会跳变;
         // 不归一化到 [0,360)：sin/cos 本来就周期，归一化只会让控制器里累积的 yaw 在某处被莫名重置，
         // 而那表现成相机突然转身——比跳变难查得多，因为只有转过几圈之后才出现。
-        float yaw = float.RadiansToDegrees(MathF.Atan2(-direction.X, direction.Z));
+        var yaw = float.RadiansToDegrees(MathF.Atan2(-direction.X, direction.Z));
 
         return new CameraState(eye, yaw, pitch, fov, near, far);
     }
 
-    public Matrix4x4 GetViewMatrix() => Matrix4x4.CreateLookAt(Position, Position + Forward, Vector3.UnitY);
+    public Matrix4x4 GetViewMatrix()
+    {
+        return Matrix4x4.CreateLookAt(Position, Position + Forward, Vector3.UnitY);
+    }
 
-    public Matrix4x4 GetProjectionMatrix(float aspectRatio) =>
-        Matrix4x4.CreatePerspectiveFieldOfView(float.DegreesToRadians(Fov), aspectRatio, Near, Far);
+    public Matrix4x4 GetProjectionMatrix(float aspectRatio)
+    {
+        return Matrix4x4.CreatePerspectiveFieldOfView(float.DegreesToRadians(Fov), aspectRatio, Near, Far);
+    }
 
     // 相机版本号之外还给一个「这个状态是不是能拿来画」的判断，供 SetCamera 的断言用。
     // 放在类型上而不是 Previewer 里：将来控制器自建 CameraState 时也能就地校验，

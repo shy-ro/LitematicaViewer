@@ -12,7 +12,7 @@ public enum FaceName
     North,
     South,
     West,
-    East,
+    East
 }
 
 // 元素级旋转。MC 的 angle 只允许 ±22.5/±45 的倍数；axis 0/1/2 = x/y/z。
@@ -44,4 +44,7 @@ public sealed record ResolvedBlockModel(string ModelId, IReadOnlyList<ModelEleme
 
 // multipart 的所有命中部件都要同格渲染（墙 = post + 两条连接臂），Variants 里
 // 装的是「要一起画的部件」；variants 型装的是「互斥花色」，由网格层挑一个。
-public sealed record ResolvedBlockState(string BlockId, IReadOnlyList<ResolvedVariant> Variants, bool IsMultipart = false);
+public sealed record ResolvedBlockState(
+    string BlockId,
+    IReadOnlyList<ResolvedVariant> Variants,
+    bool IsMultipart = false);

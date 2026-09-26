@@ -12,8 +12,8 @@ internal static class DebugPedestal
 {
     public static void CheckGeometry(float[] vertices, int[] indices)
     {
-        int rings = GlPedestalRenderer.RingRadii.Length;
-        int segments = GlPedestalRenderer.Segments;
+        var rings = GlPedestalRenderer.RingRadii.Length;
+        var segments = GlPedestalRenderer.Segments;
 
         Debug.Assert(
             vertices.Length == rings * segments * GlPedestalRenderer.FloatsPerVertex,
@@ -25,10 +25,10 @@ internal static class DebugPedestal
             indices.Length == (rings - 1) * segments * 6,
             $"[PREVIEWER][gl.pedestal] 索引数不对 indices={indices.Length} expected={(rings - 1) * segments * 6}");
 
-        for (int ring = 0; ring < rings; ring++)
+        for (var ring = 0; ring < rings; ring++)
         {
-            float declared = GlPedestalRenderer.RingRadii[ring];
-            float alpha = GlPedestalRenderer.RingAlphas[ring];
+            var declared = GlPedestalRenderer.RingRadii[ring];
+            var alpha = GlPedestalRenderer.RingAlphas[ring];
 
             Debug.Assert(
                 float.IsFinite(declared) && declared > 0f,
@@ -39,11 +39,11 @@ internal static class DebugPedestal
 
             // 每圈只查首尾两个顶点：它们是按同一个半径算出来的，中间那些分段只改角度。
             // 全查一遍是两万多次比较，而错法只有「这一圈的半径整体写错」一种。
-            foreach (int segment in new[] { 0, segments - 1 })
+            foreach (var segment in new[] { 0, segments - 1 })
             {
-                int vertex = (ring * segments) + segment;
-                Vector3 position = ReadPosition(vertices, vertex);
-                float radius = MathF.Sqrt((position.X * position.X) + (position.Z * position.Z));
+                var vertex = ring * segments + segment;
+                var position = ReadPosition(vertices, vertex);
+                var radius = MathF.Sqrt(position.X * position.X + position.Z * position.Z);
 
                 // 落在底面上。底面高度是矩阵给的，顶点里的 y 必须是 0——
                 // 写成别的值时，光环会跟着底面高度被抬两次。
@@ -55,7 +55,7 @@ internal static class DebugPedestal
                     $"[PREVIEWER][gl.pedestal] 顶点半径不对 ring={ring} segment={segment} " +
                     $"got={radius:F6} expected={declared}");
 
-                Vector3 color = ReadColor(vertices, vertex);
+                var color = ReadColor(vertices, vertex);
                 Debug.Assert(
                     color == GlPedestalRenderer.Color,
                     $"[PREVIEWER][gl.pedestal] 顶点颜色不对 ring={ring} segment={segment} " +
@@ -67,13 +67,11 @@ internal static class DebugPedestal
             }
         }
 
-        for (int ring = 1; ring < rings; ring++)
-        {
+        for (var ring = 1; ring < rings; ring++)
             Debug.Assert(
                 GlPedestalRenderer.RingRadii[ring] > GlPedestalRenderer.RingRadii[ring - 1],
                 $"[PREVIEWER][gl.pedestal] 半径不是递增的 ring={ring} " +
                 $"got={GlPedestalRenderer.RingRadii[ring]} previous={GlPedestalRenderer.RingRadii[ring - 1]}");
-        }
 
         // 内缘大于 1（= 目标的水平半对角线）的那条界线：光环是在「托底」，不是压在目标底下。
         // 小于 1 时目标的外接圆盖住光环一圈，被挡掉的那一段看起来像光环少画了一块。
@@ -90,7 +88,7 @@ internal static class DebugPedestal
 
         // 蓝色是要求本身（「半透明蓝色光环」）。写成偏暖的颜色不会报错也不会崩，
         // 只是那圈光环看着像锈——而这条断言的存在就是为了让「改成别的颜色」这件事必须是有意的。
-        Vector3 color3 = GlPedestalRenderer.Color;
+        var color3 = GlPedestalRenderer.Color;
         Debug.Assert(
             color3.Z > color3.X && color3.Z > color3.Y,
             $"[PREVIEWER][gl.pedestal] 光环不是蓝色 color=({color3})");
@@ -98,16 +96,18 @@ internal static class DebugPedestal
 
     private static Vector3 ReadPosition(float[] vertices, int vertex)
     {
-        int start = vertex * GlPedestalRenderer.FloatsPerVertex;
+        var start = vertex * GlPedestalRenderer.FloatsPerVertex;
         return new Vector3(vertices[start], vertices[start + 1], vertices[start + 2]);
     }
 
     private static Vector3 ReadColor(float[] vertices, int vertex)
     {
-        int start = (vertex * GlPedestalRenderer.FloatsPerVertex) + 3;
+        var start = vertex * GlPedestalRenderer.FloatsPerVertex + 3;
         return new Vector3(vertices[start], vertices[start + 1], vertices[start + 2]);
     }
 
-    private static float ReadAlpha(float[] vertices, int vertex) =>
-        vertices[(vertex * GlPedestalRenderer.FloatsPerVertex) + 6];
+    private static float ReadAlpha(float[] vertices, int vertex)
+    {
+        return vertices[vertex * GlPedestalRenderer.FloatsPerVertex + 6];
+    }
 }

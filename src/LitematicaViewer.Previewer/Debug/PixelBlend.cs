@@ -14,9 +14,11 @@ internal static class PixelBlend
     internal static (float R, float G, float B) Over(
         (float R, float G, float B) color,
         (float R, float G, float B) background,
-        float alpha) =>
-        (
-            (alpha * color.R) + ((1f - alpha) * background.R),
-            (alpha * color.G) + ((1f - alpha) * background.G),
-            (alpha * color.B) + ((1f - alpha) * background.B));
+        float alpha)
+    {
+        return (
+            alpha * color.R + (1f - alpha) * background.R,
+            alpha * color.G + (1f - alpha) * background.G,
+            alpha * color.B + (1f - alpha) * background.B);
+    }
 }

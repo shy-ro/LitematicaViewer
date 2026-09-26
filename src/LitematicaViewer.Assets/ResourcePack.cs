@@ -8,10 +8,10 @@ namespace LitematicaViewer.Assets;
 // 谁也不在这里解释 MC 资产格式——这里是纯粹的「路径到字节」。
 public sealed class ResourcePack : IDisposable
 {
-    private readonly FileStream? _zipStream;
+    private readonly string? _folderRoot;
     private readonly ZipArchive? _zip;
     private readonly Dictionary<string, ZipArchiveEntry> _zipEntries;
-    private readonly string? _folderRoot;
+    private readonly FileStream? _zipStream;
 
     private ResourcePack(string name, FileStream zipStream, ZipArchive zip, Dictionary<string, ZipArchiveEntry> entries)
     {
@@ -30,31 +30,30 @@ public sealed class ResourcePack : IDisposable
 
     public string Name { get; }
 
+    public void Dispose()
+    {
+        _zip?.Dispose();
+        _zipStream?.Dispose();
+    }
+
     // jar 与 zip 同构，一个入口就够；文件夹另算。
     public static ResourcePack OpenZip(string path)
     {
         FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read);
         ZipArchive zip = new(stream, ZipArchiveMode.Read);
         Dictionary<string, ZipArchiveEntry> entries = new(StringComparer.Ordinal);
-        foreach (ZipArchiveEntry entry in zip.Entries)
-        {
+        foreach (var entry in zip.Entries)
             // 目录条目（以 / 结尾）没有内容，跳过；大小写不归一：MC 资产路径本身就是小写约定，
             // 在这里做大小写折叠会掩盖真正的拼写问题。
-            if (!entry.FullName.EndsWith('/') && entries.TryAdd(entry.FullName, entry) == false)
-            {
+            if (!entry.FullName.EndsWith('/') && !entries.TryAdd(entry.FullName, entry))
                 Debug.WriteLine($"[ASSETS][pack] 重复条目被忽略 pack={path} entry={entry.FullName}");
-            }
-        }
 
         return new ResourcePack(Path.GetFileName(path), stream, zip, entries);
     }
 
     public static ResourcePack OpenFolder(string path)
     {
-        if (!Directory.Exists(path))
-        {
-            throw new DirectoryNotFoundException($"资源包文件夹不存在：{path}");
-        }
+        if (!Directory.Exists(path)) throw new DirectoryNotFoundException($"资源包文件夹不存在：{path}");
 
         return new ResourcePack(new DirectoryInfo(path).Name, path);
     }
@@ -63,9 +62,9 @@ public sealed class ResourcePack : IDisposable
     {
         if (_zip is not null)
         {
-            if (_zipEntries.TryGetValue(path, out ZipArchiveEntry? entry))
+            if (_zipEntries.TryGetValue(path, out var entry))
             {
-                using Stream stream = entry.Open();
+                using var stream = entry.Open();
                 using MemoryStream buffer = new((int)entry.Length);
                 stream.CopyTo(buffer);
                 content = buffer.ToArray();
@@ -76,7 +75,7 @@ public sealed class ResourcePack : IDisposable
             return false;
         }
 
-        string full = Path.Combine(_folderRoot!, path);
+        var full = Path.Combine(_folderRoot!, path);
         if (File.Exists(full))
         {
             content = File.ReadAllBytes(full);
@@ -91,24 +90,12 @@ public sealed class ResourcePack : IDisposable
     // 图集收集（列出某个命名空间全部贴图）是它目前唯一的用途。
     public IEnumerable<string> Enumerate(string prefix)
     {
-        if (_zip is not null)
-        {
-            return _zipEntries.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal));
-        }
+        if (_zip is not null) return _zipEntries.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal));
 
-        string root = Path.Combine(_folderRoot!, prefix);
-        if (!Directory.Exists(root))
-        {
-            return [];
-        }
+        var root = Path.Combine(_folderRoot!, prefix);
+        if (!Directory.Exists(root)) return [];
 
         return Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
             .Select(f => Path.GetRelativePath(_folderRoot!, f).Replace('\\', '/'));
-    }
-
-    public void Dispose()
-    {
-        _zip?.Dispose();
-        _zipStream?.Dispose();
     }
 }

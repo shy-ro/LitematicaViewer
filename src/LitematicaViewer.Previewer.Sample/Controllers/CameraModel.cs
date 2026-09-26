@@ -45,7 +45,6 @@ internal sealed partial class CameraModel
     // 存这个标量而不是存一个世界坐标的点：第一视角下「看着哪儿」完全由 (Position, Yaw, Pitch)
     // 决定，再存一份 Target 就有了两个权威，转视角时它们必然分叉——而分叉的表现是
     // 「转完视角再滚轮，相机朝着一个谁都没在看的方向飞过去」。
-    private float _zoomDistance;
 
     // 相机状态本身就是权威，不再拆成 (yaw, pitch, distance) 存着：
     // 那个拆解不可逆（yaw 会跳变），而模型要做的只是「改一个数再交出去」。
@@ -69,9 +68,9 @@ internal sealed partial class CameraModel
         // 参考距离的初值取自「初始相机到给定点的距离」。给一个点而不是给一个数，
         // 是因为调用方手里本来就有那个点（立方体在原点），而它不必去想「参考距离该取多少」——
         // 那个数就是「一开始看得有多远」，让调用方自己量一遍反而多一次出错的机会。
-        _zoomDistance = Vector3.Distance(initial.Position, target);
+        Distance = Vector3.Distance(initial.Position, target);
         Debug.Assert(
-            float.IsFinite(_zoomDistance) && _zoomDistance > 0f,
+            float.IsFinite(Distance) && Distance > 0f,
             $"[SAMPLE][camera.ctor] 初始相机压在给定的点上，缩放没有可推拉的尺度 " +
             $"pos=({initial.Position}) target=({target})");
 
@@ -83,9 +82,9 @@ internal sealed partial class CameraModel
 
     // 视线正前方 Distance 处的那个点。派生量，所以转视角时它跟着视线扫，平移时跟着一起走，
     // 只有滚轮推拉会把它按住不动。
-    internal Vector3 Target => _camera.Position + (_camera.Forward * _zoomDistance);
+    internal Vector3 Target => _camera.Position + _camera.Forward * Distance;
 
-    internal float Distance => _zoomDistance;
+    internal float Distance { get; private set; }
 
     // 整体替换相机状态。控制器不用它（它们只做增量），用它的是「把视角摆到某处」——
     // 验收剧本要造几个不同视角去看画面变化，将来的「重置视角」也会走这里。
@@ -96,7 +95,10 @@ internal sealed partial class CameraModel
     // 它不动 _zoomDistance：Reset 的语义是「把相机摆到某个姿态」，缩放的参考尺度
     // 跟姿态无关。摆到一个离原点更远的姿态之后再滚轮，推拉的步长仍是原来那个尺度——
     // 这不是遗漏，是「谁来定参考距离」只有一个答案：构造函数那一次。
-    internal void Reset(CameraState camera) => _camera = camera;
+    internal void Reset(CameraState camera)
+    {
+        _camera = camera;
+    }
 
     // 把相机摆成展台那一套：站在 target 的 pitch 方向上、与它相距 distance，并且**把参考距离
     // 也设成它**。
@@ -114,15 +116,15 @@ internal sealed partial class CameraModel
             float.IsFinite(distance) && distance > 0f,
             $"[SAMPLE][camera.showcase] 展台距离不是正数 distance={distance}");
 
-        float clamped = Math.Clamp(pitch, -CameraState.MaxPitch, CameraState.MaxPitch);
-        Vector3 forward = CameraState.ForwardOf(_camera.Yaw, clamped);
+        var clamped = Math.Clamp(pitch, -CameraState.MaxPitch, CameraState.MaxPitch);
+        var forward = CameraState.ForwardOf(_camera.Yaw, clamped);
 
-        _zoomDistance = distance;
+        Distance = distance;
         _camera = _camera with
         {
             // 位置 = 目标 − 视线 × 距离：视线指着目标，于是从目标往回退一个距离就是相机该在的地方。
-            Position = target - (forward * distance),
-            Pitch = clamped,
+            Position = target - forward * distance,
+            Pitch = clamped
         };
 
         // 这条断言就是「展台绕着的是模型中心」本身：Target 是派生量（位置 + 视线 × 距离），
@@ -136,8 +138,8 @@ internal sealed partial class CameraModel
 
     internal void Zoom(float steps)
     {
-        float current = Distance;
-        float next = ZoomCore(steps, out float wanted);
+        var current = Distance;
+        var next = ZoomCore(steps, out var wanted);
 
         // 夹住了要打出来：滚轮到底是「推到头停住」还是「推过头把相机丢出去了」，
         // 从画面上看都是「不动了」，只有日志能分开。
@@ -152,7 +154,7 @@ internal sealed partial class CameraModel
     {
         Debug.Assert(float.IsFinite(steps), $"[SAMPLE][camera.zoom] steps 不是有限值 steps={steps}");
 
-        float current = _zoomDistance;
+        var current = Distance;
 
         // 距离可以为负（人物穿过了原来看着的点），只有非有限值才是失效状态——
         // 那会让视图矩阵带着 NaN 走完 GL 全程都不报错，只留一块空白。
@@ -165,18 +167,12 @@ internal sealed partial class CameraModel
         // 原来看着的点）是合法状态——位置继续前移就是了。按方块统一而不按模型缩放：
         // 大模型按比例放步长的话，滚轮在画面上的推进感反而跟不上，而且用户在展台和
         // 自由视角之间得到的手感必须一致。
-        wanted = current - (ZoomStep * steps);
+        wanted = current - ZoomStep * steps;
 
-        float next = wanted;
-        if (_minDistance is { } min)
-        {
-            next = MathF.Max(next, min);
-        }
+        var next = wanted;
+        if (_minDistance is { } min) next = MathF.Max(next, min);
 
-        if (_maxDistance is { } max)
-        {
-            next = MathF.Min(next, max);
-        }
+        if (_maxDistance is { } max) next = MathF.Min(next, max);
 
         // 兜底只剩「算不出有限数」一种（线性运算只有步长×档数极大时才可能溢出）。
         // 负距离不再拦：那是「人物穿过了原来看着的点、继续往前飞」，位置推进语义下
@@ -194,25 +190,25 @@ internal sealed partial class CameraModel
         // 位移取 (current - next) 而不是别的比例：这样 Position + Forward * Distance 在推拉前后
         // 是同一个世界坐标——凑近看某块砖时，目光落在砖上不动，而不是「滚一下砖自己跑了」。
         // 写成「位置按比例缩、方向另算」是 orbit 那个老实现的做法，两处一分开就又有了两个权威。
-        Vector3 forward = _camera.Forward;
-        _zoomDistance = next;
-        _camera = _camera with { Position = _camera.Position + (forward * (current - next)) };
+        var forward = _camera.Forward;
+        Distance = next;
+        _camera = _camera with { Position = _camera.Position + forward * (current - next) };
 
         return next;
     }
 
-    private static string Bound(float? bound) => bound?.ToString("F2") ?? "未设";
+    private static string Bound(float? bound)
+    {
+        return bound?.ToString("F2") ?? "未设";
+    }
 
     // yaw 落在 (-180,180]，两次取值之差可能绕了一圈（179.9 与 -179.9 只差 0.2 度）。
     // 转视角每动一下就归一次，不归的话连续移动会把 yaw 累到几万度，
     // 那时 sin/cos 的精度开始掉，表现是「转了很久之后视角开始抖」。
     private static float Wrap(float degrees)
     {
-        float wrapped = (degrees + 180f) % 360f;
-        if (wrapped < 0f)
-        {
-            wrapped += 360f;
-        }
+        var wrapped = (degrees + 180f) % 360f;
+        if (wrapped < 0f) wrapped += 360f;
 
         return wrapped - 180f;
     }

@@ -41,6 +41,25 @@ internal static class GlRaw
     internal const int GL_DRAW_FRAMEBUFFER = 0x8CA9;
     internal const int GL_FRAMEBUFFER_COMPLETE = 0x8CD5;
 
+    private static Uniform1fDelegate? _uniform1f;
+
+    // ---- 离屏 FBO（超采样）。GLES 3.0 core 的整组入口，ANGLE 上必有；
+    // 入口缺失时 SupersampleTarget.Create 返回 null，调用方退回直画。 ----
+
+    // 入口只在 EnsureSize/Resolve/Dispose 里用，频率远低于每帧一次 GetProcAddress 的代价可忽略，
+    // 但和 Uniform1f 同一处理：缓存委托，省掉重复查表。指针跨上下文安全。
+    private static GenDeleteDelegate? _genFramebuffers;
+    private static BindDelegate? _bindFramebuffer;
+    private static FramebufferTextureDelegate? _framebufferTexture2D;
+    private static GenDeleteDelegate? _genRenderbuffers;
+    private static BindDelegate? _bindRenderbuffer;
+    private static RenderbufferStorageDelegate? _renderbufferStorage;
+    private static FramebufferRenderbufferDelegate? _framebufferRenderbuffer;
+    private static GenDeleteDelegate? _deleteFramebuffers;
+    private static GenDeleteDelegate? _deleteRenderbuffers;
+    private static CheckFramebufferStatusDelegate? _checkFramebufferStatus;
+    private static BlitFramebufferDelegate? _blitFramebuffer;
+
     // 半透明绘制需要的两件事：开混合、把因子设成 srcAlpha / oneMinusSrcAlpha。
     //
     // 抽成一个入口是因为用它的人不止一个（轴线、展台光环），而「谁先建谁顺手设一下」是隐式依赖：
@@ -61,13 +80,11 @@ internal static class GlRaw
     //
     // 返回「这个上下文里到底有没有这个入口」：没有的时候这件事必须让调用方知道，
     // 因为它什么都不做，而「混合没开」在画面上只是「颜色不太对」。
-    internal static bool BlendFuncSeparate(GlInterface gl, int sourceRgb, int destinationRgb, int sourceAlpha, int destinationAlpha)
+    internal static bool BlendFuncSeparate(GlInterface gl, int sourceRgb, int destinationRgb, int sourceAlpha,
+        int destinationAlpha)
     {
-        IntPtr entry = gl.GetProcAddress("glBlendFuncSeparate");
-        if (entry == IntPtr.Zero)
-        {
-            return false;
-        }
+        var entry = gl.GetProcAddress("glBlendFuncSeparate");
+        if (entry == IntPtr.Zero) return false;
 
         Marshal.GetDelegateForFunctionPointer<BlendFuncSeparateDelegate>(entry)(
             sourceRgb, destinationRgb, sourceAlpha, destinationAlpha);
@@ -80,11 +97,8 @@ internal static class GlRaw
     // 并把宽度留在原处。所以调用方得自己判断有没有生效，这里只负责发出去。
     internal static bool LineWidth(GlInterface gl, float width)
     {
-        IntPtr entry = gl.GetProcAddress("glLineWidth");
-        if (entry == IntPtr.Zero)
-        {
-            return false;
-        }
+        var entry = gl.GetProcAddress("glLineWidth");
+        if (entry == IntPtr.Zero) return false;
 
         Marshal.GetDelegateForFunctionPointer<LineWidthDelegate>(entry)(width);
         return true;
@@ -96,11 +110,8 @@ internal static class GlRaw
     // 给之前一整段调用兜了一次底，代价是它给不出出错的位置。
     internal static int GetError(GlInterface gl)
     {
-        IntPtr entry = gl.GetProcAddress("glGetError");
-        if (entry == IntPtr.Zero)
-        {
-            return NoError;
-        }
+        var entry = gl.GetProcAddress("glGetError");
+        if (entry == IntPtr.Zero) return NoError;
 
         return Marshal.GetDelegateForFunctionPointer<GetErrorDelegate>(entry)();
     }
@@ -111,20 +122,17 @@ internal static class GlRaw
     // 宽高用物理像素，与视口一致。
     internal static byte[]? ReadPixels(GlInterface gl, int x, int y, int width, int height)
     {
-        IntPtr entry = gl.GetProcAddress("glReadPixels");
-        if (entry == IntPtr.Zero)
-        {
-            return null;
-        }
+        var entry = gl.GetProcAddress("glReadPixels");
+        if (entry == IntPtr.Zero) return null;
 
-        ReadPixelsDelegate readPixels = Marshal.GetDelegateForFunctionPointer<ReadPixelsDelegate>(entry);
-        int byteCount = width * height * 4;
-        IntPtr buffer = Marshal.AllocHGlobal(byteCount);
+        var readPixels = Marshal.GetDelegateForFunctionPointer<ReadPixelsDelegate>(entry);
+        var byteCount = width * height * 4;
+        var buffer = Marshal.AllocHGlobal(byteCount);
         try
         {
             readPixels(x, y, width, height, GlConsts.GL_RGBA, GlConsts.GL_UNSIGNED_BYTE, buffer);
 
-            byte[] pixels = new byte[byteCount];
+            var pixels = new byte[byteCount];
             Marshal.Copy(buffer, pixels, 0, byteCount);
             return pixels;
         }
@@ -143,19 +151,142 @@ internal static class GlRaw
     {
         if (_uniform1f is null)
         {
-            IntPtr entry = gl.GetProcAddress("glUniform1f");
+            var entry = gl.GetProcAddress("glUniform1f");
             _uniform1f = Marshal.GetDelegateForFunctionPointer<Uniform1fDelegate>(entry);
         }
 
         _uniform1f(location, value);
     }
 
+    // const GLubyte* glGetString(GLenum name)
+    //
+    // 查扩展名用的。返回值指向 GL 内部的字符串，只读不写、不保存指针，
+    // 立刻 marshal 成托管串——GL 什么时候改写它不受我们管。
+    internal static string? GetString(GlInterface gl, int name)
+    {
+        var entry = gl.GetProcAddress("glGetString");
+        if (entry == IntPtr.Zero) return null;
+
+        var result = Marshal.GetDelegateForFunctionPointer<GetStringDelegate>(entry)(name);
+        return result == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(result);
+    }
+
+    // void glGetFloatv(GLenum pname, GLfloat* data)
+    //
+    // 查标量上限（这里是 MAX_TEXTURE_MAX_ANISOTROPY）。单值查询，data 指向一个 float。
+    internal static float? GetFloat(GlInterface gl, int pname)
+    {
+        var entry = gl.GetProcAddress("glGetFloatv");
+        if (entry == IntPtr.Zero) return null;
+
+        var buffer = Marshal.AllocHGlobal(sizeof(float));
+        try
+        {
+            Marshal.GetDelegateForFunctionPointer<GetFloatvDelegate>(entry)(pname, buffer);
+            return Marshal.PtrToStructure<float>(buffer);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    // void glTexParameterf(GLenum target, GLenum pname, GLfloat param)
+    //
+    // 各向异性过滤的档位是 float 参数，GlInterface 自带的 TexParameteri 签名对不上
+    // （发 int 过去在 x64 上参数寄存器宽度一致侥幸能用，但不赌——正确原型就一行）。
+    internal static bool TexParameterf(GlInterface gl, int target, int pname, float param)
+    {
+        var entry = gl.GetProcAddress("glTexParameterf");
+        if (entry == IntPtr.Zero) return false;
+
+        Marshal.GetDelegateForFunctionPointer<TexParameterfDelegate>(entry)(target, pname, param);
+        return true;
+    }
+
+    private static T Cache<T>(GlInterface gl, string name, ref T? cache) where T : Delegate
+    {
+        if (cache is null)
+        {
+            var entry = gl.GetProcAddress(name);
+            cache = entry == IntPtr.Zero
+                ? throw new InvalidOperationException($"[PREVIEWER][gl.raw] 入口缺失 {name}")
+                : Marshal.GetDelegateForFunctionPointer<T>(entry);
+        }
+
+        return cache;
+    }
+
+    // 这组入口没有「可缺省」的余量：要 FBO 就得全有。Create 里逐个探测太啰嗦，
+    // 直接约定——任何一个缺失就抛，SupersampleTarget.Create 捕获后整体降级直画。
+    internal static void GenFramebuffers(GlInterface gl, int count, IntPtr ids)
+    {
+        Cache(gl, "glGenFramebuffers", ref _genFramebuffers)(count, ids);
+    }
+
+    internal static void BindFramebuffer(GlInterface gl, int target, int handle)
+    {
+        Cache(gl, "glBindFramebuffer", ref _bindFramebuffer)(target, handle);
+    }
+
+    internal static void FramebufferTexture2D(GlInterface gl, int target, int attachment, int textureTarget,
+        int texture, int level)
+    {
+        Cache(gl, "glFramebufferTexture2D", ref _framebufferTexture2D)(target, attachment, textureTarget, texture,
+            level);
+    }
+
+    internal static void GenRenderbuffers(GlInterface gl, int count, IntPtr ids)
+    {
+        Cache(gl, "glGenRenderbuffers", ref _genRenderbuffers)(count, ids);
+    }
+
+    internal static void BindRenderbuffer(GlInterface gl, int target, int handle)
+    {
+        Cache(gl, "glBindRenderbuffer", ref _bindRenderbuffer)(target, handle);
+    }
+
+    internal static void RenderbufferStorage(GlInterface gl, int target, int internalFormat, int width, int height)
+    {
+        Cache(gl, "glRenderbufferStorage", ref _renderbufferStorage)(target, internalFormat, width, height);
+    }
+
+    internal static void FramebufferRenderbuffer(GlInterface gl, int target, int attachment, int renderbufferTarget,
+        int renderbuffer)
+    {
+        Cache(gl, "glFramebufferRenderbuffer", ref _framebufferRenderbuffer)(target, attachment, renderbufferTarget,
+            renderbuffer);
+    }
+
+    internal static void DeleteFramebuffers(GlInterface gl, int count, IntPtr ids)
+    {
+        Cache(gl, "glDeleteFramebuffers", ref _deleteFramebuffers)(count, ids);
+    }
+
+    internal static void DeleteRenderbuffers(GlInterface gl, int count, IntPtr ids)
+    {
+        Cache(gl, "glDeleteRenderbuffers", ref _deleteRenderbuffers)(count, ids);
+    }
+
+    internal static int CheckFramebufferStatus(GlInterface gl, int target)
+    {
+        return Cache(gl, "glCheckFramebufferStatus", ref _checkFramebufferStatus)(target);
+    }
+
+    internal static void BlitFramebuffer(GlInterface gl,
+        int srcX0, int srcY0, int srcX1, int srcY1,
+        int dstX0, int dstY0, int dstX1, int dstY1,
+        int mask, int filter)
+    {
+        Cache(gl, "glBlitFramebuffer", ref _blitFramebuffer)(
+            srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
+    }
+
     // GL 的 C 原型在 Windows 上就是 stdcall（x64 上只有一种调用约定，这一栏写什么都一样，
     // 但签名本身必须与原型逐项对上）。这与项目里已有那条 glReadPixels 的写法保持一致。
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate void BlendFuncSeparateDelegate(int sourceRgb, int destinationRgb, int sourceAlpha, int destinationAlpha);
-
-    private static Uniform1fDelegate? _uniform1f;
+    private delegate void BlendFuncSeparateDelegate(int sourceRgb, int destinationRgb, int sourceAlpha,
+        int destinationAlpha);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate void Uniform1fDelegate(int location, float value);
@@ -178,130 +309,6 @@ internal static class GlRaw
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate void TexParameterfDelegate(int target, int pname, float param);
 
-    // const GLubyte* glGetString(GLenum name)
-    //
-    // 查扩展名用的。返回值指向 GL 内部的字符串，只读不写、不保存指针，
-    // 立刻 marshal 成托管串——GL 什么时候改写它不受我们管。
-    internal static string? GetString(GlInterface gl, int name)
-    {
-        IntPtr entry = gl.GetProcAddress("glGetString");
-        if (entry == IntPtr.Zero)
-        {
-            return null;
-        }
-
-        IntPtr result = Marshal.GetDelegateForFunctionPointer<GetStringDelegate>(entry)(name);
-        return result == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(result);
-    }
-
-    // void glGetFloatv(GLenum pname, GLfloat* data)
-    //
-    // 查标量上限（这里是 MAX_TEXTURE_MAX_ANISOTROPY）。单值查询，data 指向一个 float。
-    internal static float? GetFloat(GlInterface gl, int pname)
-    {
-        IntPtr entry = gl.GetProcAddress("glGetFloatv");
-        if (entry == IntPtr.Zero)
-        {
-            return null;
-        }
-
-        IntPtr buffer = Marshal.AllocHGlobal(sizeof(float));
-        try
-        {
-            Marshal.GetDelegateForFunctionPointer<GetFloatvDelegate>(entry)(pname, buffer);
-            return Marshal.PtrToStructure<float>(buffer);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
-    }
-
-    // void glTexParameterf(GLenum target, GLenum pname, GLfloat param)
-    //
-    // 各向异性过滤的档位是 float 参数，GlInterface 自带的 TexParameteri 签名对不上
-    // （发 int 过去在 x64 上参数寄存器宽度一致侥幸能用，但不赌——正确原型就一行）。
-    internal static bool TexParameterf(GlInterface gl, int target, int pname, float param)
-    {
-        IntPtr entry = gl.GetProcAddress("glTexParameterf");
-        if (entry == IntPtr.Zero)
-        {
-            return false;
-        }
-
-        Marshal.GetDelegateForFunctionPointer<TexParameterfDelegate>(entry)(target, pname, param);
-        return true;
-    }
-
-    // ---- 离屏 FBO（超采样）。GLES 3.0 core 的整组入口，ANGLE 上必有；
-    // 入口缺失时 SupersampleTarget.Create 返回 null，调用方退回直画。 ----
-
-    // 入口只在 EnsureSize/Resolve/Dispose 里用，频率远低于每帧一次 GetProcAddress 的代价可忽略，
-    // 但和 Uniform1f 同一处理：缓存委托，省掉重复查表。指针跨上下文安全。
-    private static GenDeleteDelegate? _genFramebuffers;
-    private static BindDelegate? _bindFramebuffer;
-    private static FramebufferTextureDelegate? _framebufferTexture2D;
-    private static GenDeleteDelegate? _genRenderbuffers;
-    private static BindDelegate? _bindRenderbuffer;
-    private static RenderbufferStorageDelegate? _renderbufferStorage;
-    private static FramebufferRenderbufferDelegate? _framebufferRenderbuffer;
-    private static GenDeleteDelegate? _deleteFramebuffers;
-    private static GenDeleteDelegate? _deleteRenderbuffers;
-    private static CheckFramebufferStatusDelegate? _checkFramebufferStatus;
-    private static BlitFramebufferDelegate? _blitFramebuffer;
-
-    private static T Cache<T>(GlInterface gl, string name, ref T? cache) where T : Delegate
-    {
-        if (cache is null)
-        {
-            IntPtr entry = gl.GetProcAddress(name);
-            cache = entry == IntPtr.Zero
-                ? throw new InvalidOperationException($"[PREVIEWER][gl.raw] 入口缺失 {name}")
-                : Marshal.GetDelegateForFunctionPointer<T>(entry);
-        }
-
-        return cache;
-    }
-
-    // 这组入口没有「可缺省」的余量：要 FBO 就得全有。Create 里逐个探测太啰嗦，
-    // 直接约定——任何一个缺失就抛，SupersampleTarget.Create 捕获后整体降级直画。
-    internal static void GenFramebuffers(GlInterface gl, int count, IntPtr ids) =>
-        Cache(gl, "glGenFramebuffers", ref _genFramebuffers)(count, ids);
-
-    internal static void BindFramebuffer(GlInterface gl, int target, int handle) =>
-        Cache(gl, "glBindFramebuffer", ref _bindFramebuffer)(target, handle);
-
-    internal static void FramebufferTexture2D(GlInterface gl, int target, int attachment, int textureTarget, int texture, int level) =>
-        Cache(gl, "glFramebufferTexture2D", ref _framebufferTexture2D)(target, attachment, textureTarget, texture, level);
-
-    internal static void GenRenderbuffers(GlInterface gl, int count, IntPtr ids) =>
-        Cache(gl, "glGenRenderbuffers", ref _genRenderbuffers)(count, ids);
-
-    internal static void BindRenderbuffer(GlInterface gl, int target, int handle) =>
-        Cache(gl, "glBindRenderbuffer", ref _bindRenderbuffer)(target, handle);
-
-    internal static void RenderbufferStorage(GlInterface gl, int target, int internalFormat, int width, int height) =>
-        Cache(gl, "glRenderbufferStorage", ref _renderbufferStorage)(target, internalFormat, width, height);
-
-    internal static void FramebufferRenderbuffer(GlInterface gl, int target, int attachment, int renderbufferTarget, int renderbuffer) =>
-        Cache(gl, "glFramebufferRenderbuffer", ref _framebufferRenderbuffer)(target, attachment, renderbufferTarget, renderbuffer);
-
-    internal static void DeleteFramebuffers(GlInterface gl, int count, IntPtr ids) =>
-        Cache(gl, "glDeleteFramebuffers", ref _deleteFramebuffers)(count, ids);
-
-    internal static void DeleteRenderbuffers(GlInterface gl, int count, IntPtr ids) =>
-        Cache(gl, "glDeleteRenderbuffers", ref _deleteRenderbuffers)(count, ids);
-
-    internal static int CheckFramebufferStatus(GlInterface gl, int target) =>
-        Cache(gl, "glCheckFramebufferStatus", ref _checkFramebufferStatus)(target);
-
-    internal static void BlitFramebuffer(GlInterface gl,
-        int srcX0, int srcY0, int srcX1, int srcY1,
-        int dstX0, int dstY0, int dstX1, int dstY1,
-        int mask, int filter) =>
-        Cache(gl, "glBlitFramebuffer", ref _blitFramebuffer)(
-            srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
-
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate void GenDeleteDelegate(int count, IntPtr ids);
 
@@ -309,13 +316,15 @@ internal static class GlRaw
     private delegate void BindDelegate(int target, int handle);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate void FramebufferTextureDelegate(int target, int attachment, int textureTarget, int texture, int level);
+    private delegate void FramebufferTextureDelegate(int target, int attachment, int textureTarget, int texture,
+        int level);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate void RenderbufferStorageDelegate(int target, int internalFormat, int width, int height);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate void FramebufferRenderbufferDelegate(int target, int attachment, int renderbufferTarget, int renderbuffer);
+    private delegate void FramebufferRenderbufferDelegate(int target, int attachment, int renderbufferTarget,
+        int renderbuffer);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int CheckFramebufferStatusDelegate(int target);

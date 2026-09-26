@@ -67,7 +67,8 @@
 
           <!-- 拖一个 .litematic 进窗口（或命令行带文件路径）之后这里出现当前模型的读数。 -->
           <TextBlock Text="文件" FontWeight="SemiBold" />
-          <TextBlock x:Name="FileText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" Text="（未载入 — 拖入 .litematic）" />
+          <TextBlock x:Name="FileText" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap"
+                     Text="（未载入 — 拖入 .litematic）" />
 
           <Separator Margin="0,8,0,0" />
 

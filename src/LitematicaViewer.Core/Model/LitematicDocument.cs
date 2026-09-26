@@ -16,10 +16,7 @@ public sealed record LitematicDocument(
     public static long CountNonAirBlocks(ImmutableArray<LitematicRegion> regions)
     {
         long total = 0;
-        foreach (LitematicRegion region in regions)
-        {
-            total += region.CountNonAirBlocks();
-        }
+        foreach (var region in regions) total += region.CountNonAirBlocks();
 
         return total;
     }

@@ -1,6 +1,5 @@
 using System.Numerics;
 using LitematicaViewer.Core.Model;
-using LitematicaViewer.Core.Parsing;
 
 namespace LitematicaViewer.Core.Tests;
 
@@ -26,27 +25,21 @@ public static class PickingReference
         block = default;
         distance = 0f;
 
-        if (step <= 0f || direction.LengthSquared() < 1e-12f)
-        {
-            return false;
-        }
+        if (step <= 0f || direction.LengthSquared() < 1e-12f) return false;
 
-        Vector3 dir = Vector3.Normalize(direction);
+        var dir = Vector3.Normalize(direction);
 
-        for (float t = 0f; t <= maxDistance; t += step)
+        for (var t = 0f; t <= maxDistance; t += step)
         {
-            Vector3 point = origin + (dir * t);
+            var point = origin + dir * t;
             Vector3I cell = new(
                 (int)MathF.Floor(point.X),
                 (int)MathF.Floor(point.Y),
                 (int)MathF.Floor(point.Z));
 
-            foreach (LitematicRegion region in document.Regions)
+            foreach (var region in document.Regions)
             {
-                if (!region.Bounds.Contains(cell) || region.GetState(cell).IsAir)
-                {
-                    continue;
-                }
+                if (!region.Bounds.Contains(cell) || region.GetState(cell).IsAir) continue;
 
                 block = cell;
                 distance = t;

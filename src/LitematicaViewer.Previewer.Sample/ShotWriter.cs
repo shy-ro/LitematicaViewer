@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 
 namespace LitematicaViewer.Previewer.Sample;
 
@@ -19,12 +20,12 @@ internal static class ShotWriter
         using FileStream file = new(path, FileMode.Create, FileAccess.Write);
         using BinaryWriter writer = new(file);
         writer.Write("P6\n"u8);
-        writer.Write(System.Text.Encoding.ASCII.GetBytes($"{width} {height}\n255\n"));
-        byte[] row = new byte[width * 3];
-        for (int y = height - 1; y >= 0; y--)
+        writer.Write(Encoding.ASCII.GetBytes($"{width} {height}\n255\n"));
+        var row = new byte[width * 3];
+        for (var y = height - 1; y >= 0; y--)
         {
-            int source = y * width * 4;
-            for (int x = 0; x < width; x++)
+            var source = y * width * 4;
+            for (var x = 0; x < width; x++)
             {
                 row[x * 3 + 0] = rgba[source + x * 4 + 0];
                 row[x * 3 + 1] = rgba[source + x * 4 + 1];
@@ -42,14 +43,10 @@ internal static class ShotWriter
         using FileStream file = new(path, FileMode.Create, FileAccess.Write);
         using BinaryWriter writer = new(file);
         writer.Write("P5\n"u8);
-        writer.Write(System.Text.Encoding.ASCII.GetBytes($"{width} {height}\n255\n"));
-        for (int y = 0; y < height; y++)
-        {
-            for (int x = 0; x < width; x++)
-            {
-                writer.Write(rgbaLevel0[((y * width) + x) * 4 + 3]);
-            }
-        }
+        writer.Write(Encoding.ASCII.GetBytes($"{width} {height}\n255\n"));
+        for (var y = 0; y < height; y++)
+        for (var x = 0; x < width; x++)
+            writer.Write(rgbaLevel0[(y * width + x) * 4 + 3]);
     }
 
     // 把上传给 GPU 的图集层 0 dump 成 PPM（RGBA 丢 alpha，原点已在左上不用翻）。
@@ -60,11 +57,11 @@ internal static class ShotWriter
         using FileStream file = new(path, FileMode.Create, FileAccess.Write);
         using BinaryWriter writer = new(file);
         writer.Write("P6\n"u8);
-        writer.Write(System.Text.Encoding.ASCII.GetBytes($"{width} {height}\n255\n"));
-        for (int y = 0; y < height; y++)
+        writer.Write(Encoding.ASCII.GetBytes($"{width} {height}\n255\n"));
+        for (var y = 0; y < height; y++)
         {
-            int source = y * width * 4;
-            for (int x = 0; x < width; x++)
+            var source = y * width * 4;
+            for (var x = 0; x < width; x++)
             {
                 writer.Write(rgbaLevel0[source + x * 4 + 0]);
                 writer.Write(rgbaLevel0[source + x * 4 + 1]);

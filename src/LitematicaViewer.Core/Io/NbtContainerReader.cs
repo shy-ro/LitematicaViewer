@@ -7,7 +7,7 @@ public enum NbtCompression
 {
     None,
     GZip,
-    ZLib,
+    ZLib
 }
 
 public readonly record struct NbtContainer(byte[] Payload, NbtCompression Compression);
@@ -18,12 +18,12 @@ public static class NbtContainerReader
 {
     public static NbtContainer Read(ReadOnlySpan<byte> bytes)
     {
-        NbtCompression compression = Sniff(bytes);
-        byte[] payload = compression switch
+        var compression = Sniff(bytes);
+        var payload = compression switch
         {
             NbtCompression.GZip => Decompress(bytes, static s => new GZipStream(s, CompressionMode.Decompress)),
             NbtCompression.ZLib => Decompress(bytes, static s => new ZLibStream(s, CompressionMode.Decompress)),
-            _ => bytes.ToArray(),
+            _ => bytes.ToArray()
         };
 
         Debug.WriteLine(
@@ -35,25 +35,20 @@ public static class NbtContainerReader
 
     private static NbtCompression Sniff(ReadOnlySpan<byte> bytes)
     {
-        if (bytes.Length >= 2 && bytes[0] == 0x1F && bytes[1] == 0x8B)
-        {
-            return NbtCompression.GZip;
-        }
+        if (bytes.Length >= 2 && bytes[0] == 0x1F && bytes[1] == 0x8B) return NbtCompression.GZip;
 
         // zlib：首字节低半字节是压缩方法（8 = deflate），前两字节大端组成 16 位值必须是 31 的倍数。
         // 不硬编码 78 01 / 78 9C / 78 DA，因为窗口大小与预设等级的组合不止那三种。
-        if (bytes.Length >= 2 && (bytes[0] & 0x0F) == 0x08 && (((bytes[0] << 8) | bytes[1]) % 31) == 0)
-        {
+        if (bytes.Length >= 2 && (bytes[0] & 0x0F) == 0x08 && ((bytes[0] << 8) | bytes[1]) % 31 == 0)
             return NbtCompression.ZLib;
-        }
 
         return NbtCompression.None;
     }
 
     private static byte[] Decompress(ReadOnlySpan<byte> bytes, Func<Stream, Stream> wrap)
     {
-        using MemoryStream input = new(bytes.ToArray(), writable: false);
-        using Stream decompressor = wrap(input);
+        using MemoryStream input = new(bytes.ToArray(), false);
+        using var decompressor = wrap(input);
         using MemoryStream output = new();
         decompressor.CopyTo(output);
         return output.ToArray();

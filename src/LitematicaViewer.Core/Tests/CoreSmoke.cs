@@ -11,12 +11,11 @@ namespace LitematicaViewer.Core.Tests;
 // 不引 xUnit：这些检查要的是"在真实文件上现场看一眼"，不是一个可重复的报告。
 public static class CoreSmoke
 {
-    private static int _failures;
-    private static int _checks;
-
     private const string AirName = "minecraft:air";
     private const string StoneName = "minecraft:stone";
     private const string DirtName = "minecraft:dirt";
+    private static int _failures;
+    private static int _checks;
 
     public static int Main(string[] args)
     {
@@ -40,10 +39,7 @@ public static class CoreSmoke
         CheckPickingNearestRegion();
         CheckPickingAgainstReference();
 
-        foreach (string path in args)
-        {
-            CheckRealFile(path);
-        }
+        foreach (var path in args) CheckRealFile(path);
 
         Debug.WriteLine($"[CORE][smoke.end] checks={_checks} failures={_failures} expected=0");
         Console.WriteLine($"CoreSmoke: checks={_checks} failures={_failures}");
@@ -58,12 +54,12 @@ public static class CoreSmoke
     {
         (int Palette, int Bits)[] cases =
         [
-            (1, 0), (2, 2), (3, 2), (4, 2), (5, 3), (17, 5), (256, 8), (257, 9), (459, 9), (4096, 12),
+            (1, 0), (2, 2), (3, 2), (4, 2), (5, 3), (17, 5), (256, 8), (257, 9), (459, 9), (4096, 12)
         ];
 
-        foreach ((int palette, int expected) in cases)
+        foreach (var (palette, expected) in cases)
         {
-            int actual = BlockStatesCodec.GetBitsPerBlock(palette);
+            var actual = BlockStatesCodec.GetBitsPerBlock(palette);
             Check(actual == expected, $"bitsPerBlock palette={palette} actual={actual} expected={expected}");
         }
     }
@@ -74,15 +70,17 @@ public static class CoreSmoke
         // 而随机长度的用例几乎撞不到这条分支。
         (int Palette, int Count)[] cases = [(1, 16), (2, 9), (8, 22), (17, 100), (256, 1000), (4096, 100)];
 
-        foreach ((int palette, int count) in cases)
+        foreach (var (palette, count) in cases)
         {
             ImmutableArray<int> source = [.. Enumerable.Range(0, count).Select(i => i % palette)];
-            long[] packed = BlockStatesCodec.Pack(source.AsSpan(), palette);
-            ImmutableArray<int> restored = BlockStatesCodec.Unpack(packed, count, palette);
+            var packed = BlockStatesCodec.Pack(source.AsSpan(), palette);
+            var restored = BlockStatesCodec.Unpack(packed, count, palette);
 
-            int expectedLongs = BlockStatesCodec.GetPackedLongCount(count, palette);
-            Check(packed.Length == expectedLongs, $"packedLongs palette={palette} count={count} actual={packed.Length} expected={expectedLongs}");
-            Check(restored.SequenceEqual(source), $"roundTrip palette={palette} count={count} mismatched={CountMismatches(source, restored)}");
+            var expectedLongs = BlockStatesCodec.GetPackedLongCount(count, palette);
+            Check(packed.Length == expectedLongs,
+                $"packedLongs palette={palette} count={count} actual={packed.Length} expected={expectedLongs}");
+            Check(restored.SequenceEqual(source),
+                $"roundTrip palette={palette} count={count} mismatched={CountMismatches(source, restored)}");
         }
     }
 
@@ -98,20 +96,17 @@ public static class CoreSmoke
 
     private static void CheckSingleStateRegion()
     {
-        byte[] bytes = CoreFixtureBuilder.BuildLitematic(
+        var bytes = CoreFixtureBuilder.BuildLitematic(
             "single",
             new Vector3I(0, 0, 0),
             new Vector3I(2, 2, 2),
             ["minecraft:air"],
             [0, 0, 0, 0, 0, 0, 0, 0]);
 
-        LoadResult result = LitematicLoader.TryLoad(bytes, "fixture://single-state");
-        if (!RequireSuccess(result, "single-state region"))
-        {
-            return;
-        }
+        var result = LitematicLoader.TryLoad(bytes, "fixture://single-state");
+        if (!RequireSuccess(result, "single-state region")) return;
 
-        LitematicRegion region = result.Document!.Regions[0];
+        var region = result.Document!.Regions[0];
         Check(region.BlockIndices.Length == 8, $"single-state indices={region.BlockIndices.Length} expected=8");
         Check(region.BlockIndices.All(static i => i == 0), "single-state all indices should be palette[0]");
         Check(result.Document.TotalBlocks == 0, $"single-state totalBlocks={result.Document.TotalBlocks} expected=0");
@@ -121,21 +116,19 @@ public static class CoreSmoke
     // 直接 Position + Size - 1 会得到 (8,4,16) 这种完全错位的角落。
     private static void CheckNegativeSizeRegion()
     {
-        byte[] bytes = CoreFixtureBuilder.BuildLitematic(
+        var bytes = CoreFixtureBuilder.BuildLitematic(
             "negative",
             new Vector3I(4, 2, 8),
             new Vector3I(-5, -3, -9),
             ["minecraft:air", "minecraft:stone"],
             [.. Enumerable.Range(0, 135).Select(static i => i % 2)]);
 
-        LoadResult result = LitematicLoader.TryLoad(bytes, "fixture://negative-size");
-        if (!RequireSuccess(result, "negative-size region"))
-        {
-            return;
-        }
+        var result = LitematicLoader.TryLoad(bytes, "fixture://negative-size");
+        if (!RequireSuccess(result, "negative-size region")) return;
 
-        LitematicRegion region = result.Document!.Regions[0];
-        Check(region.Bounds.Min == new Vector3I(-1, -1, -1), $"negative-size min={region.Bounds.Min} expected=(-1,-1,-1)");
+        var region = result.Document!.Regions[0];
+        Check(region.Bounds.Min == new Vector3I(-1, -1, -1),
+            $"negative-size min={region.Bounds.Min} expected=(-1,-1,-1)");
         Check(region.Bounds.Max == new Vector3I(3, 1, 7), $"negative-size max={region.Bounds.Max} expected=(3,1,7)");
         Check(region.Bounds.Size == new Vector3I(5, 3, 9), $"negative-size size={region.Bounds.Size} expected=(5,3,9)");
         Check(region.Volume == 135, $"negative-size volume={region.Volume} expected=135");
@@ -145,25 +138,22 @@ public static class CoreSmoke
     private static void CheckIndexRoundTrip()
     {
         Vector3I size = new(7, 3, 5);
-        byte[] bytes = CoreFixtureBuilder.BuildLitematic(
+        var bytes = CoreFixtureBuilder.BuildLitematic(
             "index",
             Vector3I.Zero,
             size,
             ["minecraft:air", "minecraft:stone", "minecraft:dirt"],
             [.. Enumerable.Repeat(0, 7 * 3 * 5)]);
 
-        LoadResult result = LitematicLoader.TryLoad(bytes, "fixture://index-round-trip");
-        if (!RequireSuccess(result, "index round trip"))
-        {
-            return;
-        }
+        var result = LitematicLoader.TryLoad(bytes, "fixture://index-round-trip");
+        if (!RequireSuccess(result, "index round trip")) return;
 
-        LitematicRegion region = result.Document!.Regions[0];
-        int volume = (int)region.Volume;
-        int[] probes = [0, 1, size.X - 1, size.X, 1 + (2 * size.X), volume - 1];
-        foreach (int index in probes)
+        var region = result.Document!.Regions[0];
+        var volume = (int)region.Volume;
+        int[] probes = [0, 1, size.X - 1, size.X, 1 + 2 * size.X, volume - 1];
+        foreach (var index in probes)
         {
-            Vector3I local = region.ToLocal(index);
+            var local = region.ToLocal(index);
             Check(region.ToIndex(local.X, local.Y, local.Z) == index,
                 $"indexRoundTrip index={index} local={local} back={region.ToIndex(local.X, local.Y, local.Z)}");
         }
@@ -175,7 +165,7 @@ public static class CoreSmoke
 
     private static void CheckErrorInputs()
     {
-        byte[] good = CoreFixtureBuilder.BuildLitematic(
+        var good = CoreFixtureBuilder.BuildLitematic(
             "ok",
             Vector3I.Zero,
             new Vector3I(2, 2, 2),
@@ -198,18 +188,16 @@ public static class CoreSmoke
     private static void CheckPicking()
     {
         // 5×5×5 里只放一个石头，局部 (2,2,2)，下标 = (2*5+2)*5+2 = 62。
-        int[] indices = new int[125];
+        var indices = new int[125];
         indices[62] = 1;
 
-        LoadResult loaded = LitematicLoader.TryLoad(
-            CoreFixtureBuilder.BuildLitematic("pick", Vector3I.Zero, new Vector3I(5, 5, 5), [AirName, StoneName], [.. indices]),
+        var loaded = LitematicLoader.TryLoad(
+            CoreFixtureBuilder.BuildLitematic("pick", Vector3I.Zero, new Vector3I(5, 5, 5), [AirName, StoneName],
+                [.. indices]),
             "fixture://pick-single-block");
-        if (!RequireSuccess(loaded, "pick single block"))
-        {
-            return;
-        }
+        if (!RequireSuccess(loaded, "pick single block")) return;
 
-        LitematicDocument document = loaded.Document!;
+        var document = loaded.Document!;
 
         // 方块占 [2,3)³，所以从负方向打进来距离是 12（到 x=2），从正方向是 9（到 x=3）。
         (Vector3 Origin, Vector3 Direction, VoxelFace Face, float Distance)[] axes =
@@ -219,17 +207,14 @@ public static class CoreSmoke
             (new Vector3(2.5f, -10f, 2.5f), new Vector3(0f, 1f, 0f), VoxelFace.Down, 12f),
             (new Vector3(2.5f, 12f, 2.5f), new Vector3(0f, -1f, 0f), VoxelFace.Up, 9f),
             (new Vector3(2.5f, 2.5f, -10f), new Vector3(0f, 0f, 1f), VoxelFace.North, 12f),
-            (new Vector3(2.5f, 2.5f, 12f), new Vector3(0f, 0f, -1f), VoxelFace.South, 9f),
+            (new Vector3(2.5f, 2.5f, 12f), new Vector3(0f, 0f, -1f), VoxelFace.South, 9f)
         ];
 
-        foreach ((Vector3 origin, Vector3 direction, VoxelFace face, float distance) in axes)
+        foreach (var (origin, direction, face, distance) in axes)
         {
-            bool hit = VoxelPicker.TryPick(document, origin, direction, out VoxelHit pick, 64f);
+            var hit = VoxelPicker.TryPick(document, origin, direction, out var pick, 64f);
             Check(hit, $"pick.axis origin={origin} dir={direction} hit={hit} expected=True");
-            if (!hit)
-            {
-                continue;
-            }
+            if (!hit) continue;
 
             Check(pick.BlockPosition == new Vector3I(2, 2, 2),
                 $"pick.axis origin={origin} block={pick.BlockPosition} expected=(2,2,2)");
@@ -241,13 +226,15 @@ public static class CoreSmoke
 
         // 起点在方块内部：没有穿过任何一个面，距离是 0。面用 None 而不是硬凑一个方向，
         // 否则调用方会拿它去算相邻方块，得到一个并不相邻的坐标。
-        bool inside = VoxelPicker.TryPick(document, new Vector3(2.5f, 2.5f, 2.5f), new Vector3(1f, 0f, 0f), out VoxelHit inner, 64f);
+        var inside = VoxelPicker.TryPick(document, new Vector3(2.5f, 2.5f, 2.5f), new Vector3(1f, 0f, 0f),
+            out var inner, 64f);
         Check(inside && inner.Face == VoxelFace.None && inner.Distance == 0f,
             $"pick.inside hit={inside} face={(inside ? inner.Face : VoxelFace.None)} " +
             $"distance={(inside ? inner.Distance : -1f)} expected=None/0");
 
         // 起点在区域内部的空气里：脸由进入那一格的方向决定，不是 None。
-        bool inAir = VoxelPicker.TryPick(document, new Vector3(0.5f, 2.5f, 2.5f), new Vector3(1f, 0f, 0f), out VoxelHit airHit, 64f);
+        var inAir = VoxelPicker.TryPick(document, new Vector3(0.5f, 2.5f, 2.5f), new Vector3(1f, 0f, 0f),
+            out var airHit, 64f);
         Check(inAir && airHit.Face == VoxelFace.West && MathF.Abs(airHit.Distance - 1.5f) < 1e-3f,
             $"pick.innerAir hit={inAir} face={(inAir ? airHit.Face : VoxelFace.None)} " +
             $"distance={(inAir ? airHit.Distance : -1f)} expected=West/1.5");
@@ -267,20 +254,15 @@ public static class CoreSmoke
         RegionSpec far = new("far", new Vector3I(10, 0, 0), new Vector3I(3, 3, 3), [StoneName], [.. new int[27]]);
         RegionSpec near = new("near", new Vector3I(0, 0, 0), new Vector3I(3, 3, 3), [StoneName], [.. new int[27]]);
 
-        LoadResult loaded = LitematicLoader.TryLoad(
+        var loaded = LitematicLoader.TryLoad(
             CoreFixtureBuilder.BuildLitematic(true, far, near),
             "fixture://pick-nearest-region");
-        if (!RequireSuccess(loaded, "pick nearest region"))
-        {
-            return;
-        }
+        if (!RequireSuccess(loaded, "pick nearest region")) return;
 
-        bool hit = VoxelPicker.TryPick(loaded.Document!, new Vector3(-10f, 1.5f, 1.5f), new Vector3(1f, 0f, 0f), out VoxelHit pick, 64f);
+        var hit = VoxelPicker.TryPick(loaded.Document!, new Vector3(-10f, 1.5f, 1.5f), new Vector3(1f, 0f, 0f),
+            out var pick, 64f);
         Check(hit, $"pick.nearest hit={hit} expected=True");
-        if (!hit)
-        {
-            return;
-        }
+        if (!hit) return;
 
         Check(pick.Region.Name == "near", $"pick.nearest region='{pick.Region.Name}' expected='near'");
         Check(pick.BlockPosition == new Vector3I(0, 1, 1), $"pick.nearest block={pick.BlockPosition} expected=(0,1,1)");
@@ -294,23 +276,19 @@ public static class CoreSmoke
         const int SizeX = 8;
         const int SizeY = 6;
         const int SizeZ = 4;
-        int[] indices = new int[SizeX * SizeY * SizeZ];
+        var indices = new int[SizeX * SizeY * SizeZ];
 
-        for (int y = 0; y < SizeY; y++)
+        for (var y = 0; y < SizeY; y++)
+        for (var z = 0; z < SizeZ; z++)
+        for (var x = 0; x < SizeX; x++)
         {
-            for (int z = 0; z < SizeZ; z++)
-            {
-                for (int x = 0; x < SizeX; x++)
-                {
-                    int index = (((y * SizeZ) + z) * SizeX) + x;
+            var index = (y * SizeZ + z) * SizeX + x;
 
-                    // 稀疏且不成层。一层一层的图案会让"整格跳过去"这类错误蒙混过关。
-                    indices[index] = ((x * 7) + (y * 13) + (z * 29)) % 5 == 0 ? (index % 2 == 0 ? 1 : 2) : 0;
-                }
-            }
+            // 稀疏且不成层。一层一层的图案会让"整格跳过去"这类错误蒙混过关。
+            indices[index] = (x * 7 + y * 13 + z * 29) % 5 == 0 ? index % 2 == 0 ? 1 : 2 : 0;
         }
 
-        LoadResult loaded = LitematicLoader.TryLoad(
+        var loaded = LitematicLoader.TryLoad(
             CoreFixtureBuilder.BuildLitematic(
                 "cross",
                 Vector3I.Zero,
@@ -318,47 +296,44 @@ public static class CoreSmoke
                 [AirName, StoneName, DirtName],
                 [.. indices]),
             "fixture://pick-cross-check");
-        if (!RequireSuccess(loaded, "pick cross check"))
-        {
-            return;
-        }
+        if (!RequireSuccess(loaded, "pick cross check")) return;
 
-        LitematicDocument document = loaded.Document!;
+        var document = loaded.Document!;
 
         // 瞄的是某一格的中心，不是盒子中心。盒子中心在整数坐标上，那是八格共用的顶点，
         // 每条射线都会从一个格子的角上掠过——掠出来的碎片格宽度只有万分之一，
         // 等步长采样永远采不到，于是每条射线都报一次"两边不一致"。
-        Vector3 center = new((SizeX * 0.5f) + 0.5f, (SizeY * 0.5f) + 0.5f, (SizeZ * 0.5f) + 0.5f);
-        float diagonal = new Vector3(SizeX, SizeY, SizeZ).Length();
+        Vector3 center = new(SizeX * 0.5f + 0.5f, SizeY * 0.5f + 0.5f, SizeZ * 0.5f + 0.5f);
+        var diagonal = new Vector3(SizeX, SizeY, SizeZ).Length();
 
         // 起点在盒子外一个半对角线处，射程留到三个对角线：射线必须在盒子的两侧都有余量。
         // 一格被完整穿过时至少占一个单位的参数长度（要离开一格必须整面跨出去），
         // 所以 0.01 的采样步长绝不会漏掉完整的一格；只有被 maxDistance 截断的那一格
         // 才会短于一步。射程正好切在盒子中间时，等步长采样漏掉末尾那格，
         // 看上去就像拾取凭空多命中了一个方块。
-        float startRadius = diagonal * 1.5f;
-        float maxDistance = diagonal * 3f;
+        var startRadius = diagonal * 1.5f;
+        var maxDistance = diagonal * 3f;
         const float Step = 0.01f;
 
         Random random = new(20260925);
-        int hits = 0;
-        int ahead = 0;
-        int mismatches = 0;
+        var hits = 0;
+        var ahead = 0;
+        var mismatches = 0;
 
-        for (int i = 0; i < 128; i++)
+        for (var i = 0; i < 128; i++)
         {
             // 起点随机但方向一律指向盒心，保证每条射线都真的穿过这堆方块，
             // 不然大半条射线打空，"零命中"这种错误反而看不出来。
-            Vector3 from = center + (RandomDirection(random) * startRadius);
-            Vector3 direction = Vector3.Normalize(center - from);
+            var from = center + RandomDirection(random) * startRadius;
+            var direction = Vector3.Normalize(center - from);
 
-            bool ddaHit = VoxelPicker.TryPick(document, from, direction, out VoxelHit pick, maxDistance);
-            bool referenceHit = PickingReference.TryMarch(
-                document, from, direction, maxDistance, Step, out Vector3I block, out float distance);
+            var ddaHit = VoxelPicker.TryPick(document, from, direction, out var pick, maxDistance);
+            var referenceHit = PickingReference.TryMarch(
+                document, from, direction, maxDistance, Step, out var block, out var distance);
 
             // 基准在更近的地方命中了实心块，而拾取没命中、或者报了个更远的格子。
             // 这一条是"整格跳过去"那类错误唯一的表现形式，不放过。
-            if (referenceHit && (!ddaHit || pick.Distance > distance + (Step * 2f)))
+            if (referenceHit && (!ddaHit || pick.Distance > distance + Step * 2f))
             {
                 mismatches++;
                 Debug.WriteLine(
@@ -367,16 +342,13 @@ public static class CoreSmoke
                 continue;
             }
 
-            if (!ddaHit)
-            {
-                continue;
-            }
+            if (!ddaHit) continue;
 
             hits++;
 
             // 拾取自己说命中了这一格，就用射线本身去验：报出来的格子必须真的含有
             // 射线上的那个点。跳格、算错下标、报错区域，都会在这里露出来。
-            if (!CellHoldsPoint(pick, from, direction, out Vector3I pointCell, out Vector3 point))
+            if (!CellHoldsPoint(pick, from, direction, out var pointCell, out var point))
             {
                 mismatches++;
                 Debug.WriteLine(
@@ -386,11 +358,9 @@ public static class CoreSmoke
             }
 
             if (pick.BlockPosition != block || MathF.Abs(pick.Distance - distance) > Step * 2f)
-            {
                 // 拾取比基准更早命中，且它的结果自洽。基准漏掉的那一格必然是被盒子边界
                 // 或者格子尖角截出来的碎片——完整的一格它漏不掉。
                 ahead++;
-            }
         }
 
         Check(mismatches == 0,
@@ -404,13 +374,13 @@ public static class CoreSmoke
     private static void CheckPickingRealFile(LitematicDocument document)
     {
         LitematicRegion? region = null;
-        int aimIndex = -1;
+        var aimIndex = -1;
 
-        foreach (LitematicRegion candidate in document.Regions)
+        foreach (var candidate in document.Regions)
         {
-            for (int i = 0; i < candidate.BlockIndices.Length; i++)
+            for (var i = 0; i < candidate.BlockIndices.Length; i++)
             {
-                int paletteIndex = candidate.BlockIndices[i];
+                var paletteIndex = candidate.BlockIndices[i];
                 if ((uint)paletteIndex < (uint)candidate.Palette.Length && !candidate.Palette[paletteIndex].IsAir)
                 {
                     region = candidate;
@@ -419,10 +389,7 @@ public static class CoreSmoke
                 }
             }
 
-            if (region is not null)
-            {
-                break;
-            }
+            if (region is not null) break;
         }
 
         if (region is null || aimIndex < 0)
@@ -431,17 +398,14 @@ public static class CoreSmoke
             return;
         }
 
-        Vector3I aim = region.Bounds.Min + region.ToLocal(aimIndex);
+        var aim = region.Bounds.Min + region.ToLocal(aimIndex);
         Vector3 origin = new(region.Bounds.Min.X - 1f, aim.Y + 0.5f, aim.Z + 0.5f);
         Vector3 direction = new(1f, 0f, 0f);
-        float maxDistance = (region.Bounds.Max.X - region.Bounds.Min.X) + 4f;
+        var maxDistance = region.Bounds.Max.X - region.Bounds.Min.X + 4f;
 
-        bool hit = VoxelPicker.TryPick(document, origin, direction, out VoxelHit pick, maxDistance);
+        var hit = VoxelPicker.TryPick(document, origin, direction, out var pick, maxDistance);
         Check(hit, $"pick.real region='{region.Name}' aim={aim} hit={hit} expected=True");
-        if (!hit)
-        {
-            return;
-        }
+        if (!hit) return;
 
         Check(!pick.State.IsAir, $"pick.real block={pick.BlockPosition} state={pick.State} expected=非空气");
         Check(region.Bounds.Contains(pick.BlockPosition),
@@ -450,8 +414,8 @@ public static class CoreSmoke
             $"pick.real paletteIndex={pick.PaletteIndex} paletteSize={pick.Region.Palette.Length} expected=在调色板内");
 
         // 这条射线是轴对齐且穿过格子中心的，两者没有掠射的余地，可以直接要求逐项相等。
-        bool referenceHit = PickingReference.TryMarch(
-            document, origin, direction, maxDistance, 0.01f, out Vector3I block, out float refDistance);
+        var referenceHit = PickingReference.TryMarch(
+            document, origin, direction, maxDistance, 0.01f, out var block, out var refDistance);
         Check(referenceHit && block == pick.BlockPosition,
             $"pick.real cross dda={pick.BlockPosition}@{pick.Distance} reference={block}@{refDistance} expected=同一格");
 
@@ -462,32 +426,23 @@ public static class CoreSmoke
 
     private static void CheckRealFile(string path)
     {
-        LoadResult result = LitematicLoader.TryLoadFile(path);
-        if (!RequireSuccess(result, $"real file '{path}'"))
-        {
-            return;
-        }
+        var result = LitematicLoader.TryLoadFile(path);
+        if (!RequireSuccess(result, $"real file '{path}'")) return;
 
-        LitematicDocument document = result.Document!;
-        LitematicMetadata metadata = document.Metadata;
+        var document = result.Document!;
+        var metadata = document.Metadata;
 
         if (metadata.RegionCount != 0)
-        {
             Check(document.Regions.Length == metadata.RegionCount,
                 $"regions={document.Regions.Length} declared={metadata.RegionCount} expected=equal");
-        }
 
         if (metadata.EnclosingSize != Vector3I.Zero)
-        {
             Check(document.Bounds.Size == metadata.EnclosingSize,
                 $"bounds={document.Bounds.Size} declaredEnclosing={metadata.EnclosingSize} expected=equal");
-        }
 
         if (metadata.TotalVolume != 0)
-        {
             Check(document.TotalVolume == metadata.TotalVolume,
                 $"volume={document.TotalVolume} declaredVolume={metadata.TotalVolume} expected=equal");
-        }
 
         Check(document.TotalBlocks <= document.TotalVolume,
             $"totalBlocks={document.TotalBlocks} volume={document.TotalVolume} expected=<=volume");
@@ -500,9 +455,9 @@ public static class CoreSmoke
         Debug.WriteLine(
             $"[CORE][smoke.file] path='{path}' regions={document.Regions.Length} volume={document.TotalVolume} " +
             $"blocks={document.TotalBlocks} declaredBlocks={metadata.TotalBlocks} " +
-            $"declaredBytesMismatch={(document.TotalBlocks != metadata.TotalBlocks)}");
+            $"declaredBytesMismatch={document.TotalBlocks != metadata.TotalBlocks}");
 
-        foreach (string issue in result.Issues)
+        foreach (var issue in result.Issues)
         {
             Console.WriteLine($"    issue: {issue}");
             Debug.WriteLine($"[CORE][smoke.issue] {issue}");
@@ -513,21 +468,20 @@ public static class CoreSmoke
 
     private static void ExpectFailure(string what, byte[]? bytes, LoadErrorKind expected)
     {
-        LoadResult result = bytes is null
-            ? LitematicLoader.TryLoadFile(Path.Combine(Path.GetTempPath(), "litematica-viewer-does-not-exist.litematic"))
+        var result = bytes is null
+            ? LitematicLoader.TryLoadFile(
+                Path.Combine(Path.GetTempPath(), "litematica-viewer-does-not-exist.litematic"))
             : LitematicLoader.TryLoad(bytes, $"fixture://{what}");
 
         Check(!result.Success, $"errorInput '{what}' success={result.Success} expected=False");
-        Check(result.Error == expected, $"errorInput '{what}' kind={result.Error} expected={expected} message={result.Message}");
+        Check(result.Error == expected,
+            $"errorInput '{what}' kind={result.Error} expected={expected} message={result.Message}");
         Check(result.Document is null, $"errorInput '{what}' document is null expected=True");
     }
 
     private static bool RequireSuccess(LoadResult result, string what)
     {
-        if (result.Success)
-        {
-            return true;
-        }
+        if (result.Success) return true;
 
         Check(false, $"{what}: load failed kind={result.Error} message={result.Message}");
         return false;
@@ -541,24 +495,28 @@ public static class CoreSmoke
     // 穿过时长度至少是 1：相邻的格子离 t 至少差一个单位，裹不进来。
     //
     // 拾取报出来的"是哪一格"来自整数步进，不受这个漂移影响，只有 Distance 受影响。
-    private static bool CellHoldsPoint(VoxelHit hit, Vector3 origin, Vector3 direction, out Vector3I pointCell, out Vector3 point)
+    private static bool CellHoldsPoint(VoxelHit hit, Vector3 origin, Vector3 direction, out Vector3I pointCell,
+        out Vector3 point)
     {
         const float Window = 1e-3f;
 
-        Vector3 dir = Vector3.Normalize(direction);
-        point = origin + (dir * hit.Distance);
+        var dir = Vector3.Normalize(direction);
+        point = origin + dir * hit.Distance;
         pointCell = CellOf(point);
 
         return !hit.State.IsAir &&
-            (hit.BlockPosition == pointCell ||
-             hit.BlockPosition == CellOf(point - (dir * Window)) ||
-             hit.BlockPosition == CellOf(point + (dir * Window)));
+               (hit.BlockPosition == pointCell ||
+                hit.BlockPosition == CellOf(point - dir * Window) ||
+                hit.BlockPosition == CellOf(point + dir * Window));
     }
 
-    private static Vector3I CellOf(Vector3 point) => new(
-        (int)MathF.Floor(point.X),
-        (int)MathF.Floor(point.Y),
-        (int)MathF.Floor(point.Z));
+    private static Vector3I CellOf(Vector3 point)
+    {
+        return new Vector3I(
+            (int)MathF.Floor(point.X),
+            (int)MathF.Floor(point.Y),
+            (int)MathF.Floor(point.Z));
+    }
 
     // 球面上均匀取向。取值域故意避开接近轴对齐的方向：轴对齐射线在格子边界上是
     // 处在一种约定里的特例，对拍双方可以各按自己的约定挑到相邻的一格，两边都不算错。
@@ -567,27 +525,20 @@ public static class CoreSmoke
         while (true)
         {
             Vector3 candidate = new(
-                (float)((random.NextDouble() * 2d) - 1d),
-                (float)((random.NextDouble() * 2d) - 1d),
-                (float)((random.NextDouble() * 2d) - 1d));
-            float lengthSquared = candidate.LengthSquared();
-            if (lengthSquared is > 0.01f and <= 1f)
-            {
-                return candidate / MathF.Sqrt(lengthSquared);
-            }
+                (float)(random.NextDouble() * 2d - 1d),
+                (float)(random.NextDouble() * 2d - 1d),
+                (float)(random.NextDouble() * 2d - 1d));
+            var lengthSquared = candidate.LengthSquared();
+            if (lengthSquared is > 0.01f and <= 1f) return candidate / MathF.Sqrt(lengthSquared);
         }
     }
 
     private static int CountMismatches(ImmutableArray<int> expected, ImmutableArray<int> actual)
     {
-        int count = 0;
-        for (int i = 0; i < expected.Length && i < actual.Length; i++)
-        {
+        var count = 0;
+        for (var i = 0; i < expected.Length && i < actual.Length; i++)
             if (expected[i] != actual[i])
-            {
                 count++;
-            }
-        }
 
         return count;
     }

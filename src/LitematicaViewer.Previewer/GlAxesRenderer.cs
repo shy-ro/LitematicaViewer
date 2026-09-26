@@ -29,23 +29,56 @@ internal sealed class GlAxesRenderer : IDisposable
     // 不一致时画面看起来只是「线淡了点」，而按颜色反推的画面校验会开始认不出像素。
     internal const float Alpha = 0.6f;
 
-    // 顺序就是 xyz 的顺序，颜色也就按这个顺序：X 黄、Y 绿、Z 蓝。
-    internal static readonly (Vector3 Color, Vector3 Direction)[] Axes =
-    [
-        (new Vector3(1f, 1f, 0f), Vector3.UnitX),
-        (new Vector3(0f, 1f, 0f), Vector3.UnitY),
-        (new Vector3(0f, 0f, 1f), Vector3.UnitZ),
-    ];
-
     // GlConsts 里没有 GL_LINES：它按「后端自己用得上」来收图元类型。
     private const int GL_LINES = 0x0001;
 
     // 想要的线宽。GLES 3 的 core 只保证 1.0，更粗的是可选的实现细节。
     private const float PreferredLineWidth = 2f;
 
+    private const string VertexShaderSource = """
+                                              #version 300 es
+                                              precision highp float;
+
+                                              layout(location = 0) in vec3 aPosition;
+                                              layout(location = 1) in vec3 aColor;
+
+                                              uniform mat4 uViewProjection;
+
+                                              out vec3 vColor;
+
+                                              void main()
+                                              {
+                                                  vColor = aColor;
+                                                  gl_Position = uViewProjection * vec4(aPosition, 1.0);
+                                              }
+                                              """;
+
+    // 这里的 0.6 就是 GlAxesRenderer.Alpha，改一个必须改另一个。
+    private const string FragmentShaderSource = """
+                                                #version 300 es
+                                                precision highp float;
+
+                                                in vec3 vColor;
+
+                                                out vec4 fragColor;
+
+                                                void main()
+                                                {
+                                                    fragColor = vec4(vColor, 0.6);
+                                                }
+                                                """;
+
+    // 顺序就是 xyz 的顺序，颜色也就按这个顺序：X 黄、Y 绿、Z 蓝。
+    internal static readonly (Vector3 Color, Vector3 Direction)[] Axes =
+    [
+        (new Vector3(1f, 1f, 0f), Vector3.UnitX),
+        (new Vector3(0f, 1f, 0f), Vector3.UnitY),
+        (new Vector3(0f, 0f, 1f), Vector3.UnitZ)
+    ];
+
     private readonly GlInterface _gl;
-    private readonly GlShader _shader;
     private readonly GlMesh _mesh;
+    private readonly GlShader _shader;
     private bool _disposed;
 
     private GlAxesRenderer(GlInterface gl, GlShader shader, GlMesh mesh)
@@ -59,10 +92,19 @@ internal sealed class GlAxesRenderer : IDisposable
 
     internal static int[] Indices { get; } = BuildIndices();
 
+    public void Dispose()
+    {
+        if (_disposed) return;
+
+        _disposed = true;
+        _mesh.Dispose();
+        _shader.Dispose();
+    }
+
     public static GlAxesRenderer Create(GlInterface gl)
     {
-        GlShader shader = GlShader.Create(gl, VertexShaderSource, FragmentShaderSource);
-        GlMesh mesh = GlMesh.Create(
+        var shader = GlShader.Create(gl, VertexShaderSource, FragmentShaderSource);
+        var mesh = GlMesh.Create(
             gl,
             Vertices,
             Vertices.Length / FloatsPerVertex,
@@ -73,7 +115,7 @@ internal sealed class GlAxesRenderer : IDisposable
         // 混合是渲染器自己的状态，和资源一样只在 Initialize 里设一次。
         // 不开混合的话 alpha 只是被写进帧缓冲的一个数，屏幕上看不出半透明——
         // 表现成「线比想要的实」，而那看起来像是颜色选错了。
-        bool blended = GlRaw.EnableAlphaBlend(gl);
+        var blended = GlRaw.EnableAlphaBlend(gl);
 
         // 入口找不到时它什么都不做，而 GL_BLEND 此时配的是默认的 (ONE, ZERO)，也就是原样覆盖——
         // 症状是三条线全是不透明的纯色。那个错法不报错、不崩，只在画面上「看着不太对」，
@@ -82,7 +124,7 @@ internal sealed class GlAxesRenderer : IDisposable
             blended,
             "[PREVIEWER][gl.axes] 这个上下文里没有 glBlendFuncSeparate，alpha 0.6 会被当成不透明画出去");
 
-        float lineWidth = ApplyLineWidth(gl);
+        var lineWidth = ApplyLineWidth(gl);
 
         DebugAxes.CheckGeometry(Vertices, Indices, Axes.Length);
 
@@ -99,33 +141,18 @@ internal sealed class GlAxesRenderer : IDisposable
 
     public void Render(CameraState camera, int width, int height)
     {
-        float aspect = (float)width / height;
-        Matrix4x4 viewProjection = camera.GetViewMatrix() * camera.GetProjectionMatrix(aspect);
+        var aspect = (float)width / height;
+        var viewProjection = camera.GetViewMatrix() * camera.GetProjectionMatrix(aspect);
 
         _shader.Use();
         _shader.SetMatrix4("uViewProjection", viewProjection);
         _mesh.Draw();
     }
 
-    public void Dispose()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        _disposed = true;
-        _mesh.Dispose();
-        _shader.Dispose();
-    }
-
     // 上下文丢失时用：GPU 侧的对象已经不在了，只能丢引用，不能发 Delete*。
     public void Abandon()
     {
-        if (_disposed)
-        {
-            return;
-        }
+        if (_disposed) return;
 
         _disposed = true;
         _mesh.Abandon();
@@ -137,7 +164,7 @@ internal sealed class GlAxesRenderer : IDisposable
     // 设一次宽的，再读一次；被拒就退回 1.0。日志里那一行是「这几条线到底多粗」的唯一答案。
     private static float ApplyLineWidth(GlInterface gl)
     {
-        int drained = DrainErrors(gl);
+        var drained = DrainErrors(gl);
 
         if (!GlRaw.LineWidth(gl, PreferredLineWidth))
         {
@@ -146,12 +173,9 @@ internal sealed class GlAxesRenderer : IDisposable
             return 1f;
         }
 
-        int error = GlRaw.GetError(gl);
+        var error = GlRaw.GetError(gl);
 
-        if (error == GlRaw.NoError)
-        {
-            return PreferredLineWidth;
-        }
+        if (error == GlRaw.NoError) return PreferredLineWidth;
 
         GlRaw.LineWidth(gl, 1f);
         Debug.WriteLine(
@@ -164,21 +188,18 @@ internal sealed class GlAxesRenderer : IDisposable
     // 而那件事该由绘制路径上的探针报，不该在这里把初始化卡住。
     private static int DrainErrors(GlInterface gl)
     {
-        int drained = 0;
-        while (drained < 16 && GlRaw.GetError(gl) != GlRaw.NoError)
-        {
-            drained++;
-        }
+        var drained = 0;
+        while (drained < 16 && GlRaw.GetError(gl) != GlRaw.NoError) drained++;
 
         return drained;
     }
 
     private static float[] BuildVertices()
     {
-        float[] vertices = new float[Axes.Length * 2 * FloatsPerVertex];
-        int cursor = 0;
+        var vertices = new float[Axes.Length * 2 * FloatsPerVertex];
+        var cursor = 0;
 
-        foreach ((Vector3 color, Vector3 direction) in Axes)
+        foreach (var (color, direction) in Axes)
         {
             Write(vertices, ref cursor, direction * -AxisLength, color);
             Write(vertices, ref cursor, direction * AxisLength, color);
@@ -189,11 +210,8 @@ internal sealed class GlAxesRenderer : IDisposable
 
     private static int[] BuildIndices()
     {
-        int[] indices = new int[Axes.Length * 2];
-        for (int i = 0; i < indices.Length; i++)
-        {
-            indices[i] = i;
-        }
+        var indices = new int[Axes.Length * 2];
+        for (var i = 0; i < indices.Length; i++) indices[i] = i;
 
         return indices;
     }
@@ -207,37 +225,4 @@ internal sealed class GlAxesRenderer : IDisposable
         vertices[cursor++] = color.Y;
         vertices[cursor++] = color.Z;
     }
-
-    private const string VertexShaderSource = """
-        #version 300 es
-        precision highp float;
-
-        layout(location = 0) in vec3 aPosition;
-        layout(location = 1) in vec3 aColor;
-
-        uniform mat4 uViewProjection;
-
-        out vec3 vColor;
-
-        void main()
-        {
-            vColor = aColor;
-            gl_Position = uViewProjection * vec4(aPosition, 1.0);
-        }
-        """;
-
-    // 这里的 0.6 就是 GlAxesRenderer.Alpha，改一个必须改另一个。
-    private const string FragmentShaderSource = """
-        #version 300 es
-        precision highp float;
-
-        in vec3 vColor;
-
-        out vec4 fragColor;
-
-        void main()
-        {
-            fragColor = vec4(vColor, 0.6);
-        }
-        """;
 }

@@ -13,5 +13,5 @@ public enum VoxelFace : byte
     North = 3,
     South = 4,
     West = 5,
-    East = 6,
+    East = 6
 }

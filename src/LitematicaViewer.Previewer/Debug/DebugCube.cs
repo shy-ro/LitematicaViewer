@@ -35,9 +35,25 @@ internal static class DebugCube
     // 连续期望与离散采样只在「细条」这个形态下分家，粗块仍然照常判。
     private const float MinFaceThicknessPx = 1.5f;
 
+    // 把「离一个点足够近」换成「离一条线段足够近」时要放宽的那一点余量，两处各用一份：
+    //
+    // 一是判据本身：alpha 是顶点插值出来的，混完再取整成 8 位，所以反推回来的那个参数
+    // 会带上千分之几的抖动，落在声明的区间外面一点点是正常的。
+    //
+    // 二是「两端都要够到」那条：贴到内缘的那一行像素，alpha 比声明的小值大一点点（渐变是从这里起步的），
+    // 所以断言不能要求恰好等于声明的端点。
+    private const float AlphaSlack = 0.05f;
+
+    private const float AlphaReachSlack = 0.06f;
+
+    // 声明的 alpha 区间：光环顶点上那组 alpha 的最小与最大。
+    private static float PedestalAlphaMin => MinAlpha();
+
+    private static float PedestalAlphaMax => MaxAlpha();
+
     public static void CheckGeometry(float[] vertices, int[] indices, int faceCount)
     {
-        int vertexCount = faceCount * 4;
+        var vertexCount = faceCount * 4;
         Debug.Assert(
             vertices.Length == vertexCount * GlCubeRenderer.FloatsPerVertex,
             $"[PREVIEWER][gl.cube] 顶点数不对 floats={vertices.Length} expected={vertexCount * GlCubeRenderer.FloatsPerVertex}");
@@ -48,10 +64,10 @@ internal static class DebugCube
         HashSet<Vector3> positions = [];
         HashSet<Vector3> normals = [];
 
-        for (int face = 0; face < faceCount; face++)
+        for (var face = 0; face < faceCount; face++)
         {
-            int first = face * 4;
-            Vector3 normal = ReadVector3(vertices, first, 3);
+            var first = face * 4;
+            var normal = ReadVector3(vertices, first, 3);
 
             Debug.Assert(
                 MathF.Abs(normal.Length() - 1f) < 1e-6f,
@@ -61,11 +77,11 @@ internal static class DebugCube
                 $"[PREVIEWER][gl.cube] 法线不是轴向 face={face} normal={normal}");
             normals.Add(normal);
 
-            for (int corner = 0; corner < 4; corner++)
+            for (var corner = 0; corner < 4; corner++)
             {
-                int vertex = first + corner;
-                Vector3 position = ReadVector3(vertices, vertex, 0);
-                Vector3 vertexNormal = ReadVector3(vertices, vertex, 3);
+                var vertex = first + corner;
+                var position = ReadVector3(vertices, vertex, 0);
+                var vertexNormal = ReadVector3(vertices, vertex, 3);
 
                 // 同一面的四个顶点法线必须完全一致，否则面上会出现渐变，读回像素的期望值就不成立了。
                 Debug.Assert(
@@ -79,12 +95,9 @@ internal static class DebugCube
                     $"[PREVIEWER][gl.cube] 顶点不在该面的平面上 face={face} position={position} normal={normal}");
 
                 // 两个切向上必须正好落在 ±0.5，否则画出来的不是立方体。
-                for (int axis = 0; axis < 3; axis++)
+                for (var axis = 0; axis < 3; axis++)
                 {
-                    if (Component(normal, axis) != 0f)
-                    {
-                        continue;
-                    }
+                    if (Component(normal, axis) != 0f) continue;
 
                     Debug.Assert(
                         MathF.Abs(MathF.Abs(Component(position, axis)) - 0.5f) < 1e-6f,
@@ -95,9 +108,9 @@ internal static class DebugCube
             }
 
             // 两组三角形都只能引用本面的四个顶点。跨面引用不会报错，只会画出一堆穿插的三角形。
-            for (int i = 0; i < 6; i++)
+            for (var i = 0; i < 6; i++)
             {
-                int index = indices[(face * 6) + i];
+                var index = indices[face * 6 + i];
                 Debug.Assert(
                     index >= first && index < first + 4,
                     $"[PREVIEWER][gl.cube] 索引跨面 face={face} index={index} expected=[{first},{first + 4})");
@@ -108,13 +121,11 @@ internal static class DebugCube
         Debug.Assert(positions.Count == 8, $"[PREVIEWER][gl.cube] 不同顶点数不是 8 count={positions.Count}");
 
         // 八个角到中心的距离相等才是个正立方体。
-        float expectedRadius = MathF.Sqrt(3f) / 2f;
-        foreach (Vector3 position in positions)
-        {
+        var expectedRadius = MathF.Sqrt(3f) / 2f;
+        foreach (var position in positions)
             Debug.Assert(
                 MathF.Abs(position.Length() - expectedRadius) < 1e-6f,
                 $"[PREVIEWER][gl.cube] 顶点不在单位立方体上 position={position} radius={position.Length()}");
-        }
     }
 
     // 这套像素校验只在特定姿态下有定义，先把前提算出来。Phase F 起相机可以平移、可以无界缩放，
@@ -138,8 +149,8 @@ internal static class DebugCube
         // 边长 1 的立方体外接球半径 √3/2。立方体在原点，这是渲染器写死的。
         const float BoundingRadius = 0.866f;
 
-        Vector3 toCenter = -camera.Position;
-        float distance = toCenter.Length();
+        var toCenter = -camera.Position;
+        var distance = toCenter.Length();
 
         if (!float.IsFinite(distance) || distance <= 0f)
         {
@@ -147,22 +158,22 @@ internal static class DebugCube
             return false;
         }
 
-        float alignment = Vector3.Dot(camera.Forward, toCenter / distance);
+        var alignment = Vector3.Dot(camera.Forward, toCenter / distance);
         if (alignment < 0.9999f)
         {
             reason = $"相机没看向立方体中心 alignment={alignment:F6}（自由转头之后属于预期）";
             return false;
         }
 
-        float halfHeight = distance * MathF.Tan(float.DegreesToRadians(camera.Fov) / 2f);
-        float aspect = height == 0 ? 1f : width / (float)height;
+        var halfHeight = distance * MathF.Tan(float.DegreesToRadians(camera.Fov) / 2f);
+        var aspect = height == 0 ? 1f : width / (float)height;
 
         // 取紧的那条轴：窗口比高还窄时，装不装得下由宽度说了算。
-        float fraction = BoundingRadius / (halfHeight * MathF.Min(1f, aspect));
+        var fraction = BoundingRadius / (halfHeight * MathF.Min(1f, aspect));
         if (fraction is > 0.85f or < 0.30f)
         {
             reason = $"立方体在画面里的占比不在可用区间 fraction={fraction:F3} range=[0.3,0.85] " +
-                $"distance={distance:F3} fov={camera.Fov}";
+                     $"distance={distance:F3} fov={camera.Fov}";
             return false;
         }
 
@@ -184,11 +195,11 @@ internal static class DebugCube
         Vector3 clearColor,
         bool pedestalVisible)
     {
-        int faceCount = vertices.Length / (GlCubeRenderer.FloatsPerVertex * 4);
+        var faceCount = vertices.Length / (GlCubeRenderer.FloatsPerVertex * 4);
         (float R, float G, float B)[] faceColors = new (float, float, float)[faceCount];
-        Vector3[] faceNormals = new Vector3[faceCount];
+        var faceNormals = new Vector3[faceCount];
 
-        for (int face = 0; face < faceCount; face++)
+        for (var face = 0; face < faceCount; face++)
         {
             faceNormals[face] = ReadVector3(vertices, face * 4, 3);
             faceColors[face] = ShaderColor(faceNormals[face]);
@@ -197,16 +208,13 @@ internal static class DebugCube
         // 背景色不走着色器，是 clear 直接写进 framebuffer 的，所以不能套法线那一套变换。
         (float R, float G, float B) clear = (clearColor.X, clearColor.Y, clearColor.Z);
 
-        int axisCount = GlAxesRenderer.Axes.Length;
+        var axisCount = GlAxesRenderer.Axes.Length;
 
         // 底色：0 是背景，往后依次是六个面。
-        int baseCount = faceCount + 1;
+        var baseCount = faceCount + 1;
         (float R, float G, float B)[] baseColors = new (float, float, float)[baseCount];
         baseColors[0] = clear;
-        for (int face = 0; face < faceCount; face++)
-        {
-            baseColors[face + 1] = faceColors[face];
-        }
+        for (var face = 0; face < faceCount; face++) baseColors[face + 1] = faceColors[face];
 
         // 候选颜色一次备齐：七种底色，加上「每根轴压在每种底色上」的二十一种混合结果。
         //
@@ -228,134 +236,130 @@ internal static class DebugCube
         // 内外两个带插值出来是一整段渐变，只有贴到端点的那几行像素才认得出。
         // 所以光环走另一条判据（见 TryPedestalAlpha）：像素落在「底色 → 不透明光环色」这条线段上，
         // 落点参数就是它的 alpha，再要求这个 alpha 落在声明的区间里。
-        int candidateCount = baseCount + (baseCount * axisCount);
+        var candidateCount = baseCount + baseCount * axisCount;
         (float R, float G, float B)[] candidates = new (float, float, float)[candidateCount];
-        int[] candidateAxis = new int[candidateCount];
+        var candidateAxis = new int[candidateCount];
 
-        for (int baseIndex = 0; baseIndex < baseCount; baseIndex++)
+        for (var baseIndex = 0; baseIndex < baseCount; baseIndex++)
         {
             candidates[baseIndex] = baseColors[baseIndex];
             candidateAxis[baseIndex] = -1;
         }
 
-        for (int baseIndex = 0; baseIndex < baseCount; baseIndex++)
+        for (var baseIndex = 0; baseIndex < baseCount; baseIndex++)
+        for (var axis = 0; axis < axisCount; axis++)
         {
-            for (int axis = 0; axis < axisCount; axis++)
-            {
-                Vector3 axisColor = GlAxesRenderer.Axes[axis].Color;
-                int index = baseCount + (baseIndex * axisCount) + axis;
-                candidates[index] = PixelBlend.Over(
-                    (axisColor.X, axisColor.Y, axisColor.Z),
-                    baseColors[baseIndex],
-                    GlAxesRenderer.Alpha);
-                candidateAxis[index] = axis;
-            }
+            var axisColor = GlAxesRenderer.Axes[axis].Color;
+            var index = baseCount + baseIndex * axisCount + axis;
+            candidates[index] = PixelBlend.Over(
+                (axisColor.X, axisColor.Y, axisColor.Z),
+                baseColors[baseIndex],
+                GlAxesRenderer.Alpha);
+            candidateAxis[index] = axis;
         }
 
-        int[] facePixels = new int[faceCount];
-        int[] axisPixels = new int[axisCount];
-        int clearPixels = 0;
-        int solidPixels = 0;
-        int unmatched = 0;
-        int pedestalPixels = 0;
-        float minPedestalAlpha = float.MaxValue;
-        float maxPedestalAlpha = float.MinValue;
+        var facePixels = new int[faceCount];
+        var axisPixels = new int[axisCount];
+        var clearPixels = 0;
+        var solidPixels = 0;
+        var unmatched = 0;
+        var pedestalPixels = 0;
+        var minPedestalAlpha = float.MaxValue;
+        var maxPedestalAlpha = float.MinValue;
         long centroidX = 0;
         long centroidY = 0;
 
-        for (int y = 0; y < height; y++)
+        for (var y = 0; y < height; y++)
+        for (var x = 0; x < width; x++)
         {
-            for (int x = 0; x < width; x++)
+            var offset = (y * width + x) * 4;
+            var r = rgba[offset];
+            var g = rgba[offset + 1];
+            var b = rgba[offset + 2];
+
+            var best = -1;
+            var bestDistance = int.MaxValue;
+
+            for (var candidate = 0; candidate < candidateCount; candidate++)
             {
-                int offset = ((y * width) + x) * 4;
-                byte r = rgba[offset];
-                byte g = rgba[offset + 1];
-                byte b = rgba[offset + 2];
-
-                int best = -1;
-                int bestDistance = int.MaxValue;
-
-                for (int candidate = 0; candidate < candidateCount; candidate++)
+                var distance = Distance(r, g, b, candidates[candidate]);
+                if (distance < bestDistance)
                 {
-                    int distance = Distance(r, g, b, candidates[candidate]);
-                    if (distance < bestDistance)
-                    {
-                        bestDistance = distance;
-                        best = candidate;
-                    }
+                    bestDistance = distance;
+                    best = candidate;
                 }
+            }
 
-                // 顺序要紧：先判「认不出来」，再判认出来的是谁。
-                // 反过来的话，一个既不像底色也不像任何混合色的像素会被就近归给某根轴，
-                // 于是「认不出的颜色」那条断言永远不会有东西可报。
-                if (bestDistance > SquaredTolerance)
+            // 顺序要紧：先判「认不出来」，再判认出来的是谁。
+            // 反过来的话，一个既不像底色也不像任何混合色的像素会被就近归给某根轴，
+            // 于是「认不出的颜色」那条断言永远不会有东西可报。
+            if (bestDistance > SquaredTolerance)
+            {
+                // 底色与轴线都认不出来，才轮到光环。放这么后面是有意的：
+                // 光环那条判据是「离一条线段足够近」，比「离一个点足够近」宽松得多——
+                // 先让它试的话，正好落在那条线段附近的背景色或面色会被它抢走，
+                // 于是面像素少几块、光环像素多几块，而两条断言都看不出异常。
+                if (pedestalVisible
+                    && TryPedestalAlpha(r, g, b, candidates, out var alpha))
                 {
-                    // 底色与轴线都认不出来，才轮到光环。放这么后面是有意的：
-                    // 光环那条判据是「离一条线段足够近」，比「离一个点足够近」宽松得多——
-                    // 先让它试的话，正好落在那条线段附近的背景色或面色会被它抢走，
-                    // 于是面像素少几块、光环像素多几块，而两条断言都看不出异常。
-                    if (pedestalVisible
-                        && TryPedestalAlpha(r, g, b, candidates, out float alpha))
-                    {
-                        // 光环像素不进 solidPixels，也不进质心：它落在底面上、围着方块，
-                        // 按面积算比轮廓的一部分还大，混进去会让覆盖率和质心两条
-                        // 一起变成「光环有多大」的函数。
-                        pedestalPixels++;
-                        minPedestalAlpha = MathF.Min(minPedestalAlpha, alpha);
-                        maxPedestalAlpha = MathF.Max(maxPedestalAlpha, alpha);
-                    }
-                    else
-                    {
-                        unmatched++;
-                    }
-                }
-                else if (candidateAxis[best] >= 0)
-                {
-                    // 轴线像素不进 solidPixels，也不进质心：那两条断言问的是立方体，
-                    // 而线是画在方块前面（或者旁边）的东西，跟轮廓对称性没关系。
-                    axisPixels[candidateAxis[best]]++;
-                }
-                else if (best == 0)
-                {
-                    clearPixels++;
+                    // 光环像素不进 solidPixels，也不进质心：它落在底面上、围着方块，
+                    // 按面积算比轮廓的一部分还大，混进去会让覆盖率和质心两条
+                    // 一起变成「光环有多大」的函数。
+                    pedestalPixels++;
+                    minPedestalAlpha = MathF.Min(minPedestalAlpha, alpha);
+                    maxPedestalAlpha = MathF.Max(maxPedestalAlpha, alpha);
                 }
                 else
                 {
-                    int face = best - 1;
-                    facePixels[face]++;
-                    solidPixels++;
-                    centroidX += x;
-                    centroidY += y;
+                    unmatched++;
                 }
+            }
+            else if (candidateAxis[best] >= 0)
+            {
+                // 轴线像素不进 solidPixels，也不进质心：那两条断言问的是立方体，
+                // 而线是画在方块前面（或者旁边）的东西，跟轮廓对称性没关系。
+                axisPixels[candidateAxis[best]]++;
+            }
+            else if (best == 0)
+            {
+                clearPixels++;
+            }
+            else
+            {
+                var face = best - 1;
+                facePixels[face]++;
+                solidPixels++;
+                centroidX += x;
+                centroidY += y;
             }
         }
 
-        int pixelCount = width * height;
-        int visibleFaces = 0;
-        int backFacePixels = 0;
-        int loggedBackFacePixels = 0;
+        var pixelCount = width * height;
+        var visibleFaces = 0;
+        var backFacePixels = 0;
+        var loggedBackFacePixels = 0;
 
         // 背向相机的面最多允许漏出多少像素。这一条判的是「深度测试还在不在」，
         // 而漏出来的机理是共边处两个三角形深度相等、GL_LESS 让先画的留下，
         // 所以它与轮廓的周长同量级，与面积无关。实测正常时恰好 1 个；
         // 给个绝对下限是因为小窗口下 pixelCount/10000 会掉到个位数，那时它比周长还小。
-        int backFaceAllowance = Math.Max(16, pixelCount / 10000);
+        var backFaceAllowance = Math.Max(16, pixelCount / 10000);
 
         // 投影的尺度。半高等于 depth * tan(fov/2)，半宽再乘宽高比；
         // 于是距离 depth 处的可见世界面积是 4 * halfHeight * halfWidth。
-        float tanHalfFov = MathF.Tan(float.DegreesToRadians(camera.Fov) / 2f);
-        float aspect = height == 0 ? 1f : width / (float)height;
+        var tanHalfFov = MathF.Tan(float.DegreesToRadians(camera.Fov) / 2f);
+        var aspect = height == 0 ? 1f : width / (float)height;
 
-        for (int face = 0; face < faceCount; face++)
+        for (var face = 0; face < faceCount; face++)
         {
-            Vector3 normal = faceNormals[face];
+            var normal = faceNormals[face];
 
             // 一个面能不能被看到，取决于相机在不在它所在平面的外侧。判据是
             // dot(normal, camera - faceCenter)，不是 dot(normal, camera)：
             // 后者漏掉了面心到原点的 0.5，相机贴近时会把已经侧转过去的面也算成可见。
-            Vector3 toFace = camera.Position - (normal * 0.5f);
-            float incidence = Vector3.Dot(normal, toFace);
-            bool expectedVisible = incidence > 0f;
+            var toFace = camera.Position - normal * 0.5f;
+            var incidence = Vector3.Dot(normal, toFace);
+            var expectedVisible = incidence > 0f;
 
             // 这一面在画面上该有多少像素：单位立方体的面面积是 1，投影后的面积是
             // incidence / |toFace|（入射角的余弦），除以该深度处可见的世界面积再乘总像素数。
@@ -366,13 +370,13 @@ internal static class DebugCube
             // Phase F 之前相机只能沿一条固定的体对角线推拉，永远碰不到掠射姿态，所以那个门槛
             // 一直没暴露；相机能自由转之后，任意一张面扫过镜头都会触发它，而 Debug.Assert
             // 失败是直接终止进程——表现成「Debug 下转着转着就崩了」。
-            float expectedPixels = 0f;
-            float thicknessPx = 0f;
+            var expectedPixels = 0f;
+            var thicknessPx = 0f;
             if (expectedVisible)
             {
-                float depth = toFace.Length();
-                float halfHeight = depth * tanHalfFov;
-                float halfWidth = halfHeight * aspect;
+                var depth = toFace.Length();
+                var halfHeight = depth * tanHalfFov;
+                var halfWidth = halfHeight * aspect;
                 expectedPixels = pixelCount * (incidence / depth) / (4f * halfHeight * halfWidth);
 
                 // 薄维度的厚度（像素）＝ 期望面积 ÷ 面在画面上的宽度。面的宽是 1 个世界单位，
@@ -392,13 +396,11 @@ internal static class DebugCube
                 visibleFaces++;
 
                 if (expectedPixels >= RasterNoiseFloor && thicknessPx >= MinFaceThicknessPx)
-                {
                     Debug.Assert(
                         facePixels[face] >= expectedPixels * MinFacePixelRatio,
                         $"[PREVIEWER][gl.cube] 朝向相机的面画得比几何期望少太多 face={face} " +
                         $"normal={normal} pixels={facePixels[face]} expected={expectedPixels:F1} " +
                         $"ratio={MinFacePixelRatio} note=渲染器可能没在用当前这个相机");
-                }
             }
             else
             {
@@ -418,14 +420,11 @@ internal static class DebugCube
             }
         }
 
-        float centroidPixelX = solidPixels == 0 ? 0f : (float)centroidX / solidPixels;
-        float centroidPixelY = solidPixels == 0 ? 0f : (float)centroidY / solidPixels;
+        var centroidPixelX = solidPixels == 0 ? 0f : (float)centroidX / solidPixels;
+        var centroidPixelY = solidPixels == 0 ? 0f : (float)centroidY / solidPixels;
 
-        int axisTotal = 0;
-        foreach (int count in axisPixels)
-        {
-            axisTotal += count;
-        }
+        var axisTotal = 0;
+        foreach (var count in axisPixels) axisTotal += count;
 
         Debug.WriteLine(
             $"[PREVIEWER][gl.cube.render] solid={solidPixels} clear={clearPixels} unmatched={unmatched} " +
@@ -434,7 +433,6 @@ internal static class DebugCube
             $"pos=({camera.Position}) yaw={camera.Yaw:F2} pitch={camera.Pitch:F2}");
 
         if (pedestalVisible)
-        {
             // 认出来的 alpha 区间是这条判据的核心证据：像素的颜色决定了它落在
             // 「底色 → 不透明光环色」那条线上的哪个位置，而那个位置就是这一点上的 alpha。
             Debug.WriteLine(
@@ -443,7 +441,6 @@ internal static class DebugCube
                 $"alphaDeclared=[{Bound(PedestalAlphaMin)},{Bound(PedestalAlphaMax)}] " +
                 $"color={Byte(GlPedestalRenderer.Color.X)},{Byte(GlPedestalRenderer.Color.Y)}," +
                 $"{Byte(GlPedestalRenderer.Color.Z)}");
-        }
 
         if (pedestalVisible)
         {
@@ -471,9 +468,9 @@ internal static class DebugCube
         // 逐轴打一遍：三条线的像素数差着量级是正常的（正对着镜头的那根投影成一段，
         // 与视线垂直的那根投影成一个点），所以这里只记不判——
         // 「轴线到底画出来没有」在屏幕上是一眼的事，而数据对不对由 DebugAxes 在初始化时守着。
-        for (int axis = 0; axis < axisCount; axis++)
+        for (var axis = 0; axis < axisCount; axis++)
         {
-            Vector3 axisColor = GlAxesRenderer.Axes[axis].Color;
+            var axisColor = GlAxesRenderer.Axes[axis].Color;
             Debug.WriteLine(
                 $"[PREVIEWER][gl.axes.axis] axis={axis} color=" +
                 $"{Byte(axisColor.X)},{Byte(axisColor.Y)},{Byte(axisColor.Z)} pixels={axisPixels[axis]}");
@@ -511,71 +508,56 @@ internal static class DebugCube
 
         // 立方体关于中心对称，轮廓的质心必然落在投影中心上。
         // 投影矩阵漏了转置、或者宽高比算错，这条就会偏出去。
-        float allowedDrift = width * 0.03f;
+        var allowedDrift = width * 0.03f;
         Debug.Assert(
-            MathF.Abs(centroidPixelX - (width / 2f)) <= allowedDrift &&
-            MathF.Abs(centroidPixelY - (height / 2f)) <= allowedDrift,
+            MathF.Abs(centroidPixelX - width / 2f) <= allowedDrift &&
+            MathF.Abs(centroidPixelY - height / 2f) <= allowedDrift,
             $"[PREVIEWER][gl.cube] 轮廓质心偏离画面中心 centroid=({centroidPixelX:F1},{centroidPixelY:F1}) " +
             $"center=({width / 2f:F1},{height / 2f:F1}) allowed={allowedDrift:F1}");
 
         // 覆盖率为零是没画，接近全屏是投影参数错了。
-        float coverage = (float)solidPixels / pixelCount;
+        var coverage = (float)solidPixels / pixelCount;
         Debug.Assert(
             coverage is > 0.02f and < 0.5f,
             $"[PREVIEWER][gl.cube] 覆盖率不在合理范围内 coverage={coverage:P1}");
     }
 
     // 着色器里那一行 `vNormal * 0.5 + 0.5` 的 CPU 版本，两边必须一致。
-    private static (float R, float G, float B) ShaderColor(Vector3 normal) =>
-        ((normal.X * 0.5f) + 0.5f, (normal.Y * 0.5f) + 0.5f, (normal.Z * 0.5f) + 0.5f);
+    private static (float R, float G, float B) ShaderColor(Vector3 normal)
+    {
+        return (normal.X * 0.5f + 0.5f, normal.Y * 0.5f + 0.5f, normal.Z * 0.5f + 0.5f);
+    }
 
     private static int Distance(byte r, byte g, byte b, (float R, float G, float B) expected)
     {
-        int dr = r - Byte(expected.R);
-        int dg = g - Byte(expected.G);
-        int db = b - Byte(expected.B);
-        return (dr * dr) + (dg * dg) + (db * db);
+        var dr = r - Byte(expected.R);
+        var dg = g - Byte(expected.G);
+        var db = b - Byte(expected.B);
+        return dr * dr + dg * dg + db * db;
     }
 
-    private static byte Byte(float value) => (byte)Math.Clamp(MathF.Round(value * 255f), 0f, 255f);
+    private static byte Byte(float value)
+    {
+        return (byte)Math.Clamp(MathF.Round(value * 255f), 0f, 255f);
+    }
 
-    private static string Bound(float value) =>
-        value == float.MaxValue || value == float.MinValue ? "无" : value.ToString("F3");
-
-    // 声明的 alpha 区间：光环顶点上那组 alpha 的最小与最大。
-    private static float PedestalAlphaMin => MinAlpha();
-
-    private static float PedestalAlphaMax => MaxAlpha();
-
-    // 把「离一个点足够近」换成「离一条线段足够近」时要放宽的那一点余量，两处各用一份：
-    //
-    // 一是判据本身：alpha 是顶点插值出来的，混完再取整成 8 位，所以反推回来的那个参数
-    // 会带上千分之几的抖动，落在声明的区间外面一点点是正常的。
-    //
-    // 二是「两端都要够到」那条：贴到内缘的那一行像素，alpha 比声明的小值大一点点（渐变是从这里起步的），
-    // 所以断言不能要求恰好等于声明的端点。
-    private const float AlphaSlack = 0.05f;
-
-    private const float AlphaReachSlack = 0.06f;
+    private static string Bound(float value)
+    {
+        return value == float.MaxValue || value == float.MinValue ? "无" : value.ToString("F3");
+    }
 
     private static float MinAlpha()
     {
-        float min = float.MaxValue;
-        foreach (float alpha in GlPedestalRenderer.RingAlphas)
-        {
-            min = MathF.Min(min, alpha);
-        }
+        var min = float.MaxValue;
+        foreach (var alpha in GlPedestalRenderer.RingAlphas) min = MathF.Min(min, alpha);
 
         return min;
     }
 
     private static float MaxAlpha()
     {
-        float max = float.MinValue;
-        foreach (float alpha in GlPedestalRenderer.RingAlphas)
-        {
-            max = MathF.Max(max, alpha);
-        }
+        var max = float.MinValue;
+        foreach (var alpha in GlPedestalRenderer.RingAlphas) max = MathF.Max(max, alpha);
 
         return max;
     }
@@ -609,46 +591,40 @@ internal static class DebugCube
         float endG = Byte(GlPedestalRenderer.Color.Y);
         float endB = Byte(GlPedestalRenderer.Color.Z);
 
-        float minAlpha = PedestalAlphaMin - AlphaSlack;
-        float maxAlpha = PedestalAlphaMax + AlphaSlack;
+        var minAlpha = PedestalAlphaMin - AlphaSlack;
+        var maxAlpha = PedestalAlphaMax + AlphaSlack;
 
-        int bestError = SquaredTolerance + 1;
+        var bestError = SquaredTolerance + 1;
         alpha = 0f;
 
-        foreach ((float R, float G, float B) root in roots)
+        foreach (var root in roots)
         {
             float startR = Byte(root.R);
             float startG = Byte(root.G);
             float startB = Byte(root.B);
 
-            float dx = endR - startR;
-            float dy = endG - startG;
-            float dz = endB - startB;
+            var dx = endR - startR;
+            var dy = endG - startG;
+            var dz = endB - startB;
 
-            float lengthSquared = (dx * dx) + (dy * dy) + (dz * dz);
+            var lengthSquared = dx * dx + dy * dy + dz * dz;
 
             // 底色和不透明光环色几乎重合时这条线段退化了：投影出来除不了一个有效的长度，
             // 而且这种底色本来也认不出「上面是不是压着光环」——跳过它。
-            if (lengthSquared < 1f)
-            {
-                continue;
-            }
+            if (lengthSquared < 1f) continue;
 
-            float t = ((((px - startR) * dx) + ((py - startG) * dy) + ((pz - startB) * dz)) / lengthSquared);
+            var t = ((px - startR) * dx + (py - startG) * dy + (pz - startB) * dz) / lengthSquared;
 
-            if (t < minAlpha || t > maxAlpha)
-            {
-                continue;
-            }
+            if (t < minAlpha || t > maxAlpha) continue;
 
-            float cr = startR + (t * dx);
-            float cg = startG + (t * dy);
-            float cb = startB + (t * dz);
+            var cr = startR + t * dx;
+            var cg = startG + t * dy;
+            var cb = startB + t * dz;
 
-            float dr = px - cr;
-            float dg = py - cg;
-            float db = pz - cb;
-            int error = (int)((dr * dr) + (dg * dg) + (db * db));
+            var dr = px - cr;
+            var dg = py - cg;
+            var db = pz - cb;
+            var error = (int)(dr * dr + dg * dg + db * db);
 
             if (error < bestError)
             {
@@ -662,19 +638,13 @@ internal static class DebugCube
 
     private static bool IsAxisAligned(Vector3 normal)
     {
-        int nonZero = 0;
-        for (int axis = 0; axis < 3; axis++)
+        var nonZero = 0;
+        for (var axis = 0; axis < 3; axis++)
         {
-            float component = Component(normal, axis);
-            if (component == 0f)
-            {
-                continue;
-            }
+            var component = Component(normal, axis);
+            if (component == 0f) continue;
 
-            if (MathF.Abs(MathF.Abs(component) - 1f) > 1e-6f)
-            {
-                return false;
-            }
+            if (MathF.Abs(MathF.Abs(component) - 1f) > 1e-6f) return false;
 
             nonZero++;
         }
@@ -684,14 +654,17 @@ internal static class DebugCube
 
     private static Vector3 ReadVector3(float[] data, int vertex, int offset)
     {
-        int start = (vertex * GlCubeRenderer.FloatsPerVertex) + offset;
+        var start = vertex * GlCubeRenderer.FloatsPerVertex + offset;
         return new Vector3(data[start], data[start + 1], data[start + 2]);
     }
 
-    private static float Component(Vector3 v, int axis) => axis switch
+    private static float Component(Vector3 v, int axis)
     {
-        0 => v.X,
-        1 => v.Y,
-        _ => v.Z,
-    };
+        return axis switch
+        {
+            0 => v.X,
+            1 => v.Y,
+            _ => v.Z
+        };
+    }
 }

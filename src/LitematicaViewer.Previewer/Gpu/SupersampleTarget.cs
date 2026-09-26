@@ -16,16 +16,6 @@ internal sealed class SupersampleTarget : IDisposable
     // 2x 已把锯齿压到不可见；再高收益趋零而像素量按平方涨。
     public const int Scale = 2;
 
-    private readonly GlInterface _gl;
-    private int _fbo;
-    private int _color;
-    private int _depth;
-    private int _width;
-    private int _height;
-    private bool _disposed;
-
-    private SupersampleTarget(GlInterface gl) => _gl = gl;
-
     // GlConsts 没有的 GLES 常量（数值来自规范）：DEPTH_COMPONENT24、attachment 组。
     private const int GlRenderbuffer = GlRaw.GL_RENDERBUFFER;
     private const int GlColorAttachment0 = GlRaw.GL_COLOR_ATTACHMENT0;
@@ -39,42 +29,57 @@ internal sealed class SupersampleTarget : IDisposable
         "glGenFramebuffers", "glBindFramebuffer", "glFramebufferTexture2D",
         "glGenRenderbuffers", "glBindRenderbuffer", "glRenderbufferStorage",
         "glFramebufferRenderbuffer", "glDeleteFramebuffers", "glDeleteRenderbuffers",
-        "glCheckFramebufferStatus", "glBlitFramebuffer",
+        "glCheckFramebufferStatus", "glBlitFramebuffer"
     ];
+
+    private readonly GlInterface _gl;
+    private int _color;
+    private int _depth;
+    private bool _disposed;
+    private int _fbo;
+
+    private SupersampleTarget(GlInterface gl)
+    {
+        _gl = gl;
+    }
+
+    public int Width { get; private set; }
+
+    public int Height { get; private set; }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+
+        _disposed = true;
+        ReleaseGpu();
+    }
 
     public static SupersampleTarget? Create(GlInterface gl)
     {
-        string? extensions = gl.ContextInfo?.Extensions is { } list ? string.Join(" ", list) : null;
-        foreach (string name in RequiredEntries)
-        {
+        var extensions = gl.ContextInfo?.Extensions is { } list ? string.Join(" ", list) : null;
+        foreach (var name in RequiredEntries)
             if (gl.GetProcAddress(name) == IntPtr.Zero)
             {
                 Debug.WriteLine($"[PREVIEWER][ssaa] 入口缺失 {name}，超采样降级为直画");
                 return null;
             }
-        }
 
         Debug.WriteLine($"[PREVIEWER][ssaa] 可用 scale={Scale} ext={extensions is not null}");
         return new SupersampleTarget(gl);
     }
 
-    public int Width => _width;
-    public int Height => _height;
-
     // 尺寸没变就复用：拖窗口时每帧变，重建以帧率发生是预期行为，几何才几百字节。
     public void EnsureSize(int width, int height)
     {
-        if (_width == width && _height == height && _fbo != 0)
-        {
-            return;
-        }
+        if (Width == width && Height == height && _fbo != 0) return;
 
         ReleaseGpu();
 
-        _width = width;
-        _height = height;
+        Width = width;
+        Height = height;
 
-        IntPtr ids = Marshal.AllocHGlobal(sizeof(int));
+        var ids = Marshal.AllocHGlobal(sizeof(int));
         try
         {
             // 颜色附件：纹素由 blit 原样取走，filter 用 NEAREST/无 mip 都不影响结果。
@@ -100,7 +105,7 @@ internal sealed class SupersampleTarget : IDisposable
             GlRaw.FramebufferRenderbuffer(
                 _gl, GlConsts.GL_FRAMEBUFFER, GlDepthAttachment, GlRenderbuffer, _depth);
 
-            int status = GlRaw.CheckFramebufferStatus(_gl, GlConsts.GL_FRAMEBUFFER);
+            var status = GlRaw.CheckFramebufferStatus(_gl, GlConsts.GL_FRAMEBUFFER);
             Debug.Assert(
                 status == GlFramebufferComplete,
                 $"[PREVIEWER][ssaa] FBO 不完整 code=0x{status:X}");
@@ -114,7 +119,10 @@ internal sealed class SupersampleTarget : IDisposable
         Debug.WriteLine($"[PREVIEWER][ssaa] target {width}x{height}");
     }
 
-    public void BindForRender() => GlRaw.BindFramebuffer(_gl, GlConsts.GL_FRAMEBUFFER, _fbo);
+    public void BindForRender()
+    {
+        GlRaw.BindFramebuffer(_gl, GlConsts.GL_FRAMEBUFFER, _fbo);
+    }
 
     // 画完降采样回交换链表面，并把 GL_FRAMEBUFFER 绑回表面——后续的读回（截帧/校验）
     // 都假定当前绑着 Avalonia 给的那个 fb。
@@ -123,27 +131,16 @@ internal sealed class SupersampleTarget : IDisposable
         GlRaw.BindFramebuffer(_gl, GlRaw.GL_READ_FRAMEBUFFER, _fbo);
         GlRaw.BindFramebuffer(_gl, GlRaw.GL_DRAW_FRAMEBUFFER, defaultFramebuffer);
         GlRaw.BlitFramebuffer(
-            _gl, 0, 0, _width, _height, 0, 0, width, height,
+            _gl, 0, 0, Width, Height, 0, 0, width, height,
             GlConsts.GL_COLOR_BUFFER_BIT, GlConsts.GL_LINEAR);
         GlRaw.BindFramebuffer(_gl, GlConsts.GL_FRAMEBUFFER, defaultFramebuffer);
-    }
-
-    public void Dispose()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        _disposed = true;
-        ReleaseGpu();
     }
 
     private void ReleaseGpu()
     {
         if (_fbo != 0)
         {
-            IntPtr ids = Marshal.AllocHGlobal(sizeof(int));
+            var ids = Marshal.AllocHGlobal(sizeof(int));
             try
             {
                 Marshal.WriteInt32(ids, _fbo);

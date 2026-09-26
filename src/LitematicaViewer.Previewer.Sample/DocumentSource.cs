@@ -18,22 +18,6 @@ namespace LitematicaViewer.Previewer.Sample;
 // 否则先启动的慢解析会覆盖后启动的快解析，画面停在「先拖的那个文件」上。
 internal sealed class DocumentSource
 {
-    // 载入结果的全部产出（R6）：数组只在这里造一次，之后谁都不改。
-    internal sealed record LoadedDocument(
-        string FileName,
-        int RegionCount,
-        long TotalBlocks,
-        float[] MergedVertices,
-        int[] MergedIndices,
-        byte[][] AtlasLevels,
-        int AtlasWidth,
-        int AtlasHeight,
-        ImmutableArray<ShowcaseTarget> Targets,
-        Vector3 WholeCentre,
-        float WholeRadius,
-        LitematicDocument Document,
-        string DebugNotes);
-
     private int _generation;
 
     /// <summary>载入完成或失败。UI 线程回调；失败时 document 为 null、message 给原因。</summary>
@@ -44,13 +28,10 @@ internal sealed class DocumentSource
     private static string? FindPacksDirectory()
     {
         DirectoryInfo? dir = new(AppContext.BaseDirectory);
-        for (int i = 0; i < 7 && dir is not null; i++, dir = dir.Parent)
+        for (var i = 0; i < 7 && dir is not null; i++, dir = dir.Parent)
         {
-            string candidate = Path.Combine(dir.FullName, "packs");
-            if (Directory.Exists(candidate))
-            {
-                return candidate;
-            }
+            var candidate = Path.Combine(dir.FullName, "packs");
+            if (Directory.Exists(candidate)) return candidate;
         }
 
         return null;
@@ -64,23 +45,19 @@ internal sealed class DocumentSource
         PackStack packs = new();
         List<string> jars = [];
         List<string> others = [];
-        foreach (string entry in Directory.EnumerateFileSystemEntries(packsDirectory))
-        {
+        foreach (var entry in Directory.EnumerateFileSystemEntries(packsDirectory))
             if (Directory.Exists(entry) ||
                 entry.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) ||
                 entry.EndsWith(".jar", StringComparison.OrdinalIgnoreCase))
-            {
                 (entry.EndsWith(".jar", StringComparison.OrdinalIgnoreCase) ? jars : others).Add(entry);
-            }
-        }
 
         jars.Sort(StringComparer.Ordinal);
         others.Sort(StringComparer.Ordinal);
 
         List<string> loaded = [];
-        foreach (string path in jars.Concat(others))
+        foreach (var path in jars.Concat(others))
         {
-            ResourcePack pack = Directory.Exists(path)
+            var pack = Directory.Exists(path)
                 ? ResourcePack.OpenFolder(path)
                 : ResourcePack.OpenZip(path);
             packs.Add(pack);
@@ -93,16 +70,16 @@ internal sealed class DocumentSource
 
     public void Load(string path)
     {
-        int generation = ++_generation;
+        var generation = ++_generation;
         Debug.WriteLine($"[SAMPLE][source] 开始载入 generation={generation} path={path}");
 
         Task.Run(() =>
         {
             LoadedDocument? document = null;
-            string error = "";
+            var error = "";
             try
             {
-                document = LoadCore(path, out string notes);
+                document = LoadCore(path, out var notes);
                 document = document with { DebugNotes = notes };
             }
             catch (Exception ex)
@@ -112,8 +89,8 @@ internal sealed class DocumentSource
                 Debug.WriteLine($"[SAMPLE][source] 载入失败 {path} {error}\n{ex.StackTrace}");
             }
 
-            LoadedDocument? result = document;
-            string message = error;
+            var result = document;
+            var message = error;
             Dispatcher.UIThread.Post(() =>
             {
                 // 代次对不上说明已经有更新的请求在后面，这一份作废。
@@ -125,32 +102,25 @@ internal sealed class DocumentSource
                 }
 
                 Completed?.Invoke(path, result);
-                if (result is null)
-                {
-                    Debug.WriteLine($"[SAMPLE][source] 载入失败上报 path={path} error={message}");
-                }
+                if (result is null) Debug.WriteLine($"[SAMPLE][source] 载入失败上报 path={path} error={message}");
             });
         });
     }
 
     private static LoadedDocument LoadCore(string path, out string notes)
     {
-        LoadResult result = LitematicLoader.TryLoadFile(path);
+        var result = LitematicLoader.TryLoadFile(path);
         if (!result.Success || result.Document is null)
-        {
             throw new InvalidDataException($"{result.Error} {result.Message}");
-        }
 
-        LitematicDocument document = result.Document;
+        var document = result.Document;
 
-        string? packsDirectory = FindPacksDirectory();
+        var packsDirectory = FindPacksDirectory();
         if (packsDirectory is null)
-        {
             throw new DirectoryNotFoundException(
                 "找不到 packs/ 资源包目录（把原版 client.jar 与材质包放进去）");
-        }
 
-        PackStack packs = BuildPackStack(packsDirectory, out string packNotes);
+        var packs = BuildPackStack(packsDirectory, out var packNotes);
         BlockStateResolver resolver = new(packs);
 
         // sprite 全集先收齐再建图集：图集建出来之后 mesh 的 uv 才有落位可算。
@@ -160,7 +130,7 @@ internal sealed class DocumentSource
         HashSet<string> sprites = [];
         collector.CollectSprites(document.Regions, sprites);
 
-        TextureAtlas atlas = TextureAtlas.Build(packs, sprites);
+        var atlas = TextureAtlas.Build(packs, sprites);
         BlockMeshBuilder builder = new(resolver, atlas);
 
         List<MeshData> parts = [];
@@ -168,36 +138,36 @@ internal sealed class DocumentSource
         Vector3I wholeMin = new(int.MaxValue, int.MaxValue, int.MaxValue);
         Vector3I wholeMax = new(int.MinValue, int.MinValue, int.MinValue);
 
-        foreach (LitematicRegion region in document.Regions)
+        foreach (var region in document.Regions)
         {
-            MeshData mesh = builder.BuildRegion(region);
+            var mesh = builder.BuildRegion(region);
             parts.Add(mesh);
 
             // 展台目标从 region 的网格包围盒来：中心是几何中心，半径是水平半对角线
             // （光环躺在水平面上，由它决定大小），底面是包围盒的最低点。
-            IntBounds bounds = region.Bounds;
+            var bounds = region.Bounds;
             Vector3 min = new(bounds.Min.X, bounds.Min.Y, bounds.Min.Z);
             // Max 是闭区间端点：那个方块自己占一格，几何边界要到 +1。
             Vector3 max = new(bounds.Max.X + 1, bounds.Max.Y + 1, bounds.Max.Z + 1);
-            Vector3 centre = (min + max) * 0.5f;
-            float radius = MathF.Sqrt(
-                ((max.X - min.X) * 0.5f) * ((max.X - min.X) * 0.5f) +
-                ((max.Z - min.Z) * 0.5f) * ((max.Z - min.Z) * 0.5f));
+            var centre = (min + max) * 0.5f;
+            var radius = MathF.Sqrt(
+                (max.X - min.X) * 0.5f * ((max.X - min.X) * 0.5f) +
+                (max.Z - min.Z) * 0.5f * ((max.Z - min.Z) * 0.5f));
             targets.Add(new ShowcaseTarget(region.Name, centre, radius, min.Y));
 
             wholeMin = Vector3I.ComponentMin(wholeMin, bounds.Min);
             wholeMax = Vector3I.ComponentMax(wholeMax, bounds.Max);
         }
 
-        (float[] vertices, int[] indices) = MergeMeshes(parts);
+        var (vertices, indices) = MergeMeshes(parts);
 
         Vector3 wholeCentre = new(
             (wholeMin.X + wholeMax.X + 1) * 0.5f,
             (wholeMin.Y + wholeMax.Y + 1) * 0.5f,
             (wholeMin.Z + wholeMax.Z + 1) * 0.5f);
-        float wholeRadius = MathF.Sqrt(
-            ((wholeMax.X - wholeMin.X + 1) * 0.5f) * ((wholeMax.X - wholeMin.X + 1) * 0.5f) +
-            ((wholeMax.Z - wholeMin.Z + 1) * 0.5f) * ((wholeMax.Z - wholeMin.Z + 1) * 0.5f));
+        var wholeRadius = MathF.Sqrt(
+            (wholeMax.X - wholeMin.X + 1) * 0.5f * ((wholeMax.X - wholeMin.X + 1) * 0.5f) +
+            (wholeMax.Z - wholeMin.Z + 1) * 0.5f * ((wholeMax.Z - wholeMin.Z + 1) * 0.5f));
 
         notes = $"{packNotes} atlas={atlas.Width}x{atlas.Height} missingSprites={atlas.MissingCount} " +
                 (atlas.MissingCount > 0
@@ -209,24 +179,23 @@ internal sealed class DocumentSource
         // GPU 画面花而软件渲染正常时，先确认上传数据的每一层都对。
         if (Program.ShotPath is not null)
         {
-            string dumpDir = Path.GetDirectoryName(Path.GetFullPath(Program.ShotPath)) ?? ".";
-            string stem = Path.GetFileNameWithoutExtension(Program.ShotPath);
-            for (int level = 0; level < atlas.Levels.Length; level++)
+            var dumpDir = Path.GetDirectoryName(Path.GetFullPath(Program.ShotPath)) ?? ".";
+            var stem = Path.GetFileNameWithoutExtension(Program.ShotPath);
+            for (var level = 0; level < atlas.Levels.Length; level++)
             {
-                int lw = Math.Max(1, atlas.Width >> level);
-                int lh = Math.Max(1, atlas.Height >> level);
+                var lw = Math.Max(1, atlas.Width >> level);
+                var lh = Math.Max(1, atlas.Height >> level);
                 ShotWriter.WriteAtlas(
                     Path.Combine(dumpDir, $"{stem}_L{level}.ppm"), atlas.Levels[level], lw, lh);
                 if (level == 0)
-                {
                     ShotWriter.WriteAtlasAlpha(
                         Path.Combine(dumpDir, $"{stem}_alpha.pgm"), atlas.Levels[0], lw, lh);
-                }
             }
 
             File.WriteAllLines(
                 Path.Combine(dumpDir, $"{stem}_rects.txt"),
-                atlas.Rects.Select(r => $"{r.Sprite} cell=({r.X - 8},{r.Y - 8}) inner=({r.X},{r.Y}) {r.Width}x{r.Height}"));
+                atlas.Rects.Select(r =>
+                    $"{r.Sprite} cell=({r.X - 8},{r.Y - 8}) inner=({r.X},{r.Y}) {r.Width}x{r.Height}"));
         }
 
         return new LoadedDocument(
@@ -249,21 +218,18 @@ internal sealed class DocumentSource
     // 合并发生在后台线程的一次性数组里，渲染侧（SetMesh）永远只见一份完整数据。
     private static (float[] Vertices, int[] Indices) MergeMeshes(List<MeshData> parts)
     {
-        int vertexFloats = parts.Sum(p => p.Vertices.Length);
-        int indexCount = parts.Sum(p => p.Indices.Length);
-        float[] vertices = new float[vertexFloats];
-        int[] indices = new int[indexCount];
+        var vertexFloats = parts.Sum(p => p.Vertices.Length);
+        var indexCount = parts.Sum(p => p.Indices.Length);
+        var vertices = new float[vertexFloats];
+        var indices = new int[indexCount];
 
-        int vertexCursor = 0;
-        int indexCursor = 0;
-        int baseVertex = 0;
-        foreach (MeshData part in parts)
+        var vertexCursor = 0;
+        var indexCursor = 0;
+        var baseVertex = 0;
+        foreach (var part in parts)
         {
             Array.Copy(part.Vertices, 0, vertices, vertexCursor, part.Vertices.Length);
-            for (int i = 0; i < part.Indices.Length; i++)
-            {
-                indices[indexCursor + i] = part.Indices[i] + baseVertex;
-            }
+            for (var i = 0; i < part.Indices.Length; i++) indices[indexCursor + i] = part.Indices[i] + baseVertex;
 
             vertexCursor += part.Vertices.Length;
             indexCursor += part.Indices.Length;
@@ -272,4 +238,20 @@ internal sealed class DocumentSource
 
         return (vertices, indices);
     }
+
+    // 载入结果的全部产出（R6）：数组只在这里造一次，之后谁都不改。
+    internal sealed record LoadedDocument(
+        string FileName,
+        int RegionCount,
+        long TotalBlocks,
+        float[] MergedVertices,
+        int[] MergedIndices,
+        byte[][] AtlasLevels,
+        int AtlasWidth,
+        int AtlasHeight,
+        ImmutableArray<ShowcaseTarget> Targets,
+        Vector3 WholeCentre,
+        float WholeRadius,
+        LitematicDocument Document,
+        string DebugNotes);
 }

@@ -25,23 +25,20 @@ public static class PackSmoke
         // --scan 模式：全量扫包栈里的 blockstate，把「解不出 variant / 解不出面 /
         // sprite 缺图」的方块一次点名。画面上「某方块整块消失」时先跑这个，
         // 比对着截图猜快得多。
-        bool scan = args[0] == "--scan";
-        string[] packPaths = scan ? args[1..] : args;
+        var scan = args[0] == "--scan";
+        var packPaths = scan ? args[1..] : args;
 
         using PackStack packs = new();
-        foreach (string path in packPaths)
+        foreach (var path in packPaths)
         {
-            ResourcePack pack = Directory.Exists(path) ? ResourcePack.OpenFolder(path) : ResourcePack.OpenZip(path);
+            var pack = Directory.Exists(path) ? ResourcePack.OpenFolder(path) : ResourcePack.OpenZip(path);
             packs.Add(pack);
             Debug.WriteLine($"[ASSETS][smoke] 装包 {pack.Name} entries={pack.Enumerate("assets/").Count()}");
         }
 
         BlockStateResolver resolver = new(packs);
 
-        if (scan)
-        {
-            return ScanAllBlocks(packs, resolver);
-        }
+        if (scan) return ScanAllBlocks(packs, resolver);
 
         CheckPackStack(packs);
         CheckStone(resolver);
@@ -60,7 +57,7 @@ public static class PackSmoke
     {
         // 栈里任何一层有 stone.json 就能读到——这条不成立的话后面全不用看。
         Debug.Assert(
-            packs.TryRead("assets/minecraft/blockstates/stone.json", out byte[] stone),
+            packs.TryRead("assets/minecraft/blockstates/stone.json", out var stone),
             "[ASSETS][smoke] 栈里读不到 assets/minecraft/blockstates/stone.json");
         Debug.Assert(stone.Length > 2, $"[ASSETS][smoke] stone.json 是空的 len={stone.Length}");
         _checks++;
@@ -71,23 +68,27 @@ public static class PackSmoke
         // cube_all：六个面同一张贴图、无 tint、默认整张 uv。
         // 26.3 的 stone blockstate 给了 4 个 variant（旋转/镜像的花色变化，刻意不止一个），
         // 所以这里只断言「至少一个」，逐面断言对每个 variant 都成立。
-        ResolvedBlockState state = resolver.Resolve("minecraft:stone");
-        Debug.Assert(state.Variants.Count >= 1, $"[ASSETS][smoke] stone 命中 {state.Variants.Count} 个 variant expected>=1");
-        foreach (ResolvedVariant variant in state.Variants)
+        var state = resolver.Resolve("minecraft:stone");
+        Debug.Assert(state.Variants.Count >= 1,
+            $"[ASSETS][smoke] stone 命中 {state.Variants.Count} 个 variant expected>=1");
+        foreach (var variant in state.Variants)
         {
-            Debug.Assert(variant.Model.Elements.Count == 1, $"[ASSETS][smoke] {variant.ModelId} 应有 1 个 element 实得 {variant.Model.Elements.Count}");
-            ModelElement element = variant.Model.Elements[0];
-            Debug.Assert(element.Faces.Count == 6, $"[ASSETS][smoke] {variant.ModelId} 应有 6 个面 实得 {element.Faces.Count}");
-            foreach (ElementFace face in element.Faces)
+            Debug.Assert(variant.Model.Elements.Count == 1,
+                $"[ASSETS][smoke] {variant.ModelId} 应有 1 个 element 实得 {variant.Model.Elements.Count}");
+            var element = variant.Model.Elements[0];
+            Debug.Assert(element.Faces.Count == 6,
+                $"[ASSETS][smoke] {variant.ModelId} 应有 6 个面 实得 {element.Faces.Count}");
+            foreach (var face in element.Faces)
             {
-                Debug.Assert(face.Sprite == "minecraft:block/stone", $"[ASSETS][smoke] {variant.ModelId} 面贴图={face.Sprite} expected=minecraft:block/stone");
+                Debug.Assert(face.Sprite == "minecraft:block/stone",
+                    $"[ASSETS][smoke] {variant.ModelId} 面贴图={face.Sprite} expected=minecraft:block/stone");
 
                 // 镜像 variant 用翻转的 uv 实现（16,0,0,16 而不是 0,0,16,16），
                 // 所以断言「占满整张贴图」而不是「恰好等于默认值」。
                 Debug.Assert(
                     face.Uv.X >= 0f && face.Uv.Y >= 0f && face.Uv.Z <= 16f && face.Uv.W <= 16f
-                    && System.MathF.Abs(System.MathF.Abs(face.Uv.Z - face.Uv.X) - 16f) < 1e-4f
-                    && System.MathF.Abs(System.MathF.Abs(face.Uv.W - face.Uv.Y) - 16f) < 1e-4f,
+                    && MathF.Abs(MathF.Abs(face.Uv.Z - face.Uv.X) - 16f) < 1e-4f
+                    && MathF.Abs(MathF.Abs(face.Uv.W - face.Uv.Y) - 16f) < 1e-4f,
                     $"[ASSETS][smoke] {variant.ModelId} 面 uv 应占满整张贴图 实得 {face.Uv}");
                 Debug.Assert(face.TintIndex == -1, $"[ASSETS][smoke] {variant.ModelId} 不应有 tint 实得 {face.TintIndex}");
             }
@@ -100,16 +101,19 @@ public static class PackSmoke
     private static void CheckLogAxis(BlockStateResolver resolver)
     {
         // #引用与贴图合并：原木侧面与端面是两张图，由 cube_column 的 #end/#side 给出。
-        ResolvedBlockState state = resolver.Resolve("minecraft:oak_log[axis=y]");
-        Debug.Assert(state.Variants.Count == 1, $"[ASSETS][smoke] oak_log[axis=y] 命中 {state.Variants.Count} expected=1");
-        ModelElement element = state.Variants[0].Model.Elements.Single();
-        ElementFace up = element.Faces.Single(f => f.Face == FaceName.Up);
-        ElementFace north = element.Faces.Single(f => f.Face == FaceName.North);
-        Debug.Assert(up.Sprite == "minecraft:block/oak_log_top", $"[ASSETS][smoke] 原木端面={up.Sprite} expected=oak_log_top");
-        Debug.Assert(north.Sprite == "minecraft:block/oak_log", $"[ASSETS][smoke] 原木侧面={north.Sprite} expected=oak_log");
+        var state = resolver.Resolve("minecraft:oak_log[axis=y]");
+        Debug.Assert(state.Variants.Count == 1,
+            $"[ASSETS][smoke] oak_log[axis=y] 命中 {state.Variants.Count} expected=1");
+        var element = state.Variants[0].Model.Elements.Single();
+        var up = element.Faces.Single(f => f.Face == FaceName.Up);
+        var north = element.Faces.Single(f => f.Face == FaceName.North);
+        Debug.Assert(up.Sprite == "minecraft:block/oak_log_top",
+            $"[ASSETS][smoke] 原木端面={up.Sprite} expected=oak_log_top");
+        Debug.Assert(north.Sprite == "minecraft:block/oak_log",
+            $"[ASSETS][smoke] 原木侧面={north.Sprite} expected=oak_log");
 
         // axis=x 时 variant 带 y 旋转（MC 用整体旋转表达横放的原木）。
-        ResolvedBlockState rotated = resolver.Resolve("minecraft:oak_log[axis=x]");
+        var rotated = resolver.Resolve("minecraft:oak_log[axis=x]");
         Debug.Assert(rotated.Variants.Count == 1, "[ASSETS][smoke] oak_log[axis=x] 应命中 1 个 variant");
         Debug.Assert(
             rotated.Variants[0].XDegrees != 0f || rotated.Variants[0].YDegrees != 0f,
@@ -124,13 +128,16 @@ public static class PackSmoke
         // 楼梯是 multipart：条件命中在这里验。
         // 26.3 重做了楼梯模型——旧的 45° element rotation 没了，现在是两个轴对齐的盒子
         // （1.20 时代的资料会说楼梯带旋转，照旧资料写断言就会在这上头栽）。
-        ResolvedBlockState state = resolver.Resolve("minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]");
-        Debug.Assert(state.Variants.Count >= 1, $"[ASSETS][smoke] oak_stairs 应至少命中 1 个 apply 实得 {state.Variants.Count}");
-        ResolvedVariant variant = state.Variants[0];
-        int totalFaces = variant.Model.Elements.Sum(e => e.Faces.Count);
-        Debug.Assert(variant.Model.Elements.Count >= 2, $"[ASSETS][smoke] 26.3 楼梯应是两个盒子 实得 {variant.Model.Elements.Count} 个 element");
+        var state = resolver.Resolve("minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]");
+        Debug.Assert(state.Variants.Count >= 1,
+            $"[ASSETS][smoke] oak_stairs 应至少命中 1 个 apply 实得 {state.Variants.Count}");
+        var variant = state.Variants[0];
+        var totalFaces = variant.Model.Elements.Sum(e => e.Faces.Count);
+        Debug.Assert(variant.Model.Elements.Count >= 2,
+            $"[ASSETS][smoke] 26.3 楼梯应是两个盒子 实得 {variant.Model.Elements.Count} 个 element");
         Debug.Assert(totalFaces >= 6, $"[ASSETS][smoke] 楼梯面数应 ≥6 实得 {totalFaces}");
-        Debug.WriteLine($"[ASSETS][smoke] oak_stairs: multipart 命中，{variant.Model.Elements.Count} 个盒子 {totalFaces} 个面 ✓");
+        Debug.WriteLine(
+            $"[ASSETS][smoke] oak_stairs: multipart 命中，{variant.Model.Elements.Count} 个盒子 {totalFaces} 个面 ✓");
         _checks++;
     }
 
@@ -138,13 +145,13 @@ public static class PackSmoke
     {
         // element rotation 在 26.3 的原版包里还剩 159 个模型在用，big_dripleaf 是其中之一
         // （y 轴 45°，带 rescale——rescale 暂不解析，罕见且影响小）。
-        ResolvedBlockState state = resolver.Resolve("minecraft:big_dripleaf[facing=north,tilt=none,waterlogged=false]");
-        Debug.Assert(state.Variants.Count >= 1, $"[ASSETS][smoke] big_dripleaf 没解析出 variant");
-        ElementRotation? rotation = state.Variants.SelectMany(v => v.Model.Elements)
+        var state = resolver.Resolve("minecraft:big_dripleaf[facing=north,tilt=none,waterlogged=false]");
+        Debug.Assert(state.Variants.Count >= 1, "[ASSETS][smoke] big_dripleaf 没解析出 variant");
+        var rotation = state.Variants.SelectMany(v => v.Model.Elements)
             .Select(e => e.Rotation)
             .FirstOrDefault(r => r is not null);
         Debug.Assert(rotation is not null, "[ASSETS][smoke] big_dripleaf 应带 element rotation");
-        Debug.Assert(rotation!.Value.Axis == 1 && System.MathF.Abs(rotation.Value.AngleDegrees - 45f) < 1e-4f,
+        Debug.Assert(rotation!.Value.Axis == 1 && MathF.Abs(rotation.Value.AngleDegrees - 45f) < 1e-4f,
             $"[ASSETS][smoke] big_dripleaf 旋转应绕 y 轴 45° 实得 axis={rotation.Value.Axis} angle={rotation.Value.AngleDegrees}");
         Debug.WriteLine($"[ASSETS][smoke] big_dripleaf: element rotation y/45° 解析 ✓ origin={rotation.Value.Origin}");
         _checks++;
@@ -154,12 +161,12 @@ public static class PackSmoke
     {
         // 用户包的命名空间（create）原版栈里没有——能读 = 分层查找通了。
         Debug.Assert(
-            packs.TryRead("assets/create/blockstates/linear_chassis.json", out byte[] chassis),
+            packs.TryRead("assets/create/blockstates/linear_chassis.json", out var chassis),
             "[ASSETS][smoke] 用户包的 create 命名空间读不到");
 
         // variants 的键要求全部属性匹配：不带属性的状态一个键都命中不了是**正确**行为，
         // 所以这里必须给全属性，而不是拿裸方块名去测命中数。
-        ResolvedBlockState state = resolver.Resolve("create:linear_chassis[axis=y,sticky_bottom=false,sticky_top=false]");
+        var state = resolver.Resolve("create:linear_chassis[axis=y,sticky_bottom=false,sticky_top=false]");
         Debug.Assert(
             state.Variants.Count == 1,
             $"[ASSETS][smoke] create:linear_chassis[axis=y] 应命中 1 个 variant 实得 {state.Variants.Count}");
@@ -189,22 +196,22 @@ public static class PackSmoke
             "minecraft:glowstone",
             "minecraft:redstone_lamp[lit=true]",
             "minecraft:repeater[facing=north,delay=1,locked=false,powered=true]",
-            "minecraft:piston[facing=up,extended=true]",
+            "minecraft:piston[facing=up,extended=true]"
         ];
 
-        int totalVariants = 0;
-        int totalFaces = 0;
-        int spritesWithoutTexture = 0;
-        foreach (string blockId in batch)
+        var totalVariants = 0;
+        var totalFaces = 0;
+        var spritesWithoutTexture = 0;
+        foreach (var blockId in batch)
         {
-            ResolvedBlockState state = resolver.Resolve(blockId);
+            var state = resolver.Resolve(blockId);
             Debug.Assert(
                 state.Variants.Count > 0,
                 $"[ASSETS][smoke] {blockId} 没解析出任何 variant note=parent 链断或 blockstate 缺失");
-            foreach (ResolvedVariant variant in state.Variants)
+            foreach (var variant in state.Variants)
             {
                 totalVariants++;
-                foreach (ModelElement element in variant.Model.Elements)
+                foreach (var element in variant.Model.Elements)
                 {
                     totalFaces += element.Faces.Count;
                     spritesWithoutTexture += element.Faces.Count(f => f.Sprite.Length == 0);
@@ -222,45 +229,46 @@ public static class PackSmoke
     private static void CheckAtlas(PackStack packs)
     {
         // 缺的贴图给棋盘占位、动画取首帧、装箱不重叠——三条是图集的最低保证。
-        TextureAtlas atlas = TextureAtlas.Build(packs,
+        var atlas = TextureAtlas.Build(packs,
         [
             "minecraft:block/stone",
             "minecraft:block/oak_log",
             "minecraft:block/oak_log_top",
-            "minecraft:block/water_still",          // 动画：竖排多帧 + mcmeta
+            "minecraft:block/water_still", // 动画：竖排多帧 + mcmeta
             "minecraft:block/oak_planks",
-            "minecraft:block/__nope__",             // 故意缺失
+            "minecraft:block/__nope__" // 故意缺失
         ]);
 
         Debug.Assert(atlas.MissingCount == 1, $"[ASSETS][smoke] 缺失贴图应正好 1 张 实得 {atlas.MissingCount}");
 
         // 落位不越界 + 两两不重叠（占格检查：图集不大，直接开一张占用表）。
-        bool[] occupied = new bool[atlas.Width * atlas.Height];
-        foreach (SpriteRect rect in atlas.Rects)
+        var occupied = new bool[atlas.Width * atlas.Height];
+        foreach (var rect in atlas.Rects)
         {
             Debug.Assert(
-                rect.X >= 0 && rect.Y >= 0 && rect.X + rect.Width <= atlas.Width && rect.Y + rect.Height <= atlas.Height,
+                rect.X >= 0 && rect.Y >= 0 && rect.X + rect.Width <= atlas.Width &&
+                rect.Y + rect.Height <= atlas.Height,
                 $"[ASSETS][smoke] {rect.Sprite} 落位越界 rect={rect} atlas={atlas.Width}x{atlas.Height}");
-            for (int y = rect.Y; y < rect.Y + rect.Height; y++)
+            for (var y = rect.Y; y < rect.Y + rect.Height; y++)
+            for (var x = rect.X; x < rect.X + rect.Width; x++)
             {
-                for (int x = rect.X; x < rect.X + rect.Width; x++)
-                {
-                    int index = (y * atlas.Width) + x;
-                    Debug.Assert(!occupied[index], $"[ASSETS][smoke] {rect.Sprite} 与别的 sprite 重叠在 ({x},{y})");
-                    occupied[index] = true;
-                }
+                var index = y * atlas.Width + x;
+                Debug.Assert(!occupied[index], $"[ASSETS][smoke] {rect.Sprite} 与别的 sprite 重叠在 ({x},{y})");
+                occupied[index] = true;
             }
         }
 
         // 动画贴图只留首帧：water_still 源文件是 16x512，进图集必须是 16x16。
-        SpriteRect water = atlas.Rects.Single(r => r.Sprite == "minecraft:block/water_still");
-        Debug.Assert(water.Width == 16 && water.Height == 16, $"[ASSETS][smoke] water_still 应只取首帧 实得 {water.Width}x{water.Height}");
+        var water = atlas.Rects.Single(r => r.Sprite == "minecraft:block/water_still");
+        Debug.Assert(water.Width == 16 && water.Height == 16,
+            $"[ASSETS][smoke] water_still 应只取首帧 实得 {water.Width}x{water.Height}");
 
         // 占位棋盘的 (0,0) 是品红：缺贴图在画面上要一眼认得出来。
-        SpriteRect missing = atlas.Rects.Single(r => r.Sprite == "minecraft:block/__nope__");
-        int offset = ((missing.Y * atlas.Width) + missing.X) * 4;
+        var missing = atlas.Rects.Single(r => r.Sprite == "minecraft:block/__nope__");
+        var offset = (missing.Y * atlas.Width + missing.X) * 4;
         Debug.Assert(
-            atlas.Pixels[offset] == 248 && atlas.Pixels[offset + 1] == 0 && atlas.Pixels[offset + 2] == 248 && atlas.Pixels[offset + 3] == 255,
+            atlas.Pixels[offset] == 248 && atlas.Pixels[offset + 1] == 0 && atlas.Pixels[offset + 2] == 248 &&
+            atlas.Pixels[offset + 3] == 255,
             $"[ASSETS][smoke] 缺失贴图的占位色不是品红 got=({atlas.Pixels[offset]},{atlas.Pixels[offset + 1]},{atlas.Pixels[offset + 2]},{atlas.Pixels[offset + 3]})");
 
         Debug.WriteLine(
@@ -276,19 +284,19 @@ public static class PackSmoke
     // 缺图=sprite 不在包栈里（渲染出来是棋盘，名单里能看出缺哪张）。
     private static int ScanAllBlocks(PackStack packs, BlockStateResolver resolver)
     {
-        List<string> ids = packs
+        var ids = packs
             .Enumerate("assets/")
             .Where(path => path.EndsWith("/blockstates/", StringComparison.Ordinal) is false
-                && path.Contains("/blockstates/", StringComparison.Ordinal)
-                && path.EndsWith(".json", StringComparison.Ordinal))
+                           && path.Contains("/blockstates/", StringComparison.Ordinal)
+                           && path.EndsWith(".json", StringComparison.Ordinal))
             .Select(path =>
             {
                 // assets/<ns>/blockstates/<name>.json → <ns>:<name>
-                int nsStart = "assets/".Length;
-                int slash = path.IndexOf('/', nsStart);
-                int marker = path.IndexOf("/blockstates/", nsStart, StringComparison.Ordinal);
-                string ns = path[nsStart..marker];
-                string name = path[(marker + "/blockstates/".Length)..^".json".Length];
+                var nsStart = "assets/".Length;
+                var slash = path.IndexOf('/', nsStart);
+                var marker = path.IndexOf("/blockstates/", nsStart, StringComparison.Ordinal);
+                var ns = path[nsStart..marker];
+                var name = path[(marker + "/blockstates/".Length)..^".json".Length];
                 return $"{ns}:{name}";
             })
             .Distinct()
@@ -300,26 +308,21 @@ public static class PackSmoke
         HashSet<string> allSprites = new(StringComparer.Ordinal);
         Dictionary<string, int> faceCountById = new(StringComparer.Ordinal);
 
-        foreach (string id in ids)
+        foreach (var id in ids)
         {
             // 无属性 id 解 multipart/全属性 variants 必然 0 面（26.3 的键是全属性匹配），
             // 那是姿势问题不是资产问题：从 blockstate JSON 里挖属性组合再逐个 resolve。
-            (string Ns, string Path) = SplitId(id);
+            var (Ns, Path) = SplitId(id);
             List<string> combos = [];
-            if (packs.TryRead($"assets/{Ns}/blockstates/{Path}.json", out byte[] stateJson))
-            {
+            if (packs.TryRead($"assets/{Ns}/blockstates/{Path}.json", out var stateJson))
                 combos = DigPropertyCombos(stateJson);
-            }
 
-            if (combos.Count == 0)
-            {
-                combos = [""];
-            }
+            if (combos.Count == 0) combos = [""];
 
-            int faces = 0;
-            foreach (string combo in combos)
+            var faces = 0;
+            foreach (var combo in combos)
             {
-                string probe = combo.Length == 0 ? id : $"{id}[{combo}]";
+                var probe = combo.Length == 0 ? id : $"{id}[{combo}]";
                 ResolvedBlockState state;
                 try
                 {
@@ -332,68 +335,47 @@ public static class PackSmoke
                     break;
                 }
 
-                foreach (ResolvedVariant variant in state.Variants)
+                foreach (var variant in state.Variants)
+                foreach (var element in variant.Model.Elements)
                 {
-                    foreach (ModelElement element in variant.Model.Elements)
-                    {
-                        faces += element.Faces.Count;
-                        foreach (ElementFace face in element.Faces)
+                    faces += element.Faces.Count;
+                    foreach (var face in element.Faces)
+                        if (face.Sprite.Length > 0)
                         {
-                            if (face.Sprite.Length > 0)
-                            {
-                                if (face.Sprite.EndsWith("all", StringComparison.Ordinal))
-                                {
-                                    Console.WriteLine($"[ASSETS][scan]   裸all来源 {probe} model={variant.ModelId}");
-                                }
+                            if (face.Sprite.EndsWith("all", StringComparison.Ordinal))
+                                Console.WriteLine($"[ASSETS][scan]   裸all来源 {probe} model={variant.ModelId}");
 
-                                allSprites.Add(face.Sprite);
-                            }
+                            allSprites.Add(face.Sprite);
                         }
-                    }
                 }
             }
 
-            if (faces < 0)
-            {
-                continue; // resolve 抛过异常，上面已点名
-            }
+            if (faces < 0) continue; // resolve 抛过异常，上面已点名
 
             faceCountById[id] = faces;
-            if (faces == 0)
-            {
-                noFaces.Add(id);
-            }
+            if (faces == 0) noFaces.Add(id);
         }
 
         // 全量图集：把缺图名单一次拿全。
-        TextureAtlas atlas = TextureAtlas.Build(packs, allSprites);
+        var atlas = TextureAtlas.Build(packs, allSprites);
 
         Console.WriteLine($"[ASSETS][scan] blockstates={ids.Count} 有面={faceCountById.Count} " +
-            $"sprites={allSprites.Count} atlas={atlas.Width}x{atlas.Height}");
+                          $"sprites={allSprites.Count} atlas={atlas.Width}x{atlas.Height}");
         Console.WriteLine($"[ASSETS][scan] noVariants={noVariants.Count}");
-        foreach (string id in noVariants)
-        {
-            Console.WriteLine($"[ASSETS][scan]   noVariants {id}");
-        }
+        foreach (var id in noVariants) Console.WriteLine($"[ASSETS][scan]   noVariants {id}");
 
         Console.WriteLine($"[ASSETS][scan] noFaces={noFaces.Count}");
-        foreach (string id in noFaces)
-        {
-            Console.WriteLine($"[ASSETS][scan]   noFaces {id}");
-        }
+        foreach (var id in noFaces) Console.WriteLine($"[ASSETS][scan]   noFaces {id}");
 
         Console.WriteLine($"[ASSETS][scan] missingSprites={atlas.MissingCount}");
-        foreach (string sprite in atlas.MissingSprites)
-        {
-            Console.WriteLine($"[ASSETS][scan]   missing {sprite}");
-        }
+        foreach (var sprite in atlas.MissingSprites) Console.WriteLine($"[ASSETS][scan]   missing {sprite}");
 
         return 0;
     }
 
     private static (string Ns, string Path) SplitId(string raw)
     {
-        int colon = raw.IndexOf(':');
+        var colon = raw.IndexOf(':');
         return colon < 0 ? ("minecraft", raw) : (raw[..colon], raw[(colon + 1)..]);
     }
 
@@ -404,33 +386,20 @@ public static class PackSmoke
     {
         try
         {
-            using JsonDocument doc = JsonDocument.Parse(json);
-            JsonElement root = doc.RootElement;
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
             Dictionary<string, string> props = new(StringComparer.Ordinal);
-            if (root.TryGetProperty("variants", out JsonElement variants))
-            {
-                foreach (JsonProperty entry in variants.EnumerateObject())
+            if (root.TryGetProperty("variants", out var variants))
+                foreach (var entry in variants.EnumerateObject())
+                foreach (var pair in entry.Name.Split(',', StringSplitOptions.RemoveEmptyEntries))
                 {
-                    foreach (string pair in entry.Name.Split(',', StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        int eq = pair.IndexOf('=');
-                        if (eq > 0)
-                        {
-                            props.TryAdd(pair[..eq], pair[(eq + 1)..]);
-                        }
-                    }
+                    var eq = pair.IndexOf('=');
+                    if (eq > 0) props.TryAdd(pair[..eq], pair[(eq + 1)..]);
                 }
-            }
-            else if (root.TryGetProperty("multipart", out JsonElement multipart))
-            {
-                foreach (JsonElement part in multipart.EnumerateArray())
-                {
-                    if (part.TryGetProperty("when", out JsonElement when))
-                    {
+            else if (root.TryGetProperty("multipart", out var multipart))
+                foreach (var part in multipart.EnumerateArray())
+                    if (part.TryGetProperty("when", out var when))
                         DigWhen(when, props);
-                    }
-                }
-            }
 
             return [string.Join(",", props.Select(p => $"{p.Key}={p.Value}"))];
         }
@@ -442,48 +411,33 @@ public static class PackSmoke
 
     private static void DigWhen(JsonElement when, Dictionary<string, string> props)
     {
-        if (when.ValueKind != JsonValueKind.Object)
-        {
-            return;
-        }
+        if (when.ValueKind != JsonValueKind.Object) return;
 
-        foreach (JsonProperty entry in when.EnumerateObject())
+        foreach (var entry in when.EnumerateObject())
         {
             if (entry.Name is "OR" or "AND")
             {
                 if (entry.Value.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (JsonElement sub in entry.Value.EnumerateArray())
-                    {
+                    foreach (var sub in entry.Value.EnumerateArray())
                         DigWhen(sub, props);
-                    }
-                }
                 else
-                {
                     DigWhen(entry.Value, props);
-                }
 
                 continue;
             }
 
-            if (props.ContainsKey(entry.Name))
-            {
-                continue;
-            }
+            if (props.ContainsKey(entry.Name)) continue;
 
-            string value = entry.Value.ValueKind switch
+            var value = entry.Value.ValueKind switch
             {
                 JsonValueKind.String => entry.Value.GetString() ?? "",
                 JsonValueKind.True => "true",
                 JsonValueKind.False => "false",
                 JsonValueKind.Array => entry.Value.GetArrayLength() > 0 ? entry.Value[0].GetString() ?? "" : "",
-                _ => "",
+                _ => ""
             };
-            int bar = value.IndexOf('|');
-            if (bar >= 0)
-            {
-                value = value[..bar];
-            }
+            var bar = value.IndexOf('|');
+            if (bar >= 0) value = value[..bar];
 
             props[entry.Name] = value;
         }

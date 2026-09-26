@@ -23,8 +23,10 @@ public static class CoreFixtureBuilder
         Vector3I size,
         ImmutableArray<string> paletteNames,
         ImmutableArray<int> indices,
-        bool compress = true) =>
-        BuildLitematic(compress, new RegionSpec(regionName, position, size, paletteNames, indices));
+        bool compress = true)
+    {
+        return BuildLitematic(compress, new RegionSpec(regionName, position, size, paletteNames, indices));
+    }
 
     // 多区域重载。区域的先后顺序就是文件里的键顺序，而"先遍历到谁"与"哪个更近"
     // 是两件事，所以要能把近的那个排在后面。
@@ -37,18 +39,18 @@ public static class CoreFixtureBuilder
         long totalBlocks = 0;
         long totalVolume = 0;
 
-        foreach (RegionSpec spec in regions)
+        foreach (var spec in regions)
         {
-            (NbtCompound compound, long nonAir, long volume) = BuildRegion(spec);
+            var (compound, nonAir, volume) = BuildRegion(spec);
             regionPairs.Add(new KeyValuePair<string, NbtElement>(spec.Name, compound));
             regionBounds.Add(IntBounds.FromPositionSize(spec.Position, spec.Size));
             totalBlocks += nonAir;
             totalVolume += volume;
         }
 
-        IntBounds bounds = IntBounds.Enclose(regionBounds);
+        var bounds = IntBounds.Enclose(regionBounds);
 
-        NbtCompound metadata = Compound(
+        var metadata = Compound(
             ("EnclosingSize", Vec(bounds.Size)),
             ("Author", new NbtString("fixture")),
             ("Description", new NbtString(string.Empty)),
@@ -61,20 +63,20 @@ public static class CoreFixtureBuilder
             ("TotalVolume", new NbtLong(totalVolume)),
             ("PreviewImageData", new NbtIntArray([])));
 
-        NbtCompound root = Compound(
+        var root = Compound(
             ("Version", new NbtInt(6)),
             ("SubVersion", new NbtInt(1)),
             ("MinecraftDataVersion", new NbtInt(3465)),
             ("Metadata", metadata),
             ("Regions", new NbtCompound(regionPairs)));
 
-        byte[] raw = Serializer.Serialize(new NbtDocument(string.Empty, root));
+        var raw = Serializer.Serialize(new NbtDocument(string.Empty, root));
         return compress ? Gzip(raw) : raw;
     }
 
     private static (NbtCompound Compound, long NonAir, long Volume) BuildRegion(RegionSpec spec)
     {
-        IntBounds bounds = IntBounds.FromPositionSize(spec.Position, spec.Size);
+        var bounds = IntBounds.FromPositionSize(spec.Position, spec.Size);
 
         // 索引数与体积不匹配时夹具自身就是坏的，而症状会伪装成解析器算错了长度。
         // 在这里炸掉，别让一个写错的夹具去冤枉被测代码。
@@ -89,19 +91,17 @@ public static class CoreFixtureBuilder
             [.. spec.PaletteNames.Select(static n => new BlockStateDefinition(n, BlockStateDefinition.NoProperties))];
 
         long nonAir = 0;
-        foreach (int index in spec.Indices)
-        {
+        foreach (var index in spec.Indices)
             if ((uint)index < (uint)palette.Length && !palette[index].IsAir)
-            {
                 nonAir++;
-            }
-        }
 
-        NbtCompound region = Compound(
+        var region = Compound(
             ("Position", Vec(spec.Position)),
             ("Size", Vec(spec.Size)),
-            ("BlockStatePalette", new NbtList([.. palette.Select(static p => (NbtElement)Compound(
-                ("Name", new NbtString(p.Name))))])),
+            ("BlockStatePalette", new NbtList([
+                .. palette.Select(static p => (NbtElement)Compound(
+                    ("Name", new NbtString(p.Name))))
+            ])),
             ("Entities", new NbtList()),
             ("TileEntities", new NbtList()),
             ("PendingBlockTicks", new NbtList()),
@@ -113,17 +113,19 @@ public static class CoreFixtureBuilder
 
     public static byte[] BuildNbtWithoutRegions()
     {
-        NbtCompound root = Compound(("Version", new NbtInt(6)));
+        var root = Compound(("Version", new NbtInt(6)));
         return Gzip(Serializer.Serialize(new NbtDocument(string.Empty, root)));
     }
 
-    public static byte[] BuildPlainTextGzipped() =>
-        Gzip(Encoding.UTF8.GetBytes("this is definitely not an nbt document"));
+    public static byte[] BuildPlainTextGzipped()
+    {
+        return Gzip(Encoding.UTF8.GetBytes("this is definitely not an nbt document"));
+    }
 
     public static byte[] Gzip(byte[] raw)
     {
         using MemoryStream output = new();
-        using (GZipStream gzip = new(output, CompressionLevel.Optimal, leaveOpen: true))
+        using (GZipStream gzip = new(output, CompressionLevel.Optimal, true))
         {
             gzip.Write(raw);
         }
@@ -133,23 +135,22 @@ public static class CoreFixtureBuilder
 
     public static byte[] Truncate(byte[] bytes, int keep)
     {
-        byte[] result = new byte[keep];
+        var result = new byte[keep];
         Array.Copy(bytes, result, keep);
         return result;
     }
 
-    private static NbtCompound Vec(Vector3I v) =>
-        Compound(("x", new NbtInt(v.X)), ("y", new NbtInt(v.Y)), ("z", new NbtInt(v.Z)));
+    private static NbtCompound Vec(Vector3I v)
+    {
+        return Compound(("x", new NbtInt(v.X)), ("y", new NbtInt(v.Y)), ("z", new NbtInt(v.Z)));
+    }
 
     // NbtCompound 没有无参构造、也没有索引器 setter，只能用 pair 序列构造，
     // 集合初始化语法在这个类型上不成立。
     private static NbtCompound Compound(params (string Key, NbtElement Value)[] entries)
     {
         List<KeyValuePair<string, NbtElement>> pairs = new(entries.Length);
-        foreach ((string key, NbtElement value) in entries)
-        {
-            pairs.Add(new KeyValuePair<string, NbtElement>(key, value));
-        }
+        foreach (var (key, value) in entries) pairs.Add(new KeyValuePair<string, NbtElement>(key, value));
 
         return new NbtCompound(pairs);
     }

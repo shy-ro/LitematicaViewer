@@ -9,16 +9,10 @@ public static class BlockStatesCodec
     // paletteSize <= 1 则完全不写 BlockStates，0 位。
     public static int GetBitsPerBlock(int paletteSize)
     {
-        if (paletteSize <= 1)
-        {
-            return 0;
-        }
+        if (paletteSize <= 1) return 0;
 
-        int bits = 1;
-        while ((1 << bits) < paletteSize)
-        {
-            bits++;
-        }
+        var bits = 1;
+        while (1 << bits < paletteSize) bits++;
 
         return Math.Max(2, bits);
     }
@@ -32,28 +26,26 @@ public static class BlockStatesCodec
     // 按每 long 7 个算会得到 499844。
     public static int GetPackedLongCount(int count, int paletteSize)
     {
-        int bits = GetBitsPerBlock(paletteSize);
-        return bits == 0 ? 0 : (int)((((long)count * bits) + 63) >> 6);
+        var bits = GetBitsPerBlock(paletteSize);
+        return bits == 0 ? 0 : (int)(((long)count * bits + 63) >> 6);
     }
 
     public static ImmutableArray<int> Unpack(ReadOnlySpan<long> data, int count, int paletteSize)
     {
-        int[] indices = new int[count];
-        int bits = GetBitsPerBlock(paletteSize);
+        var indices = new int[count];
+        var bits = GetBitsPerBlock(paletteSize);
         if (bits == 0)
-        {
             // 单状态区域：BlockStates 为空，全部落在 palette[0]。
             return [.. indices];
-        }
 
-        int mask = (1 << bits) - 1;
-        int straddles = 0;
-        int truncated = 0;
-        for (int i = 0; i < count; i++)
+        var mask = (1 << bits) - 1;
+        var straddles = 0;
+        var truncated = 0;
+        for (var i = 0; i < count; i++)
         {
-            long bitIndex = (long)i * bits;
-            int startLong = (int)(bitIndex >> 6);
-            int startBit = (int)(bitIndex & 63);
+            var bitIndex = (long)i * bits;
+            var startLong = (int)(bitIndex >> 6);
+            var startBit = (int)(bitIndex & 63);
             if (startLong >= data.Length)
             {
                 // 截断：剩下的全部留在 0。调用方比对声明长度后自行决定是跳过还是告警，
@@ -62,7 +54,7 @@ public static class BlockStatesCodec
                 break;
             }
 
-            ulong low = (ulong)data[startLong] >> startBit;
+            var low = (ulong)data[startLong] >> startBit;
             if (startBit + bits <= 64 || startLong + 1 >= data.Length)
             {
                 indices[i] = (int)(low & (ulong)mask);
@@ -85,25 +77,19 @@ public static class BlockStatesCodec
 
     public static long[] Pack(ReadOnlySpan<int> indices, int paletteSize)
     {
-        int bits = GetBitsPerBlock(paletteSize);
-        if (bits == 0)
-        {
-            return [];
-        }
+        var bits = GetBitsPerBlock(paletteSize);
+        if (bits == 0) return [];
 
-        long[] data = new long[GetPackedLongCount(indices.Length, paletteSize)];
-        int mask = (1 << bits) - 1;
-        for (int i = 0; i < indices.Length; i++)
+        var data = new long[GetPackedLongCount(indices.Length, paletteSize)];
+        var mask = (1 << bits) - 1;
+        for (var i = 0; i < indices.Length; i++)
         {
-            ulong value = (ulong)(indices[i] & mask);
-            long bitIndex = (long)i * bits;
-            int startLong = (int)(bitIndex >> 6);
-            int startBit = (int)(bitIndex & 63);
+            var value = (ulong)(indices[i] & mask);
+            var bitIndex = (long)i * bits;
+            var startLong = (int)(bitIndex >> 6);
+            var startBit = (int)(bitIndex & 63);
             data[startLong] |= (long)(value << startBit);
-            if (startBit + bits > 64)
-            {
-                data[startLong + 1] |= (long)(value >> (64 - startBit));
-            }
+            if (startBit + bits > 64) data[startLong + 1] |= (long)(value >> (64 - startBit));
         }
 
         return data;

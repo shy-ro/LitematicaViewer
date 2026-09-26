@@ -5,8 +5,8 @@ using Avalonia.Controls;
 using Avalonia.OpenGL;
 using Avalonia.OpenGL.Controls;
 using Avalonia.Rendering;
-using LitematicaViewer.Previewer.Diagnostics;
 using LitematicaViewer.Previewer.Gpu;
+using Vector = Avalonia.Vector;
 
 namespace LitematicaViewer.Previewer;
 
@@ -72,7 +72,10 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
     // 它一直是错的，只是控件在原点时「转一次」正好等于不转（偏移是 0,0），
     // 所以从外观上验不出差别；换个布局才暴露。实测那一行的入参：探针在窗口坐标 (790,400) 提问，
     // 这里收到 (490,400)，正好差控件左边界的 300。
-    bool ICustomHitTest.HitTest(Point point) => new Rect(Bounds.Size).Contains(point);
+    bool ICustomHitTest.HitTest(Point point)
+    {
+        return new Rect(Bounds.Size).Contains(point);
+    }
 
 #if DEBUG
     // 整张 framebuffer 读回来会强制 GPU 同步，逐帧读会把帧率打到地板上，
@@ -111,11 +114,9 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
             $"expected=(0.12,0.3,0.55,1)");
 
         if (gl.ContextInfo is { } info)
-        {
             Debug.WriteLine(
                 $"[PREVIEWER][gl.init] profile={info.Version.Type} gl={info.Version.Major}.{info.Version.Minor} " +
                 $"compatibility={info.Version.IsCompatibilityProfile} extensions={info.Extensions.Count}");
-        }
 
         Debug.WriteLine(
             $"[PREVIEWER][gl.init] cap.vao={gl.IsBindVertexArrayAvailable} cap.blit={gl.IsBlitFramebufferAvailable} " +
@@ -162,17 +163,15 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
     {
         _framesRendered++;
 
-        TimeSpan now = _clock.Elapsed;
-        double delta = _framesRendered == 1 ? 0 : (now - _lastFrameElapsed).TotalSeconds;
+        var now = _clock.Elapsed;
+        var delta = _framesRendered == 1 ? 0 : (now - _lastFrameElapsed).TotalSeconds;
         _lastFrameElapsed = now;
 
-        double tickSeconds = Math.Min(delta, MaxTickSeconds);
+        var tickSeconds = Math.Min(delta, MaxTickSeconds);
         if (tickSeconds < delta)
-        {
             Debug.WriteLine(
                 $"[PREVIEWER][gl.render] tick 被夹住 delta={delta:F3} clamped={tickSeconds:F3} " +
                 $"max={MaxTickSeconds} expected=只在卡顿时才出现");
-        }
 
         // 先 tick 再画：控制器在 Tick 里 SetCamera，这一帧立刻用得上新相机，少一帧延迟。
         // 反过来先画再 tick 也跑得起来，代价是相机永远落后一帧，拖起来像有阻尼。
@@ -180,14 +179,14 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
 
         // 视口按物理像素算，Bounds 是 DIP。差一个 RenderScaling 在 100% 缩放的显示器上
         // 完全看不出来，只在缩放显示器上把画面缩进一角——那时已经在查别的地方了。
-        double scaling = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
-        int width = Math.Max(1, (int)Math.Round(Bounds.Width * scaling));
-        int height = Math.Max(1, (int)Math.Round(Bounds.Height * scaling));
+        var scaling = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
+        var width = Math.Max(1, (int)Math.Round(Bounds.Width * scaling));
+        var height = Math.Max(1, (int)Math.Round(Bounds.Height * scaling));
 
         if (width != _viewportWidth || height != _viewportHeight)
         {
-            int previousWidth = _viewportWidth;
-            int previousHeight = _viewportHeight;
+            var previousWidth = _viewportWidth;
+            var previousHeight = _viewportHeight;
             _viewportWidth = width;
             _viewportHeight = height;
             RaiseViewportResized(width, height, previousWidth, previousHeight);
@@ -195,8 +194,8 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
 
         // 超采样把渲染分辨率乘 Scale：aspect 不变，投影矩阵对宽高只是取比值，
         // 各渲染器拿到的宽高换成放大后的值即可。
-        int renderWidth = _ssaa is null ? width : width * SupersampleTarget.Scale;
-        int renderHeight = _ssaa is null ? height : height * SupersampleTarget.Scale;
+        var renderWidth = _ssaa is null ? width : width * SupersampleTarget.Scale;
+        var renderHeight = _ssaa is null ? height : height * SupersampleTarget.Scale;
 
         // 显式绑一次画布：超采样时是我们的 2x FBO，否则是 Avalonia 交给的那个表面。
         // 省掉这一步不会立刻报错，症状是画到别处去了，而屏幕上什么都没有。
@@ -216,37 +215,26 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         // 装了模型就不再画演示立方体：立方体是「什么都没有时的参照物」，
         // 和真模型同时画只会互相穿插。axes 在两种模式下都画（xyz 参考线是独立功能）。
         if (_meshRenderer is { HasMesh: true } mesh)
-        {
             mesh.Render(gl, _camera, renderWidth, renderHeight);
-        }
         else
-        {
             _cube?.Render(_camera, renderWidth, renderHeight);
-        }
 
         // 轴线接着画：落在立方体里的那一段被深度测试挡住，露在外面的是从方块里伸出来的三根轴。
         _axes?.Render(_camera, renderWidth, renderHeight);
 
         // 拾取高亮框：线框 + 深度测试，被模型挡住的边自然看不见。位置没设就不画。
         if (_highlightPosition is { } highlightBlock)
-        {
             _highlight?.Render(_camera, renderWidth, renderHeight, highlightBlock);
-        }
 
         // 光环最后画。半透明的三个东西（轴线、光环）只有按「从远到近」画才对得上，
         // 而光环压在底面上、比它绕着的那块模型更靠前，所以它在轴线之后。
         // 反过来时，光环与轴线交叠的那几百个像素会先被光环写一遍、再被轴线混一遍，
         // 深度上就成了「轴线在光环前面」——两处都是半透明，画面看起来只是「有点怪」。
         if (_pedestalVisible)
-        {
             _pedestal?.Render(_camera, renderWidth, renderHeight, _pedestalCentre, _pedestalRadius, _pedestalBaseY);
-        }
 
         // 降采样回交换链：LINEAR 把 2x 的过采样平均掉，等于内置了一层抗锯齿。
-        if (_ssaa is { } ssaa)
-        {
-            ssaa.ResolveTo(fb, width, height);
-        }
+        if (_ssaa is { } ssaa) ssaa.ResolveTo(fb, width, height);
 
         gl.Viewport(0, 0, width, height);
 
@@ -283,7 +271,7 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         if (_capture is { } capture)
         {
             _capture = null;
-            byte[]? pixels = GlRaw.ReadPixels(gl, 0, 0, width, height);
+            var pixels = GlRaw.ReadPixels(gl, 0, 0, width, height);
             Debug.Assert(pixels is not null, "[PREVIEWER][gl.shot] glReadPixels 没拿到入口");
             capture(pixels ?? [], width, height);
         }
@@ -293,12 +281,15 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
     private Action<byte[], int, int>? _capture;
 
     // public 而不是 internal：控件的对外成员都在这条公开面上（Sample 是另一个程序集）。
-    public void RequestCapture(Action<byte[], int, int> onCaptured) => _capture = onCaptured;
+    public void RequestCapture(Action<byte[], int, int> onCaptured)
+    {
+        _capture = onCaptured;
+    }
 
     protected override void OnOpenGlDeinit(GlInterface gl)
     {
-        double elapsed = _clock.Elapsed.TotalSeconds;
-        double averageFps = elapsed > 0 ? _framesRendered / elapsed : 0;
+        var elapsed = _clock.Elapsed.TotalSeconds;
+        var averageFps = elapsed > 0 ? _framesRendered / elapsed : 0;
 
         Debug.WriteLine(
             $"[PREVIEWER][gl.deinit] frames={_framesRendered} expected=>0 elapsed={elapsed:F2}s " +
@@ -505,10 +496,10 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
     {
         PointerMoved += (_, e) =>
         {
-            Point position = e.GetPosition(this);
-            HoverMoved?.Invoke(new Avalonia.Vector(position.X, position.Y));
+            var position = e.GetPosition(this);
+            HoverMoved?.Invoke(new Vector(position.X, position.Y));
         };
 
-        PointerExited += (_, _) => HoverMoved?.Invoke(new Avalonia.Vector(double.NaN, double.NaN));
+        PointerExited += (_, _) => HoverMoved?.Invoke(new Vector(double.NaN, double.NaN));
     }
 }

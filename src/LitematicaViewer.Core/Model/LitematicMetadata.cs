@@ -16,17 +16,17 @@ public sealed record LitematicMetadata(
     long TimeModified)
 {
     public static LitematicMetadata Empty { get; } = new(
-        Version: 0,
-        SubVersion: 0,
-        MinecraftDataVersion: 0,
-        Name: string.Empty,
-        Author: string.Empty,
-        Description: string.Empty,
-        Software: string.Empty,
-        RegionCount: 0,
-        TotalBlocks: 0,
-        TotalVolume: 0,
-        EnclosingSize: Vector3I.Zero,
-        TimeCreated: 0,
-        TimeModified: 0);
+        0,
+        0,
+        0,
+        string.Empty,
+        string.Empty,
+        string.Empty,
+        string.Empty,
+        0,
+        0,
+        0,
+        Vector3I.Zero,
+        0,
+        0);
 }

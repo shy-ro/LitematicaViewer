@@ -12,12 +12,13 @@ namespace LitematicaViewer.Assets;
 internal static class FallbackModels
 {
     // parsed 是按原 modelId 正常解析出的模型：非 builtin、elements 非空时原样放行。
-    public static bool TryGet(string blockName, string modelId, ResolvedBlockModel parsed, out ResolvedBlockModel fallback)
+    public static bool TryGet(string blockName, string modelId, ResolvedBlockModel parsed,
+        out ResolvedBlockModel fallback)
     {
         if (modelId == "minecraft:block/water")
         {
             // 水面比方块低 2/16；不染时贴图本身就是灰白，槽号交给方块 id 归类。
-            fallback = Box(modelId, new Vector3(0, 0, 0), new Vector3(16, 14, 16), "minecraft:block/water_still", waterTint: true);
+            fallback = Box(modelId, new Vector3(0, 0, 0), new Vector3(16, 14, 16), "minecraft:block/water_still", true);
             return true;
         }
 
@@ -35,8 +36,10 @@ internal static class FallbackModels
             return false;
         }
 
-        string id = blockName.StartsWith("minecraft:", StringComparison.Ordinal) ? blockName["minecraft:".Length..] : blockName;
-        string sprite = SpriteFor(id);
+        var id = blockName.StartsWith("minecraft:", StringComparison.Ordinal)
+            ? blockName["minecraft:".Length..]
+            : blockName;
+        var sprite = SpriteFor(id);
         if (sprite.Length == 0)
         {
             fallback = parsed;
@@ -78,94 +81,66 @@ internal static class FallbackModels
     // 保持原状不渲染——一个随机棋盘格的立方体比消失更难排查）。
     private static string SpriteFor(string id)
     {
-        if (id.Contains("banner", StringComparison.Ordinal))
-        {
-            return "minecraft:entity/banner/base";
-        }
+        if (id.Contains("banner", StringComparison.Ordinal)) return "minecraft:entity/banner/base";
 
         if (id.Contains("shulker", StringComparison.Ordinal))
         {
             // entity/shulker/shulker.png 与 shulker_{color}.png；方块 id 是
             // shulker_box 或 {color}_shulker_box，剥掉后缀就是颜色段。
-            string color = id == "shulker_box" ? "" : id.Replace("_shulker_box", "", StringComparison.Ordinal);
+            var color = id == "shulker_box" ? "" : id.Replace("_shulker_box", "", StringComparison.Ordinal);
             return color.Length == 0 ? "minecraft:entity/shulker/shulker" : $"minecraft:entity/shulker/shulker_{color}";
         }
 
         if (id.Contains("chest", StringComparison.Ordinal))
-        {
             return id switch
             {
                 var s when s.Contains("ender", StringComparison.Ordinal) => "minecraft:entity/chest/ender",
                 var s when s.Contains("trapped", StringComparison.Ordinal) => "minecraft:entity/chest/trapped",
                 var s when s.Contains("oxidized", StringComparison.Ordinal) => "minecraft:entity/chest/copper_oxidized",
-                var s when s.Contains("weathered", StringComparison.Ordinal) => "minecraft:entity/chest/copper_weathered",
+                var s when s.Contains("weathered", StringComparison.Ordinal) =>
+                    "minecraft:entity/chest/copper_weathered",
                 var s when s.Contains("exposed", StringComparison.Ordinal) => "minecraft:entity/chest/copper_exposed",
                 var s when s.Contains("copper", StringComparison.Ordinal) => "minecraft:entity/chest/copper",
-                _ => "minecraft:entity/chest/normal",
+                _ => "minecraft:entity/chest/normal"
             };
-        }
 
-        if (id.Contains("creeper", StringComparison.Ordinal))
-        {
-            return "minecraft:entity/creeper/creeper";
-        }
+        if (id.Contains("creeper", StringComparison.Ordinal)) return "minecraft:entity/creeper/creeper";
 
-        if (id.Contains("dragon", StringComparison.Ordinal))
-        {
-            return "minecraft:entity/enderdragon/dragon";
-        }
+        if (id.Contains("dragon", StringComparison.Ordinal)) return "minecraft:entity/enderdragon/dragon";
 
-        if (id.Contains("piglin", StringComparison.Ordinal))
-        {
-            return "minecraft:entity/piglin/piglin";
-        }
+        if (id.Contains("piglin", StringComparison.Ordinal)) return "minecraft:entity/piglin/piglin";
 
         if (id.Contains("skeleton", StringComparison.Ordinal))
-        {
             return id.Contains("wither", StringComparison.Ordinal)
                 ? "minecraft:entity/skeleton/wither_skeleton"
                 : "minecraft:entity/skeleton/skeleton";
-        }
 
-        if (id.Contains("zombie", StringComparison.Ordinal))
-        {
-            return "minecraft:entity/zombie/zombie";
-        }
+        if (id.Contains("zombie", StringComparison.Ordinal)) return "minecraft:entity/zombie/zombie";
 
-        if (id.Contains("player", StringComparison.Ordinal))
-        {
-            return "minecraft:entity/player/wide/steve";
-        }
+        if (id.Contains("player", StringComparison.Ordinal)) return "minecraft:entity/player/wide/steve";
 
-        if (id.Contains("conduit", StringComparison.Ordinal))
-        {
-            return "minecraft:block/conduit";
-        }
+        if (id.Contains("conduit", StringComparison.Ordinal)) return "minecraft:block/conduit";
 
         if (id.Contains("decorated_pot", StringComparison.Ordinal))
-        {
             return "minecraft:entity/decorated_pot/decorated_pot_side";
-        }
 
         // 戈勒姆雕像、moving_piston 等没有专属贴图：用 id 当 sprite 名去缺，
         // 走 missingno 棋盘——至少形状在，缺图名单里也报得出名字。
-        if (id.Contains("golem_statue", StringComparison.Ordinal) || id.Contains("moving_piston", StringComparison.Ordinal))
-        {
-            return $"minecraft:block/{id}";
-        }
+        if (id.Contains("golem_statue", StringComparison.Ordinal) ||
+            id.Contains("moving_piston", StringComparison.Ordinal)) return $"minecraft:block/{id}";
 
         return "";
     }
 
     // 六面同贴图的盒子：uv 全 0..16、无 cullface（回退体不参与面剔除，
     // 宁可多画也不跟邻居的剔除语义再纠缠一次）、tint 只给水用。
-    private static ResolvedBlockModel Box(string modelId, Vector3 from, Vector3 to, string sprite, bool waterTint = false)
+    private static ResolvedBlockModel Box(string modelId, Vector3 from, Vector3 to, string sprite,
+        bool waterTint = false)
     {
         List<ElementFace> faces = [];
-        foreach (FaceName face in new[] { FaceName.Down, FaceName.Up, FaceName.North, FaceName.South, FaceName.West, FaceName.East })
-        {
+        foreach (var face in new[]
+                     { FaceName.Down, FaceName.Up, FaceName.North, FaceName.South, FaceName.West, FaceName.East })
             faces.Add(new ElementFace(face, new Vector4(0, 0, 16, 16), sprite, null, waterTint ? 0 : -1, 0));
-        }
 
         return new ResolvedBlockModel(modelId, [new ModelElement(from, to, null, faces)]);
     }

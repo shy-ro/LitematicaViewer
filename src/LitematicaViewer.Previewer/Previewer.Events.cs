@@ -17,6 +17,114 @@ namespace LitematicaViewer.Previewer;
 // 然后在某一帧上读到和控制器不一致的相机。
 public partial class Previewer
 {
+    // 每次 SetCamera 打一整行（五个向量加六个标量）的话，指针一动就是每秒六十行——
+    // 这一条是全项目最重的一处 IO，而它的信息量在相邻两行之间几乎不增。
+    // 首条加每 60 条一条：「相机到底有没有被推过来」是个是非题，抽样足够回答。
+    // 调用方都在 UI 线程上，计数不用原子。
+    private const int CameraSetLogInterval = 60;
+
+    // 两个手感参数。它们是 AvaloniaProperty 而不是控制器里的常量，理由是**一个系统里
+    // 能调同一个东西的地方只能有一个**：控制器是这个控件最亲近的几个对象，但控件才是它们
+    // 唯一的共同引用，而侧边栏、将来的设置面板拿到的也是控件。
+    //
+    // 做成 AvaloniaProperty 而不是普通属性，是为了让它能配在 XAML 里、能被滑块绑上：
+    // 普通属性在 UI 那一层没有可订立的通知，滑块就只能自己维护一份影子状态，
+    // 于是「滑块显示的值」与「控制器实际用的值」成了两处。
+    //
+    // 控件自己不读这两个值：它不移动相机，动相机是挂上来的导航控制器那一层的事。
+    public static readonly StyledProperty<float> MoveSpeedProperty =
+        AvaloniaProperty.Register<Previewer, float>(nameof(MoveSpeed), 5f);
+
+    public static readonly StyledProperty<float> LookSensitivityProperty =
+        AvaloniaProperty.Register<Previewer, float>(nameof(LookSensitivity), 0.10f);
+
+    // 展台模式：按住指针每移过一个 DIP 转多少度。比自由视角大，因为拖动是「一次有头有尾的手势」——
+    // 自由视角下光标被钉在中心、手可以一直划，所以灵敏度要压小（0.10）；拖动的行程受屏幕限制，
+    // 0.20 下横扫 1024 DIP 约 205 度，甩半圈是一个手势的事。
+    public static readonly StyledProperty<float> DragSensitivityProperty =
+        AvaloniaProperty.Register<Previewer, float>(nameof(DragSensitivity), 0.20f);
+
+    // 甩出去之后角速度衰减的时间常数（秒）。一阶滞后的时间常数，0.35 秒下大约一秒停稳。
+    public static readonly StyledProperty<float> SpinDampingProperty =
+        AvaloniaProperty.Register<Previewer, float>(nameof(SpinDamping), 0.35f);
+
+    // 松手之后过多少秒开始自转（秒）。不是「到点突然起步」：角速度的衰减目标从 0 换成自转速度，
+    // 速度本身是连续的，所以衔接处只有加速度跳一下。
+    public static readonly StyledProperty<float> SpinIdleDelayProperty =
+        AvaloniaProperty.Register<Previewer, float>(nameof(SpinIdleDelay), 1.5f);
+
+    // 自转速度（度/秒），逆时针。8 度下转一圈 45 秒——足够慢，能看清模型的每一面而不晕。
+    public static readonly StyledProperty<float> SpinIdleSpeedProperty =
+        AvaloniaProperty.Register<Previewer, float>(nameof(SpinIdleSpeed), 8f);
+
+    private CameraState _camera = CameraState.Default;
+
+    private int _cameraSetLogs;
+
+    // 相机版本号，单调递增。调试侧靠它判断「这一帧用的相机是否已经校验过」：
+    // 相机一变就重验一帧，因为「SetCamera 到底有没有真的驱动渲染」只有画面能证明。
+    // 不放进 #if DEBUG：那样 Release 下这个名字会在探针的参数里被引用而定义不存在，
+    // 而 [Conditional] 是在语义分析之后才丢掉调用的，编译仍然要过。
+    // 一次自增的代价可以忽略，不值得为它换一个只在 Debug 成立的声明。
+    private int _cameraVersion;
+
+    private Vector3? _highlightPosition;
+    private float _pedestalBaseY;
+    private Vector3 _pedestalCentre;
+    private float _pedestalRadius = 1f;
+
+    private bool _pedestalVisible;
+
+    // init 之前到达的装填。四元组与 SetMesh 入参一致；null 表示「暂存的也是清空请求」，
+    // 这种请求本来就不需要暂存，所以只会在有真数据时出现。
+    private (float[]? Vertices, int[]? Indices, byte[][]? AtlasLevels, int Width, int Height)? _pendingMesh;
+
+    // 每秒走多少世界单位（＝方块）。5 是每秒五个方块：渲染器里那个单位立方体就是按
+    // 「一个 MC 方块 = 1×1×1 世界单位」画的（MC 里一方块也是一米），MC 里走路大约 4.3 方块/秒、
+    // 冲刺 5.6——这个数调在两者之间，是在真机上拖滑块试出来的。
+    //
+    // 材质包的分辨率（16x16 / 256x256 / 2048x2048）不该配在这里：它决定一个方块贴多少纹素，
+    // 方块的世界尺寸始终是 1，要按材质包配的是贴图采样（mipmap、过滤）。
+    public float MoveSpeed
+    {
+        get => GetValue(MoveSpeedProperty);
+        set => SetValue(MoveSpeedProperty, value);
+    }
+
+    // 指针每移过一个 DIP 转多少度。0.10 下横着扫满 1024 DIP 宽的窗口约 102 度，转半圈要横移一千八百多个 DIP。
+    //
+    // 用 DIP 而不是物理像素：150% 缩放的显示器上同样的手部动作该转同样的角度，
+    // 按物理像素算的话那台机器上会快 1.5 倍，表现成「换了台显示器手感就变了」。
+    public float LookSensitivity
+    {
+        get => GetValue(LookSensitivityProperty);
+        set => SetValue(LookSensitivityProperty, value);
+    }
+
+    public float DragSensitivity
+    {
+        get => GetValue(DragSensitivityProperty);
+        set => SetValue(DragSensitivityProperty, value);
+    }
+
+    public float SpinDamping
+    {
+        get => GetValue(SpinDampingProperty);
+        set => SetValue(SpinDampingProperty, value);
+    }
+
+    public float SpinIdleDelay
+    {
+        get => GetValue(SpinIdleDelayProperty);
+        set => SetValue(SpinIdleDelayProperty, value);
+    }
+
+    public float SpinIdleSpeed
+    {
+        get => GetValue(SpinIdleSpeedProperty);
+        set => SetValue(SpinIdleSpeedProperty, value);
+    }
+
     // 滚轮增量。正负方向不由 Previewer 约定：它只把原始增量递出去，
     // 「向上滚是拉近还是推远」是控制器的事，将来改手感不必动这里。
     public event Action<float>? Scrolled;
@@ -48,7 +156,7 @@ public partial class Previewer
     // 指针悬停位置（控件 DIP 坐标），不需要按键。拾取链路的入口：宿主把它换算成
     // 射线去问体素数据「鼠标指到了哪个方块」。移动一秒几百条，宿主自己节流——
     // 每次都做完整拾取的话可以在 Tick 里做（存最新位置，每帧算一次）。
-    public event Action<Avalonia.Vector>? HoverMoved;
+    public event Action<Vector>? HoverMoved;
 
     // 物理像素尺寸，与 GL 视口一致（不是 DIP）。首帧会发一次（从 0x0 到实际尺寸），
     // 之后每次尺寸变化各发一次。
@@ -56,86 +164,6 @@ public partial class Previewer
 
     // 每渲染一帧发一次，参数是距上一帧的秒数。控制器靠它推进与时间有关的东西（惯性、动画）。
     public event Action<double>? Tick;
-
-    // 两个手感参数。它们是 AvaloniaProperty 而不是控制器里的常量，理由是**一个系统里
-    // 能调同一个东西的地方只能有一个**：控制器是这个控件最亲近的几个对象，但控件才是它们
-    // 唯一的共同引用，而侧边栏、将来的设置面板拿到的也是控件。
-    //
-    // 做成 AvaloniaProperty 而不是普通属性，是为了让它能配在 XAML 里、能被滑块绑上：
-    // 普通属性在 UI 那一层没有可订立的通知，滑块就只能自己维护一份影子状态，
-    // 于是「滑块显示的值」与「控制器实际用的值」成了两处。
-    //
-    // 控件自己不读这两个值：它不移动相机，动相机是挂上来的导航控制器那一层的事。
-    public static readonly StyledProperty<float> MoveSpeedProperty =
-        AvaloniaProperty.Register<Previewer, float>(nameof(MoveSpeed), defaultValue: 5f);
-
-    public static readonly StyledProperty<float> LookSensitivityProperty =
-        AvaloniaProperty.Register<Previewer, float>(nameof(LookSensitivity), defaultValue: 0.10f);
-
-    // 每秒走多少世界单位（＝方块）。5 是每秒五个方块：渲染器里那个单位立方体就是按
-    // 「一个 MC 方块 = 1×1×1 世界单位」画的（MC 里一方块也是一米），MC 里走路大约 4.3 方块/秒、
-    // 冲刺 5.6——这个数调在两者之间，是在真机上拖滑块试出来的。
-    //
-    // 材质包的分辨率（16x16 / 256x256 / 2048x2048）不该配在这里：它决定一个方块贴多少纹素，
-    // 方块的世界尺寸始终是 1，要按材质包配的是贴图采样（mipmap、过滤）。
-    public float MoveSpeed
-    {
-        get => GetValue(MoveSpeedProperty);
-        set => SetValue(MoveSpeedProperty, value);
-    }
-
-    // 指针每移过一个 DIP 转多少度。0.10 下横着扫满 1024 DIP 宽的窗口约 102 度，转半圈要横移一千八百多个 DIP。
-    //
-    // 用 DIP 而不是物理像素：150% 缩放的显示器上同样的手部动作该转同样的角度，
-    // 按物理像素算的话那台机器上会快 1.5 倍，表现成「换了台显示器手感就变了」。
-    public float LookSensitivity
-    {
-        get => GetValue(LookSensitivityProperty);
-        set => SetValue(LookSensitivityProperty, value);
-    }
-
-    // 展台模式：按住指针每移过一个 DIP 转多少度。比自由视角大，因为拖动是「一次有头有尾的手势」——
-    // 自由视角下光标被钉在中心、手可以一直划，所以灵敏度要压小（0.10）；拖动的行程受屏幕限制，
-    // 0.20 下横扫 1024 DIP 约 205 度，甩半圈是一个手势的事。
-    public static readonly StyledProperty<float> DragSensitivityProperty =
-        AvaloniaProperty.Register<Previewer, float>(nameof(DragSensitivity), defaultValue: 0.20f);
-
-    // 甩出去之后角速度衰减的时间常数（秒）。一阶滞后的时间常数，0.35 秒下大约一秒停稳。
-    public static readonly StyledProperty<float> SpinDampingProperty =
-        AvaloniaProperty.Register<Previewer, float>(nameof(SpinDamping), defaultValue: 0.35f);
-
-    // 松手之后过多少秒开始自转（秒）。不是「到点突然起步」：角速度的衰减目标从 0 换成自转速度，
-    // 速度本身是连续的，所以衔接处只有加速度跳一下。
-    public static readonly StyledProperty<float> SpinIdleDelayProperty =
-        AvaloniaProperty.Register<Previewer, float>(nameof(SpinIdleDelay), defaultValue: 1.5f);
-
-    // 自转速度（度/秒），逆时针。8 度下转一圈 45 秒——足够慢，能看清模型的每一面而不晕。
-    public static readonly StyledProperty<float> SpinIdleSpeedProperty =
-        AvaloniaProperty.Register<Previewer, float>(nameof(SpinIdleSpeed), defaultValue: 8f);
-
-    public float DragSensitivity
-    {
-        get => GetValue(DragSensitivityProperty);
-        set => SetValue(DragSensitivityProperty, value);
-    }
-
-    public float SpinDamping
-    {
-        get => GetValue(SpinDampingProperty);
-        set => SetValue(SpinDampingProperty, value);
-    }
-
-    public float SpinIdleDelay
-    {
-        get => GetValue(SpinIdleDelayProperty);
-        set => SetValue(SpinIdleDelayProperty, value);
-    }
-
-    public float SpinIdleSpeed
-    {
-        get => GetValue(SpinIdleSpeedProperty);
-        set => SetValue(SpinIdleSpeedProperty, value);
-    }
 
     // 展台底面那个光环。四个参数一组（画不画、圆心、半径、底面高度），所以是一次调用而不是四个属性：
     // 半径、圆心与底面高度都来自「当前展示的目标」，分开设会出现「半径已经换了、圆心还是上一个目标的」
@@ -148,15 +176,13 @@ public partial class Previewer
     {
         Debug.Assert(
             !visible || (float.IsFinite(radius) && radius > 0f && float.IsFinite(baseY)
-                && float.IsFinite(centre.X) && float.IsFinite(centre.Y) && float.IsFinite(centre.Z)),
+                         && float.IsFinite(centre.X) && float.IsFinite(centre.Y) && float.IsFinite(centre.Z)),
             $"[PREVIEWER][gl.pedestal] 光环参数不合法 visible={visible} centre=({centre}) radius={radius} baseY={baseY}");
 
         // 同一个值重复设不打桩：宿主可能在每帧的末尾都推一次，而这里要的是「变没变」这件事。
         if (_pedestalVisible == visible && _pedestalRadius == radius && _pedestalBaseY == baseY
             && _pedestalCentre == centre)
-        {
             return;
-        }
 
         _pedestalVisible = visible;
         _pedestalCentre = centre;
@@ -168,20 +194,12 @@ public partial class Previewer
             $"radius={radius:F3} baseY={baseY:F3}");
     }
 
-    private bool _pedestalVisible;
-    private Vector3 _pedestalCentre;
-    private float _pedestalRadius = 1f;
-    private float _pedestalBaseY;
-
     // 拾取高亮框（画不画、哪个方块）。null 是清掉。位置是世界坐标（与网格顶点同一坐标系）。
     // 用 float 而不是 Core 的 Vector3I：Previewer 不引用 Core（分层单向），
     // 方块坐标是整数语义，float 到百万量级都装得下精确值。
     public void SetHighlight(Vector3? blockPosition)
     {
-        if (Nullable.Equals(_highlightPosition, blockPosition))
-        {
-            return;
-        }
+        if (Nullable.Equals(_highlightPosition, blockPosition)) return;
 
         _highlightPosition = blockPosition;
         Debug.WriteLine(
@@ -189,34 +207,32 @@ public partial class Previewer
             $"block={(blockPosition is { } p ? $"{p.X:F0},{p.Y:F0},{p.Z:F0}" : "null")}");
     }
 
-    private Vector3? _highlightPosition;
-
     // 屏幕点 → 世界射线。拾取链路的相机侧：与渲染共用同一份 (view * proj) 矩阵求逆，
     // 于是「画面上鼠标指着的那条线」与「拾取问体素数据的那条线」必然是同一条——
     // 两套换算各自为政的话，症状是准星压着 A 却拾到 B，且只在某些视角下出现。
     // 入参用控件 DIP 坐标（与 HoverMoved 一致），宽高也用 DIP：比例与物理像素一致。
     public (Vector3 Origin, Vector3 Direction) PointToRay(Vector point)
     {
-        double width = Math.Max(1.0, Bounds.Width);
-        double height = Math.Max(1.0, Bounds.Height);
-        float ndcX = (float)(2.0 * point.X / width - 1.0);
-        float ndcY = (float)(1.0 - 2.0 * point.Y / height);
+        var width = Math.Max(1.0, Bounds.Width);
+        var height = Math.Max(1.0, Bounds.Height);
+        var ndcX = (float)(2.0 * point.X / width - 1.0);
+        var ndcY = (float)(1.0 - 2.0 * point.Y / height);
 
         // System.Numerics 的投影是右手的：NDC z=-1 是近平面、+1 是远平面。
         // 用 GL 深度那套 [0,1] 会得到两条完全不一样的射线，而且不报错。
-        Matrix4x4 viewProjection = _camera.GetViewMatrix() * _camera.GetProjectionMatrix((float)(width / height));
+        var viewProjection = _camera.GetViewMatrix() * _camera.GetProjectionMatrix((float)(width / height));
 
         // Invert 的结果先接出来再断言：Debug.Assert 的调用点在 Release 下整个消失，
         // 但 out 变量的「明确赋值」是语义分析期的事——直接在 Assert 里 out 的话，
         // Release 编译器会认为 inverse 未赋值，恰好是 C# 那条 Conditional 的老坑。
-        bool invertible = Matrix4x4.Invert(viewProjection, out Matrix4x4 inverse);
+        var invertible = Matrix4x4.Invert(viewProjection, out var inverse);
         Debug.Assert(invertible, "[PREVIEWER][pick] 视图投影矩阵不可逆");
-        Vector4 nearPoint = Vector4.Transform(new Vector4(ndcX, ndcY, -1f, 1f), inverse);
-        Vector4 farPoint = Vector4.Transform(new Vector4(ndcX, ndcY, 1f, 1f), inverse);
+        var nearPoint = Vector4.Transform(new Vector4(ndcX, ndcY, -1f, 1f), inverse);
+        var farPoint = Vector4.Transform(new Vector4(ndcX, ndcY, 1f, 1f), inverse);
 
         // 反投影 z=-1 得到的是**近平面上**的点，不是相机本身——原点必须显式用相机位置。
         // 方向取近平面点到远平面点的连线：透视下这条线必然穿过相机，方向不受近平面影响。
-        Vector3 origin = _camera.Position;
+        var origin = _camera.Position;
         Vector3 nearWorld = new(nearPoint.X / nearPoint.W, nearPoint.Y / nearPoint.W, nearPoint.Z / nearPoint.W);
         Vector3 farWorld = new(farPoint.X / farPoint.W, farPoint.Y / farPoint.W, farPoint.Z / farPoint.W);
         return (origin, Vector3.Normalize(farWorld - nearWorld));
@@ -249,27 +265,6 @@ public partial class Previewer
         _meshRenderer.Load(vertices, indices, atlasLevels, atlasWidth, atlasHeight);
     }
 
-    // init 之前到达的装填。四元组与 SetMesh 入参一致；null 表示「暂存的也是清空请求」，
-    // 这种请求本来就不需要暂存，所以只会在有真数据时出现。
-    private (float[]? Vertices, int[]? Indices, byte[][]? AtlasLevels, int Width, int Height)? _pendingMesh;
-
-    private CameraState _camera = CameraState.Default;
-
-    // 相机版本号，单调递增。调试侧靠它判断「这一帧用的相机是否已经校验过」：
-    // 相机一变就重验一帧，因为「SetCamera 到底有没有真的驱动渲染」只有画面能证明。
-    // 不放进 #if DEBUG：那样 Release 下这个名字会在探针的参数里被引用而定义不存在，
-    // 而 [Conditional] 是在语义分析之后才丢掉调用的，编译仍然要过。
-    // 一次自增的代价可以忽略，不值得为它换一个只在 Debug 成立的声明。
-    private int _cameraVersion;
-
-    // 每次 SetCamera 打一整行（五个向量加六个标量）的话，指针一动就是每秒六十行——
-    // 这一条是全项目最重的一处 IO，而它的信息量在相邻两行之间几乎不增。
-    // 首条加每 60 条一条：「相机到底有没有被推过来」是个是非题，抽样足够回答。
-    // 调用方都在 UI 线程上，计数不用原子。
-    private const int CameraSetLogInterval = 60;
-
-    private int _cameraSetLogs;
-
     public void SetCamera(CameraState camera)
     {
         // 现在没有跨线程调用者：控制器（Phase E/F）和 GL 回调都在 UI 线程上，_uiThreadId 守着。
@@ -280,27 +275,23 @@ public partial class Previewer
             Environment.CurrentManagedThreadId == _uiThreadId,
             $"[PREVIEWER][camera.set] 不在 UI 线程上 thread={Environment.CurrentManagedThreadId} expected={_uiThreadId}");
         Debug.Assert(
-            camera.IsValid(out string reason),
+            camera.IsValid(out var reason),
             $"[PREVIEWER][camera.set] 相机状态不合法: {reason}");
 
         // 超范围的 pitch 不在入口夹，只在取用时夹（见 CameraState.ForwardOf），
         // 否则控制器手里的状态和实际生效的就不是一回事，两边会越差越远。这里只留个话。
         if (MathF.Abs(camera.Pitch) > CameraState.MaxPitch)
-        {
             Debug.WriteLine(
                 $"[PREVIEWER][camera.set] pitch 超范围，取用时会被夹住 pitch={camera.Pitch} max=±{CameraState.MaxPitch}");
-        }
 
         _camera = camera;
         _cameraVersion++;
 
         if (_cameraSetLogs++ % CameraSetLogInterval == 0)
-        {
             Debug.WriteLine(
                 $"[PREVIEWER][camera.set] version={_cameraVersion} pos=({camera.Position}) " +
                 $"yaw={camera.Yaw:F2} pitch={camera.Pitch:F2} forward=({camera.Forward}) " +
                 $"fov={camera.Fov} near={camera.Near} far={camera.Far} note=每{CameraSetLogInterval}条一条");
-        }
     }
 
     // 只有本程序集里的输入适配器调这两个。事件在别处没法触发，
@@ -321,7 +312,10 @@ public partial class Previewer
         LookStarted?.Invoke();
     }
 
-    internal void RaiseLookMoved(Vector delta) => LookMoved?.Invoke(delta);
+    internal void RaiseLookMoved(Vector delta)
+    {
+        LookMoved?.Invoke(delta);
+    }
 
     internal void RaiseLookEnded()
     {
@@ -348,5 +342,8 @@ public partial class Previewer
         Tick?.Invoke(deltaSeconds);
     }
 
-    private static int CountHandlers(Delegate? handler) => handler?.GetInvocationList().Length ?? 0;
+    private static int CountHandlers(Delegate? handler)
+    {
+        return handler?.GetInvocationList().Length ?? 0;
+    }
 }

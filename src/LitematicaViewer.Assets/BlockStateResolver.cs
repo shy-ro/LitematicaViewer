@@ -10,37 +10,45 @@ namespace LitematicaViewer.Assets;
 // 输出的所有坐标保持 MC 资产约定（1/16 方块、uv 0..16），变换是网格阶段的事。
 public sealed class BlockStateResolver
 {
+    // 投影文件 id（旧版本）→ 资产 id（新版本）的改名桥。键值都是 blockstates/ 下的名字。
+    private static readonly Dictionary<string, string> BlockstateAliases = new(StringComparer.Ordinal)
+    {
+        ["chain"] = "iron_chain"
+    };
+
+    private readonly Dictionary<string, ResolvedBlockModel> _models = new(StringComparer.Ordinal);
     private readonly PackStack _packs;
     private readonly Dictionary<string, ModelSource?> _sources = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, ResolvedBlockModel> _models = new(StringComparer.Ordinal);
-
-    public BlockStateResolver(PackStack packs) => _packs = packs;
+    private int _missCount;
 
     private int _resolveCount;
-    private int _missCount;
+
+    public BlockStateResolver(PackStack packs)
+    {
+        _packs = packs;
+    }
+
+    public string Stats => $"resolveCount={_resolveCount} missCount={_missCount}";
 
     // blockId 形如 "minecraft:stone" 或 "minecraft:oak_stairs[facing=east,half=bottom]"。
     public ResolvedBlockState Resolve(string blockId)
     {
-        int bracket = blockId.IndexOf('[');
-        string name = bracket < 0 ? blockId : blockId[..bracket];
-        ImmutableDictionary<string, string> properties = ImmutableDictionary<string, string>.Empty;
-        if (bracket >= 0)
-        {
-            properties = ParseProperties(blockId[(bracket + 1)..blockId.IndexOf(']')]);
-        }
+        var bracket = blockId.IndexOf('[');
+        var name = bracket < 0 ? blockId : blockId[..bracket];
+        var properties = ImmutableDictionary<string, string>.Empty;
+        if (bracket >= 0) properties = ParseProperties(blockId[(bracket + 1)..blockId.IndexOf(']')]);
 
-        (string ns, string path) = SplitId(name);
-        string statePath = $"assets/{ns}/blockstates/{path}.json";
-        bool found = _packs.TryRead(statePath, out byte[] stateBytes);
+        var (ns, path) = SplitId(name);
+        var statePath = $"assets/{ns}/blockstates/{path}.json";
+        var found = _packs.TryRead(statePath, out var stateBytes);
         if (!found && ns == "minecraft"
-            && BlockstateAliases.TryGetValue(path, out string? aliased))
+                   && BlockstateAliases.TryGetValue(path, out var aliased))
         {
             // 投影文件按旧版本 id 写，资产按新版本存：26.x 把 chain 改名成了 iron_chain，
             // 老 id 直接 miss 的方块整个消失（模型一个面都没有），比缺贴图难看得多。
             // 表只收已实测改名的项；别名的 blockstate 模型同构，直接当原名解析。
-            string aliasPath = $"assets/{ns}/blockstates/{aliased}.json";
-            if (_packs.TryRead(aliasPath, out byte[] aliasBytes))
+            var aliasPath = $"assets/{ns}/blockstates/{aliased}.json";
+            if (_packs.TryRead(aliasPath, out var aliasBytes))
             {
                 stateBytes = aliasBytes;
                 found = true;
@@ -55,52 +63,33 @@ public sealed class BlockStateResolver
             return new ResolvedBlockState(blockId, []);
         }
 
-        using JsonDocument doc = JsonDocument.Parse(stateBytes);
-        JsonElement root = doc.RootElement;
+        using var doc = JsonDocument.Parse(stateBytes);
+        var root = doc.RootElement;
 
         List<ResolvedVariant> variants = [];
-        if (root.TryGetProperty("variants", out JsonElement variantsElement))
-        {
+        if (root.TryGetProperty("variants", out var variantsElement))
             ResolveVariants(variantsElement, properties, name, variants);
-        }
-        else if (root.TryGetProperty("multipart", out JsonElement multipartElement))
-        {
+        else if (root.TryGetProperty("multipart", out var multipartElement))
             ResolveMultipart(multipartElement, properties, name, variants);
-        }
         else
-        {
             Debug.WriteLine($"[ASSETS][resolve] blockstate 既无 variants 也无 multipart {statePath}");
-        }
 
-        if (variants.Count == 0)
-        {
-            _missCount++;
-        }
+        if (variants.Count == 0) _missCount++;
 
         _resolveCount++;
-        return new ResolvedBlockState(blockId, variants, IsMultipart: root.TryGetProperty("multipart", out _));
+        return new ResolvedBlockState(blockId, variants, root.TryGetProperty("multipart", out _));
     }
-
-    public string Stats => $"resolveCount={_resolveCount} missCount={_missCount}";
-
-    // 投影文件 id（旧版本）→ 资产 id（新版本）的改名桥。键值都是 blockstates/ 下的名字。
-    private static readonly Dictionary<string, string> BlockstateAliases = new(StringComparer.Ordinal)
-    {
-        ["chain"] = "iron_chain",
-    };
 
     // ---------- blockstate 层 ----------
 
-    private void ResolveVariants(JsonElement variants, ImmutableDictionary<string, string> properties, string blockName, List<ResolvedVariant> output)
+    private void ResolveVariants(JsonElement variants, ImmutableDictionary<string, string> properties, string blockName,
+        List<ResolvedVariant> output)
     {
-        foreach (JsonProperty entry in variants.EnumerateObject())
+        foreach (var entry in variants.EnumerateObject())
         {
             // variants 的键是 "k=v,k=v"（可空）。缺某属性 = 通配；命中即收，MC 同一状态
             // 不会匹配两个键，多收是我们解析器的错，交给断言盯着。
-            if (!Matches(entry.Name, properties))
-            {
-                continue;
-            }
+            if (!Matches(entry.Name, properties)) continue;
 
             switch (entry.Value.ValueKind)
             {
@@ -108,10 +97,7 @@ public sealed class BlockStateResolver
                     AddVariant(entry.Value, blockName, output);
                     break;
                 case JsonValueKind.Array:
-                    foreach (JsonElement item in entry.Value.EnumerateArray())
-                    {
-                        AddVariant(item, blockName, output);
-                    }
+                    foreach (var item in entry.Value.EnumerateArray()) AddVariant(item, blockName, output);
                     break;
                 default:
                     Debug.WriteLine($"[ASSETS][resolve] variants 值类型异常 kind={entry.Value.ValueKind} key={entry.Name}");
@@ -120,77 +106,63 @@ public sealed class BlockStateResolver
         }
     }
 
-    private void ResolveMultipart(JsonElement multipart, ImmutableDictionary<string, string> properties, string blockName, List<ResolvedVariant> output)
+    private void ResolveMultipart(JsonElement multipart, ImmutableDictionary<string, string> properties,
+        string blockName, List<ResolvedVariant> output)
     {
-        foreach (JsonElement part in multipart.EnumerateArray())
+        foreach (var part in multipart.EnumerateArray())
         {
-            if (part.TryGetProperty("when", out JsonElement when) && !WhenMatches(when, properties))
-            {
-                continue;
-            }
+            if (part.TryGetProperty("when", out var when) && !WhenMatches(when, properties)) continue;
 
-            if (part.TryGetProperty("apply", out JsonElement apply))
+            if (part.TryGetProperty("apply", out var apply))
             {
                 if (apply.ValueKind == JsonValueKind.Object)
-                {
                     AddVariant(apply, blockName, output);
-                }
                 else if (apply.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (JsonElement item in apply.EnumerateArray())
-                    {
+                    foreach (var item in apply.EnumerateArray())
                         AddVariant(item, blockName, output);
-                    }
-                }
             }
         }
     }
 
     private void AddVariant(JsonElement variant, string blockName, List<ResolvedVariant> output)
     {
-        if (!variant.TryGetProperty("model", out JsonElement modelElement))
+        if (!variant.TryGetProperty("model", out var modelElement))
         {
             Debug.WriteLine("[ASSETS][resolve] variant 缺 model 字段，跳过");
             return;
         }
 
-        float x = variant.TryGetProperty("x", out JsonElement xElement) ? xElement.GetSingle() : 0f;
-        float y = variant.TryGetProperty("y", out JsonElement yElement) ? yElement.GetSingle() : 0f;
-        string modelId = NormalizeId(modelElement.GetString()!, "models");
-        ResolvedBlockModel model = LoadModel(modelId);
+        var x = variant.TryGetProperty("x", out var xElement) ? xElement.GetSingle() : 0f;
+        var y = variant.TryGetProperty("y", out var yElement) ? yElement.GetSingle() : 0f;
+        var modelId = NormalizeId(modelElement.GetString()!, "models");
+        var model = LoadModel(modelId);
 
         // builtin/entity（方块实体渲染的方块）与流体模型的 elements 是空的，
         // 原样返回就是「整块消失」；按方块名换一个占位几何再出去。
-        if (FallbackModels.TryGet(blockName, modelId, model, out ResolvedBlockModel fallback))
-        {
-            model = fallback;
-        }
+        if (FallbackModels.TryGet(blockName, modelId, model, out var fallback)) model = fallback;
 
         output.Add(new ResolvedVariant(modelId, model, x, y));
     }
 
-    private static ImmutableDictionary<string, string> ParseProperties(string inner) =>
-        inner.Split(',', StringSplitOptions.RemoveEmptyEntries)
+    private static ImmutableDictionary<string, string> ParseProperties(string inner)
+    {
+        return inner.Split(',', StringSplitOptions.RemoveEmptyEntries)
             .Select(pair => pair.Split('=', 2))
             .Where(parts => parts.Length == 2)
             .Aggregate(
                 ImmutableDictionary<string, string>.Empty,
                 (acc, parts) => acc.SetItem(parts[0], parts[1]));
+    }
 
     private static bool Matches(string key, ImmutableDictionary<string, string> properties)
     {
-        if (key.Length == 0)
-        {
-            return true;
-        }
+        if (key.Length == 0) return true;
 
-        foreach (string pair in key.Split(','))
+        foreach (var pair in key.Split(','))
         {
-            string[] parts = pair.Split('=', 2);
-            if (parts.Length != 2 || !properties.TryGetValue(parts[0], out string? value) || value != parts[1])
-            {
+            var parts = pair.Split('=', 2);
+            if (parts.Length != 2 || !properties.TryGetValue(parts[0], out var value) || value != parts[1])
                 return false;
-            }
         }
 
         return true;
@@ -198,86 +170,61 @@ public sealed class BlockStateResolver
 
     private static bool WhenMatches(JsonElement when, ImmutableDictionary<string, string> properties)
     {
-        if (when.TryGetProperty("OR", out JsonElement orElement))
-        {
+        if (when.TryGetProperty("OR", out var orElement))
             return orElement.EnumerateArray().Any(item => WhenMatches(item, properties));
-        }
 
-        if (when.TryGetProperty("AND", out JsonElement andElement))
-        {
+        if (when.TryGetProperty("AND", out var andElement))
             return andElement.EnumerateArray().All(item => WhenMatches(item, properties));
-        }
 
-        foreach (JsonProperty entry in when.EnumerateObject())
+        foreach (var entry in when.EnumerateObject())
         {
-            if (!properties.TryGetValue(entry.Name, out string? value))
-            {
-                return false;
-            }
+            if (!properties.TryGetValue(entry.Name, out var value)) return false;
 
-            bool matched = entry.Value.ValueKind == JsonValueKind.Array
+            var matched = entry.Value.ValueKind == JsonValueKind.Array
                 ? entry.Value.EnumerateArray().Any(v => v.ValueKind == JsonValueKind.String && v.GetString() == value)
                 : entry.Value.ValueKind == JsonValueKind.String && entry.Value.GetString() == value;
-            if (!matched)
-            {
-                return false;
-            }
+            if (!matched) return false;
         }
 
         return true;
     }
 
-    // ---------- model 层 ----------
-
-    private sealed record ModelSource(string? Parent, Dictionary<string, string> Textures, JsonElement? Elements);
-
     private ModelSource? LoadSource(string modelId)
     {
-        if (_sources.TryGetValue(modelId, out ModelSource? cached))
-        {
-            return cached;
-        }
+        if (_sources.TryGetValue(modelId, out var cached)) return cached;
 
-        (string ns, string path) = SplitId(modelId);
-        string modelPath = $"assets/{ns}/models/{path}.json";
+        var (ns, path) = SplitId(modelId);
+        var modelPath = $"assets/{ns}/models/{path}.json";
 
         ModelSource? source;
-        if (!_packs.TryRead(modelPath, out byte[] bytes))
+        if (!_packs.TryRead(modelPath, out var bytes))
         {
             Debug.WriteLine($"[ASSETS][resolve] 找不到 model {modelPath}");
             source = null;
         }
         else
         {
-            using JsonDocument doc = JsonDocument.Parse(bytes);
-            JsonElement root = doc.RootElement;
+            using var doc = JsonDocument.Parse(bytes);
+            var root = doc.RootElement;
 
-            string? parent = root.TryGetProperty("parent", out JsonElement parentElement)
+            var parent = root.TryGetProperty("parent", out var parentElement)
                 ? NormalizeId(parentElement.GetString()!, "models")
                 : null;
 
             Dictionary<string, string> textures = [];
-            if (root.TryGetProperty("textures", out JsonElement texturesElement))
-            {
-                foreach (JsonProperty entry in texturesElement.EnumerateObject())
-                {
+            if (root.TryGetProperty("textures", out var texturesElement))
+                foreach (var entry in texturesElement.EnumerateObject())
                     if (entry.Value.ValueKind == JsonValueKind.String)
-                    {
                         textures[entry.Name] = entry.Value.GetString()!;
-                    }
                     else if (entry.Value.ValueKind == JsonValueKind.Object &&
-                             entry.Value.TryGetProperty("sprite", out JsonElement spriteElement) &&
+                             entry.Value.TryGetProperty("sprite", out var spriteElement) &&
                              spriteElement.ValueKind == JsonValueKind.String)
-                    {
                         // 26.3 的新写法：值可以是 {"sprite": "...", "force_translucent": ...}
                         // 这样的对象（原版 glass 就在用）。贴图表里只关心 sprite 一项；
                         // 对象值静默丢弃的话，引用它的一条链全断，画面上是一块品红。
                         textures[entry.Name] = spriteElement.GetString()!;
-                    }
-                }
-            }
 
-            JsonElement? elements = root.TryGetProperty("elements", out JsonElement elementsElement)
+            JsonElement? elements = root.TryGetProperty("elements", out var elementsElement)
                 ? elementsElement.Clone()
                 : null;
 
@@ -290,37 +237,27 @@ public sealed class BlockStateResolver
 
     private ResolvedBlockModel LoadModel(string modelId)
     {
-        if (_models.TryGetValue(modelId, out ResolvedBlockModel? cached))
-        {
-            return cached;
-        }
+        if (_models.TryGetValue(modelId, out var cached)) return cached;
 
         // 父链：合并贴图（子覆盖父），elements 取链上最近的一份。
         List<ModelSource> chain = [];
-        string? cursor = modelId;
+        var cursor = modelId;
         while (cursor is not null && chain.Count < 16)
         {
-            ModelSource? source = LoadSource(cursor);
-            if (source is null)
-            {
-                break;
-            }
+            var source = LoadSource(cursor);
+            if (source is null) break;
 
             chain.Add(source);
             cursor = source.Parent;
         }
 
         Dictionary<string, string> textures = new(StringComparer.Ordinal);
-        foreach (ModelSource source in chain.AsEnumerable().Reverse())
-        {
-            foreach ((string key, string value) in source.Textures)
-            {
-                textures[key] = value;
-            }
-        }
+        foreach (var source in chain.AsEnumerable().Reverse())
+        foreach (var (key, value) in source.Textures)
+            textures[key] = value;
 
-        JsonElement? elementsElement = chain.FirstOrDefault(s => s.Elements is not null)?.Elements;
-        List<ModelElement> elements = elementsElement is null ? [] : ParseElements(modelId, elementsElement.Value, textures);
+        var elementsElement = chain.FirstOrDefault(s => s.Elements is not null)?.Elements;
+        var elements = elementsElement is null ? [] : ParseElements(modelId, elementsElement.Value, textures);
 
         ResolvedBlockModel model = new(modelId, elements);
         _models[modelId] = model;
@@ -330,47 +267,47 @@ public sealed class BlockStateResolver
     private List<ModelElement> ParseElements(string modelId, JsonElement elements, Dictionary<string, string> textures)
     {
         List<ModelElement> result = [];
-        foreach (JsonElement element in elements.EnumerateArray())
+        foreach (var element in elements.EnumerateArray())
         {
-            Vector3 from = element.TryGetProperty("from", out JsonElement fromElement) ? ReadVector3(fromElement) : new Vector3(0, 0, 0);
-            Vector3 to = element.TryGetProperty("to", out JsonElement toElement) ? ReadVector3(toElement) : new Vector3(16, 16, 16);
+            var from = element.TryGetProperty("from", out var fromElement)
+                ? ReadVector3(fromElement)
+                : new Vector3(0, 0, 0);
+            var to = element.TryGetProperty("to", out var toElement) ? ReadVector3(toElement) : new Vector3(16, 16, 16);
 
             ElementRotation? rotation = null;
-            if (element.TryGetProperty("rotation", out JsonElement rotationElement))
+            if (element.TryGetProperty("rotation", out var rotationElement))
             {
-                int axis = rotationElement.TryGetProperty("axis", out JsonElement axisElement) ? axisElement.GetString() switch
-                {
-                    "x" => 0,
-                    "y" => 1,
-                    "z" => 2,
-                    _ => -1,
-                } : -1;
-                float angle = rotationElement.TryGetProperty("angle", out JsonElement angleElement) ? angleElement.GetSingle() : 0f;
-                Vector3 origin = rotationElement.TryGetProperty("origin", out JsonElement originElement)
+                var axis = rotationElement.TryGetProperty("axis", out var axisElement)
+                    ? axisElement.GetString() switch
+                    {
+                        "x" => 0,
+                        "y" => 1,
+                        "z" => 2,
+                        _ => -1
+                    }
+                    : -1;
+                var angle = rotationElement.TryGetProperty("angle", out var angleElement)
+                    ? angleElement.GetSingle()
+                    : 0f;
+                var origin = rotationElement.TryGetProperty("origin", out var originElement)
                     ? ReadVector3(originElement)
                     : new Vector3(8, 8, 8);
                 rotation = new ElementRotation(axis, angle, origin);
             }
 
             List<ElementFace> faces = [];
-            if (element.TryGetProperty("faces", out JsonElement facesElement))
-            {
-                foreach (JsonProperty entry in facesElement.EnumerateObject())
+            if (element.TryGetProperty("faces", out var facesElement))
+                foreach (var entry in facesElement.EnumerateObject())
                 {
                     if (entry.Value.ValueKind != JsonValueKind.Object ||
-                        !TryParseFaceName(entry.Name, out FaceName face))
-                    {
+                        !TryParseFaceName(entry.Name, out var face))
                         continue;
-                    }
 
-                    JsonElement faceElement = entry.Value;
-                    string? textureRef = faceElement.TryGetProperty("texture", out JsonElement textureElement)
+                    var faceElement = entry.Value;
+                    var textureRef = faceElement.TryGetProperty("texture", out var textureElement)
                         ? textureElement.GetString()
                         : null;
-                    if (textureRef is null)
-                    {
-                        continue;
-                    }
+                    if (textureRef is null) continue;
 
                     // #引用在合并后的贴图表里解；解不开的（模型写错或 mod 资产残缺）
                     // 记日志给空 sprite，网格阶段把它当「这面没有贴图」处理，不炸整个模型。
@@ -379,24 +316,20 @@ public sealed class BlockStateResolver
                     {
                         // 不带 # 的值先查贴图表：26.3 的 heavy_core 面引用写的是裸 "all"，
                         // 意图是表里的 "all" 键；查不到才当直接贴图路径（mod 资产常见）。
-                        sprite = textures.TryGetValue(textureRef, out string? tabled) ? tabled : textureRef;
-                        int hops = 0;
-                        while (sprite is not null && sprite.StartsWith('#') && textures.TryGetValue(sprite[1..], out string? next) && hops++ < 8)
-                        {
-                            sprite = next;
-                        }
+                        sprite = textures.TryGetValue(textureRef, out var tabled) ? tabled : textureRef;
+                        var hops = 0;
+                        while (sprite is not null && sprite.StartsWith('#') &&
+                               textures.TryGetValue(sprite[1..], out var next) && hops++ < 8) sprite = next;
                     }
                     else
                     {
                         // 表的键不带 #（"#down" 的键是 "down"），值才可能是下一层引用
                         // （cube_all 把 down/up/... 全指向 #all），迭代解到头。
-                        string key = textureRef[1..];
-                        sprite = textures.TryGetValue(key, out string? value) ? value : null;
-                        int hops = 0;
-                        while (sprite is not null && sprite.StartsWith('#') && textures.TryGetValue(sprite[1..], out string? next) && hops++ < 8)
-                        {
-                            sprite = next;
-                        }
+                        var key = textureRef[1..];
+                        sprite = textures.TryGetValue(key, out var value) ? value : null;
+                        var hops = 0;
+                        while (sprite is not null && sprite.StartsWith('#') &&
+                               textures.TryGetValue(sprite[1..], out var next) && hops++ < 8) sprite = next;
                     }
 
                     if (sprite is null || sprite.StartsWith('#'))
@@ -411,25 +344,24 @@ public sealed class BlockStateResolver
                         sprite = "";
                     }
 
-                    Vector4 uv = faceElement.TryGetProperty("uv", out JsonElement uvElement)
+                    var uv = faceElement.TryGetProperty("uv", out var uvElement)
                         ? ReadVector4(uvElement)
                         : new Vector4(0, 0, 16, 16);
 
-                    string? cullface = faceElement.TryGetProperty("cullface", out JsonElement cullElement)
+                    var cullface = faceElement.TryGetProperty("cullface", out var cullElement)
                         ? cullElement.GetString()
                         : null;
 
-                    int tintIndex = faceElement.TryGetProperty("tintindex", out JsonElement tintElement)
+                    var tintIndex = faceElement.TryGetProperty("tintindex", out var tintElement)
                         ? tintElement.GetInt32()
                         : -1;
 
-                    int uvRotation = faceElement.TryGetProperty("rotation", out JsonElement faceRotationElement)
+                    var uvRotation = faceElement.TryGetProperty("rotation", out var faceRotationElement)
                         ? faceRotationElement.GetInt32()
                         : 0;
 
                     faces.Add(new ElementFace(face, uv, NormalizeSprite(sprite), cullface, tintIndex, uvRotation));
                 }
-            }
 
             result.Add(new ModelElement(from, to, rotation, faces));
         }
@@ -441,69 +373,81 @@ public sealed class BlockStateResolver
     {
         switch (name)
         {
-            case "down": face = FaceName.Down; return true;
-            case "up": face = FaceName.Up; return true;
-            case "north": face = FaceName.North; return true;
-            case "south": face = FaceName.South; return true;
-            case "west": face = FaceName.West; return true;
-            case "east": face = FaceName.East; return true;
-            default: face = FaceName.Down; return false;
+            case "down":
+                face = FaceName.Down;
+                return true;
+            case "up":
+                face = FaceName.Up;
+                return true;
+            case "north":
+                face = FaceName.North;
+                return true;
+            case "south":
+                face = FaceName.South;
+                return true;
+            case "west":
+                face = FaceName.West;
+                return true;
+            case "east":
+                face = FaceName.East;
+                return true;
+            default:
+                face = FaceName.Down;
+                return false;
         }
     }
 
     private static Vector3 ReadVector3(JsonElement element)
     {
-        JsonElement.ArrayEnumerator e = element.EnumerateArray();
+        var e = element.EnumerateArray();
         e.MoveNext();
-        float x = e.Current.GetSingle();
+        var x = e.Current.GetSingle();
         e.MoveNext();
-        float y = e.Current.GetSingle();
+        var y = e.Current.GetSingle();
         e.MoveNext();
-        float z = e.Current.GetSingle();
+        var z = e.Current.GetSingle();
         return new Vector3(x, y, z);
     }
 
     private static Vector4 ReadVector4(JsonElement element)
     {
-        JsonElement.ArrayEnumerator e = element.EnumerateArray();
+        var e = element.EnumerateArray();
         e.MoveNext();
-        float x = e.Current.GetSingle();
+        var x = e.Current.GetSingle();
         e.MoveNext();
-        float y = e.Current.GetSingle();
+        var y = e.Current.GetSingle();
         e.MoveNext();
-        float z = e.Current.GetSingle();
+        var z = e.Current.GetSingle();
         e.MoveNext();
-        float w = e.Current.GetSingle();
+        var w = e.Current.GetSingle();
         return new Vector4(x, y, z, w);
     }
 
     // "block/stone" → ("minecraft", "block/stone")；"minecraft:stone" 原样拆。
     private static (string Ns, string Path) SplitId(string raw)
     {
-        int colon = raw.IndexOf(':');
+        var colon = raw.IndexOf(':');
         return colon < 0 ? ("minecraft", raw) : (raw[..colon], raw[(colon + 1)..]);
     }
 
     private static string NormalizeId(string raw, string kind)
     {
-        (string ns, string path) = SplitId(raw);
+        var (ns, path) = SplitId(raw);
         // 模型引用有时带 "models/" 前缀（少见但合法），归一化掉，路径统一在调用处拼。
-        if (kind == "models" && path.StartsWith("models/", StringComparison.Ordinal))
-        {
-            path = path["models/".Length..];
-        }
+        if (kind == "models" && path.StartsWith("models/", StringComparison.Ordinal)) path = path["models/".Length..];
 
         return $"{ns}:{path}";
     }
 
     private static string NormalizeSprite(string raw)
     {
-        if (raw.Length == 0)
-        {
-            return "";
-        }
+        if (raw.Length == 0) return "";
 
-        (string ns, string path) = SplitId(raw);
+        var (ns, path) = SplitId(raw);
         return $"{ns}:{path}";
     }
+
+    // ---------- model 层 ----------
+
+    private sealed record ModelSource(string? Parent, Dictionary<string, string> Textures, JsonElement? Elements);
 }

@@ -28,7 +28,7 @@ internal sealed partial class CameraModel
             // pitch 在这里夹一次，取用时（CameraState.ForwardOf）还会夹一次。
             // 两处都是同一个界，所以夹不夹结果一样；在模型里夹的理由是让控制器手里的状态
             // 就是实际生效的那个——一个 pitch=500 的状态读出去比较、打日志都对不上现实。
-            Pitch = Math.Clamp(_camera.Pitch + deltaPitch, -CameraState.MaxPitch, CameraState.MaxPitch),
+            Pitch = Math.Clamp(_camera.Pitch + deltaPitch, -CameraState.MaxPitch, CameraState.MaxPitch)
         };
     }
 
@@ -45,7 +45,7 @@ internal sealed partial class CameraModel
             float.IsFinite(forwardUnits) && float.IsFinite(rightUnits),
             $"[SAMPLE][camera.pan] 位移不是有限值 forward={forwardUnits} right={rightUnits}");
 
-        Vector3 forward = _camera.Forward;
+        var forward = _camera.Forward;
 
         Vector3 groundForward = new(forward.X, 0f, forward.Z);
 
@@ -59,10 +59,10 @@ internal sealed partial class CameraModel
 
         // right = forward × up。y 轴朝上时这个叉积指向画面右边；
         // 写成 up × forward 得到的是左边，症状是 A/D 反了——两种写法单看都像对的。
-        Vector3 right = Vector3.Normalize(Vector3.Cross(groundForward, Vector3.UnitY));
+        var right = Vector3.Normalize(Vector3.Cross(groundForward, Vector3.UnitY));
 
-        Vector3 delta = (groundForward * forwardUnits) + (right * rightUnits);
-        float distanceBefore = Distance;
+        var delta = groundForward * forwardUnits + right * rightUnits;
+        var distanceBefore = Distance;
 
         _camera = _camera with { Position = _camera.Position + delta };
 
@@ -100,24 +100,24 @@ internal sealed partial class CameraModel
             $"[SAMPLE][camera.orbit] 俯仰区间不合法 min={minPitch} max={maxPitch} " +
             $"maxpitch=±{CameraState.MaxPitch}");
 
-        Vector3 pivot = Target;
+        var pivot = Target;
         // 半径可以为负：滚轮推进（人物位置语义）穿过 pivot 之后距离就是负的。
         // 位置公式 pivot - forward*radius 对负半径自动给出「pivot 前方 |radius| 处」，
         // 与穿过前的轨迹连续，所以公转不需要为负值另写一条路。
-        float radius = _zoomDistance;
+        var radius = Distance;
 
-        float yaw = Wrap(_camera.Yaw + deltaYaw);
-        float pitch = Math.Clamp(_camera.Pitch + deltaPitch, minPitch, maxPitch);
+        var yaw = Wrap(_camera.Yaw + deltaYaw);
+        var pitch = Math.Clamp(_camera.Pitch + deltaPitch, minPitch, maxPitch);
 
         // 方向走 ForwardOf，不在这里再写一套三角函数：yaw/pitch 到方向的换算只有那一份实现，
         // 两套一旦分叉，公转的圆心和视图矩阵用的方向就不是同一个，画面上是模型慢慢偏出去。
-        Vector3 forward = CameraState.ForwardOf(yaw, pitch);
+        var forward = CameraState.ForwardOf(yaw, pitch);
 
         _camera = _camera with
         {
-            Position = pivot - (forward * radius),
+            Position = pivot - forward * radius,
             Yaw = yaw,
-            Pitch = pitch,
+            Pitch = pitch
         };
 
         // 公转不改半径的绝对值。radius<=0 时阈值按 1 给：距离接近 0 的圈上 1e-3*0=0
@@ -130,7 +130,7 @@ internal sealed partial class CameraModel
 
         // 视线严格沿着 pivot 与相机的连线（正半径从外看，负半径从内看）。
         // 这一条和上面那条一起把「绕着一个不是自己看着的点转」这种状态挡掉。
-        Vector3 toCamera = pivot - _camera.Position;
+        var toCamera = pivot - _camera.Position;
         Debug.Assert(
             MathF.Abs(Vector3.Dot(_camera.Forward, Vector3.Normalize(toCamera))) > 0.999f,
             $"[SAMPLE][camera.orbit] 公转之后视线不再沿圆心连线 pos=({_camera.Position}) " +

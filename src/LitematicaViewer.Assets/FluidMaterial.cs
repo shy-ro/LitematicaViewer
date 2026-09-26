@@ -7,13 +7,18 @@ namespace LitematicaViewer.Assets;
 public static class FluidMaterial
 {
     // bubble_column 也是流体渲染的格子（模型同样为空），贴水图。
-    public static bool IsFluidBlock(string blockName) =>
-        blockName is "minecraft:water" or "minecraft:lava" or "minecraft:bubble_column";
-
-    public static string SpriteFor(string blockName) => blockName switch
+    public static bool IsFluidBlock(string blockName)
     {
-        "minecraft:lava" => "minecraft:block/lava_still",
-        "minecraft:water" or "minecraft:bubble_column" => "minecraft:block/water_still",
-        _ => "",
-    };
+        return blockName is "minecraft:water" or "minecraft:lava" or "minecraft:bubble_column";
+    }
+
+    public static string SpriteFor(string blockName)
+    {
+        return blockName switch
+        {
+            "minecraft:lava" => "minecraft:block/lava_still",
+            "minecraft:water" or "minecraft:bubble_column" => "minecraft:block/water_still",
+            _ => ""
+        };
+    }
 }

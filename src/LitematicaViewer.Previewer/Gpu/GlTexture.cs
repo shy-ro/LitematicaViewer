@@ -8,16 +8,6 @@ namespace LitematicaViewer.Previewer.Gpu;
 // 一张 RGBA8 二维纹理，图集上传专用。
 internal sealed class GlTexture : IDisposable
 {
-    private readonly GlInterface _gl;
-    private readonly int _handle;
-    private bool _disposed;
-
-    private GlTexture(GlInterface gl, int handle)
-    {
-        _gl = gl;
-        _handle = handle;
-    }
-
     // GlConsts 只收了 GL_NEAREST/GL_LINEAR 这组，缩小带 mip 的三档没有，数值来自 GL 规范。
     private const int GlLinearMipmapLinear = 0x2703;
 
@@ -29,6 +19,23 @@ internal sealed class GlTexture : IDisposable
     private const int GlTextureMaxAnisotropy = 0x84FE;
     private const int GlMaxTextureMaxAnisotropy = 0x84FF;
     private const int GlExtensions = 0x1F03;
+    private readonly GlInterface _gl;
+    private readonly int _handle;
+    private bool _disposed;
+
+    private GlTexture(GlInterface gl, int handle)
+    {
+        _gl = gl;
+        _handle = handle;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+
+        _disposed = true;
+        _gl.DeleteTexture(_handle);
+    }
 
     public static GlTexture Create(GlInterface gl, byte[][] levels, int width, int height)
     {
@@ -41,7 +48,7 @@ internal sealed class GlTexture : IDisposable
             $"[PREVIEWER][gl.texture] 尺寸不是 2 的幂 width={width} height={height} " +
             "note=图集装箱侧负责对齐，这里不兜底");
 
-        int handle = gl.GenTexture();
+        var handle = gl.GenTexture();
         gl.BindTexture(GlConsts.GL_TEXTURE_2D, handle);
 
         // 放大保持 NEAREST：MC 的像素风要的是棱角，双线性放大会糊。
@@ -57,17 +64,17 @@ internal sealed class GlTexture : IDisposable
         gl.TexParameteri(GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_WRAP_T, GlConsts.GL_CLAMP_TO_EDGE);
         ApplyAnisotropicFiltering(gl);
 
-        for (int level = 0; level < levels.Length; level++)
+        for (var level = 0; level < levels.Length; level++)
         {
-            int lw = Math.Max(1, width >> level);
-            int lh = Math.Max(1, height >> level);
-            byte[] data = levels[level];
+            var lw = Math.Max(1, width >> level);
+            var lh = Math.Max(1, height >> level);
+            var data = levels[level];
             Debug.Assert(
                 data.Length == lw * lh * 4,
                 $"[PREVIEWER][gl.texture] mip 层 {level} 数据对不上 bytes={data.Length} " +
                 $"expected={(long)lw * lh * 4} size={lw}x{lh}");
 
-            IntPtr staging = Marshal.AllocHGlobal(data.Length);
+            var staging = Marshal.AllocHGlobal(data.Length);
             try
             {
                 Marshal.Copy(data, 0, staging, data.Length);
@@ -101,17 +108,6 @@ internal sealed class GlTexture : IDisposable
         _gl.BindTexture(GlConsts.GL_TEXTURE_2D, _handle);
     }
 
-    public void Dispose()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        _disposed = true;
-        _gl.DeleteTexture(_handle);
-    }
-
     // 各向异性过滤：平掠角（近乎平行于屏幕的地面/墙面）的 Footprint 是长条，
     // 普通 mipmap 按「最大边」选层会把整层糊掉，AF 沿长边多次取样保住细节。
     // 档位封顶 8：再高与 8 的肉眼差别趋零，但带宽按比例烧。
@@ -119,26 +115,24 @@ internal sealed class GlTexture : IDisposable
     // 没有它画面只是「斜看更闪」，不影响正确性。
     private static void ApplyAnisotropicFiltering(GlInterface gl)
     {
-        string? extensions = GlRaw.GetString(gl, GlExtensions);
+        var extensions = GlRaw.GetString(gl, GlExtensions);
         if (extensions is null || !extensions.Contains("EXT_texture_filter_anisotropic", StringComparison.Ordinal))
         {
             Debug.WriteLine("[PREVIEWER][gl.texture] 无 EXT_texture_filter_anisotropic，跳过 AF");
             return;
         }
 
-        float? max = GlRaw.GetFloat(gl, GlMaxTextureMaxAnisotropy);
-        if (max is not float maxAnisotropy || maxAnisotropy < 1f)
-        {
-            return;
-        }
+        var max = GlRaw.GetFloat(gl, GlMaxTextureMaxAnisotropy);
+        if (max is not float maxAnisotropy || maxAnisotropy < 1f) return;
 
-        float requested = MathF.Min(8f, maxAnisotropy);
+        var requested = MathF.Min(8f, maxAnisotropy);
         if (GlRaw.TexParameterf(gl, GlConsts.GL_TEXTURE_2D, GlTextureMaxAnisotropy, requested))
-        {
             Debug.WriteLine($"[PREVIEWER][gl.texture] AF={requested} (max={maxAnisotropy})");
-        }
     }
 
     // 上下文丢失时用：GPU 侧的对象已经不在了，只能丢引用，不能发 Delete*。
-    public void Abandon() => _disposed = true;
+    public void Abandon()
+    {
+        _disposed = true;
+    }
 }

@@ -8,5 +8,5 @@ public enum LoadErrorKind
     NotNbt,
     Truncated,
     Malformed,
-    RegionDecodeFailed,
+    RegionDecodeFailed
 }

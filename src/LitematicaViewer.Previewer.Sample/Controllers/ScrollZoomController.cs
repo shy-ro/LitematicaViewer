@@ -1,5 +1,3 @@
-using System;
-
 namespace LitematicaViewer.Previewer.Sample;
 
 // 滚轮 -> 缩放。它只做三件事：订阅、把增量交给模型、把模型的结果推给 Previewer。
@@ -11,8 +9,8 @@ namespace LitematicaViewer.Previewer.Sample;
 // 所以这里的 SetCamera 也落在 UI 线程上（R4）。
 internal sealed class ScrollZoomController : IDisposable
 {
-    private readonly Previewer _previewer;
     private readonly CameraModel _camera;
+    private readonly Previewer _previewer;
     private bool _disposed;
 
     internal ScrollZoomController(Previewer previewer, CameraModel camera)
@@ -29,10 +27,7 @@ internal sealed class ScrollZoomController : IDisposable
     {
         // 重复 Dispose 不炸：宿主的关闭路径不止一条（窗口 Closed、异常退出），
         // 退订两次的第二个 -= 是无害的，但模式写成先判一下更省心。
-        if (_disposed)
-        {
-            return;
-        }
+        if (_disposed) return;
 
         _disposed = true;
         _previewer.Scrolled -= OnScrolled;

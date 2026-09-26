@@ -8,10 +8,7 @@ public static class LitematicLoader
     {
         ArgumentNullException.ThrowIfNull(path);
 
-        if (!File.Exists(path))
-        {
-            return LoadResult.Fail(LoadErrorKind.FileNotFound, $"file not found: '{path}'");
-        }
+        if (!File.Exists(path)) return LoadResult.Fail(LoadErrorKind.FileNotFound, $"file not found: '{path}'");
 
         byte[] bytes;
         try
@@ -29,11 +26,11 @@ public static class LitematicLoader
     public static LoadResult TryLoad(byte[] bytes, string sourcePath)
     {
         ArgumentNullException.ThrowIfNull(bytes);
-        string source = sourcePath ?? string.Empty;
+        var source = sourcePath ?? string.Empty;
 
         try
         {
-            LitematicParseResult parsed = LitematicParser.ParseRaw(bytes);
+            var parsed = LitematicParser.ParseRaw(bytes);
             return LoadResult.Ok(LitematicParser.ToDomain(parsed, source), parsed.Issues);
         }
         catch (LitematicFormatException ex)

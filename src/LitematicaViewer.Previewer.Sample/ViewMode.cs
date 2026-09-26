@@ -9,7 +9,7 @@ internal enum ViewMode
     FreeLook,
 
     // 展台：位置不动、只缩放，拖动绕圆心公转、松手带惯性、静止后缓慢逆时针自转。
-    Showcase,
+    Showcase
 }
 
 // 侧边栏要的那三个口子。做成接口而不是三个委托参数：这一组东西是「当前模式」这一件事的三个侧面，
@@ -18,13 +18,13 @@ internal interface IViewModeHost
 {
     ViewMode Mode { get; }
 
+    // 展台当前目标的那一行文本。由宿主拼好，侧边栏不去问控制器——
+    // 控制器在自由视角下根本不存在，而侧边栏不该知道这件事。
+    string ShowcaseTargetCaption { get; }
+
     // 在两种模式之间来回切。一个入口而不是「切到某个模式」：按钮只有一个，
     // 而两套「切过去」的代码各自都得知道当前是什么，等于把真相抄了两份。
     void ToggleMode();
 
     void StepTarget(int step);
-
-    // 展台当前目标的那一行文本。由宿主拼好，侧边栏不去问控制器——
-    // 控制器在自由视角下根本不存在，而侧边栏不该知道这件事。
-    string ShowcaseTargetCaption { get; }
 }

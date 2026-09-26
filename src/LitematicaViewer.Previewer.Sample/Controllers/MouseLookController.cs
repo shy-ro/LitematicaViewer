@@ -18,14 +18,14 @@ internal sealed class MouseLookController : IDisposable
     // 一次手势里逐条打桩会把终端冲掉（移动事件一秒几百条），所以只打起点、每 40 条一条、
     // 以及终点的汇总。要回答的是「增量有没有作用到相机上、这一程总共转了多少」。
     private const int MoveLogInterval = 40;
-
-    private readonly Previewer _previewer;
     private readonly CameraModel _camera;
 
-    private int _moves;
-    private float _totalYaw;
-    private float _totalPitch;
+    private readonly Previewer _previewer;
     private bool _disposed;
+
+    private int _moves;
+    private float _totalPitch;
+    private float _totalYaw;
 
     internal MouseLookController(Previewer previewer, CameraModel camera)
     {
@@ -39,10 +39,7 @@ internal sealed class MouseLookController : IDisposable
 
     public void Dispose()
     {
-        if (_disposed)
-        {
-            return;
-        }
+        if (_disposed) return;
 
         _disposed = true;
         _previewer.LookStarted -= OnLookStarted;
@@ -71,12 +68,12 @@ internal sealed class MouseLookController : IDisposable
 
         // 灵敏度每条都重新读：拖滑块的手感要立刻感觉得到，而手势可以持续几秒——
         // 在起手势时取一份存着的话，改值要等下一次起手势才生效，那看起来像卡了。
-        float sensitivity = _previewer.LookSensitivity;
+        var sensitivity = _previewer.LookSensitivity;
 
         // 往右移 yaw 增大（往右转），往下移 pitch 增大（往下看），与键鼠游戏里的鼠标一致。
         // 反过来的话平移用的还是视线方向，两处就是两套约定，手感会打架。
-        float yaw = (float)delta.X * sensitivity;
-        float pitch = (float)delta.Y * sensitivity;
+        var yaw = (float)delta.X * sensitivity;
+        var pitch = (float)delta.Y * sensitivity;
         _totalYaw += yaw;
         _totalPitch += pitch;
 
@@ -84,12 +81,10 @@ internal sealed class MouseLookController : IDisposable
         _previewer.SetCamera(_camera.Camera);
 
         if (_moves == 1 || _moves % MoveLogInterval == 0)
-        {
             Debug.WriteLine(
                 $"[SAMPLE][look.move] moves={_moves} delta=({delta.X:F1},{delta.Y:F1}) " +
                 $"total=({_totalYaw:F2},{_totalPitch:F2}) yaw={_camera.Camera.Yaw:F2} " +
                 $"pitch={_camera.Camera.Pitch:F2}");
-        }
     }
 
     private void OnLookEnded()

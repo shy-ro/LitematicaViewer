@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Numerics;
 using Avalonia.OpenGL;
 using LitematicaViewer.Previewer.Gpu;
 
@@ -18,20 +17,118 @@ internal sealed class GlMeshRenderer : IDisposable
     // 但这里不给引用——两个工程零引用，布局改了会在下面的断言处炸出来。
     internal const int FloatsPerVertex = 9;
 
+    private const string VertexShaderSource = """
+                                              #version 300 es
+                                              precision highp float;
+
+                                              layout(location = 0) in vec3 aPosition;
+                                              layout(location = 1) in vec3 aNormal;
+                                              layout(location = 2) in vec2 aUv;
+                                              layout(location = 3) in float aTint;
+
+                                              uniform mat4 uViewProjection;
+
+                                              out vec3 vNormal;
+                                              out vec2 vUv;
+                                              out float vTint;
+
+                                              void main()
+                                              {
+                                                  vNormal = aNormal;
+                                                  vUv = aUv;
+                                                  vTint = aTint;
+                                                  gl_Position = uViewProjection * vec4(aPosition, 1.0);
+                                              }
+                                              """;
+
+    private const string FragmentShaderSource = """
+                                                #version 300 es
+                                                precision highp float;
+                                                precision highp sampler2D;
+
+                                                in vec3 vNormal;
+                                                in vec2 vUv;
+                                                in float vTint;
+
+                                                uniform sampler2D uAtlas;
+                                                uniform float uOpaquePass;
+
+                                                out vec4 fragColor;
+
+                                                void main()
+                                                {
+                                                    // 光照只用来给面分出朝向：纯贴图的六个面在截图里分不清谁是谁，
+                                                    // 一点方向光让顶面亮、底面暗，立体感来自明暗差而不是颜色差。
+                                                    // 光的方向固定在世界空间，相机怎么转明暗关系都不变。
+                                                    vec3 light = normalize(vec3(0.35, 0.9, 0.2));
+                                                    float diffuse = max(dot(normalize(vNormal), light), 0.0);
+                                                    float shade = 0.62 + 0.38 * diffuse;
+
+                                                    vec4 texel = texture(uAtlas, vUv);
+
+                                                    // alpha cutout：玻璃、树叶这类挖孔贴图，孔洞的 alpha 是 0，直接丢片元。
+                                                    // 阈值取 0.5 与 MC 一致。
+                                                    if (texel.a < 0.5)
+                                                    {
+                                                        discard;
+                                                    }
+
+                                                    // 两个 pass 的分流按 tint 槽号，不按像素 alpha——vanilla 的
+                                                    // opaque/translucent 是按方块分 render layer，不是逐像素判断。
+                                                    // 按像素分流的话，挖孔贴图（铁栏杆/树叶）的边缘会被三线性过滤
+                                                    // 插值出 0.5~1 的中间 alpha，整片掉进不写深度的半透明 pass：
+                                                    // 细杆几何大部分像素贴边，整根变虚影、透出背后的几何。
+                                                    // 槽 3+ 是水系（水/气泡柱/海草/海带），整块走半透明。
+                                                    bool translucent = vTint > 2.5;
+                                                    if (uOpaquePass > 0.5 && translucent)
+                                                    {
+                                                        discard;
+                                                    }
+
+                                                    if (uOpaquePass < 0.5 && !translucent)
+                                                    {
+                                                        discard;
+                                                    }
+
+                                                    // 固定色板，槽号由网格侧按方块 id 归类写进顶点（0 不染 / 1 草 / 2 叶 / 3 水）。
+                                                    // 颜色取 plains 群系：草 #91BD59、叶 #77AB2F、水 #3F76E4。
+                                                    // 树叶/草的贴图本身是灰度图，不染就是用户看到的灰白。
+                                                    vec3 tint = vec3(1.0);
+                                                    if (vTint > 0.5 && vTint < 1.5)
+                                                    {
+                                                        tint = vec3(0.569, 0.741, 0.349);
+                                                    }
+                                                    else if (vTint > 1.5 && vTint < 2.5)
+                                                    {
+                                                        tint = vec3(0.467, 0.671, 0.184);
+                                                    }
+                                                    else if (vTint > 2.5)
+                                                    {
+                                                        tint = vec3(0.247, 0.463, 0.894);
+                                                    }
+
+                                                    // 不透明 pass 输出 alpha 1.0：cutout 层在 vanilla 里不做混合，边缘
+                                                    // 插值像素照常写深度；半透明 pass 原样输出贴图 alpha（水 180≈0.71），
+                                                    // 帧缓冲的 alpha 通道由 glBlendFuncSeparate 的 (ZERO, ONE) 保护。
+                                                    fragColor = vec4(texel.rgb * tint * shade, translucent ? texel.a : 1.0);
+                                                }
+                                                """;
+
+    private GlTexture? _atlas;
+    private int _atlasHeight;
+    private byte[][]? _atlasLevels;
+    private int _atlasWidth;
+    private bool _disposed;
+    private bool _gpuDirty = true;
+    private int[]? _indices;
+
+    private GlMesh? _mesh;
+
     private GlShader _shader;
+    private bool _shaderAbandoned;
 
     // 托管副本。调用方可能装完就改数组，渲染层拿到的必须是自己那一份。
     private float[]? _vertices;
-    private int[]? _indices;
-    private byte[][]? _atlasLevels;
-    private int _atlasWidth;
-    private int _atlasHeight;
-
-    private GlMesh? _mesh;
-    private GlTexture? _atlas;
-    private bool _gpuDirty = true;
-    private bool _shaderAbandoned;
-    private bool _disposed;
 
     private GlMeshRenderer(GlShader shader)
     {
@@ -41,9 +138,22 @@ internal sealed class GlMeshRenderer : IDisposable
     // 上下文在的这段时间里有没有东西可画。装填过且没被清空。
     public bool HasMesh => _vertices is not null && _indices is not null;
 
+    public void Dispose()
+    {
+        if (_disposed) return;
+
+        _disposed = true;
+        _mesh?.Dispose();
+        _atlas?.Dispose();
+        _shader.Dispose();
+        _vertices = null;
+        _indices = null;
+        _atlasLevels = null;
+    }
+
     public static GlMeshRenderer Create(GlInterface gl)
     {
-        GlShader shader = GlShader.Create(gl, VertexShaderSource, FragmentShaderSource);
+        var shader = GlShader.Create(gl, VertexShaderSource, FragmentShaderSource);
         return new GlMeshRenderer(shader);
     }
 
@@ -56,32 +166,30 @@ internal sealed class GlMeshRenderer : IDisposable
     public void Load(float[]? vertices, int[]? indices, byte[][]? atlasLevels, int atlasWidth, int atlasHeight)
     {
         Debug.Assert(
-            (vertices is null) == (indices is null),
+            vertices is null == indices is null,
             $"[PREVIEWER][gl.mesh.load] 网格与索引必须同时给或同时不给 " +
             $"vertices={vertices?.Length.ToString() ?? "null"} indices={indices?.Length.ToString() ?? "null"}");
         Debug.Assert(
-            vertices is null || (atlasLevels is not null && atlasLevels.Length > 0 && atlasWidth > 0 && atlasHeight > 0),
+            vertices is null ||
+            (atlasLevels is not null && atlasLevels.Length > 0 && atlasWidth > 0 && atlasHeight > 0),
             "[PREVIEWER][gl.mesh.load] 有网格必须有图集：uv 采样没有别的来源");
         Debug.Assert(
             vertices is null || vertices.Length % FloatsPerVertex == 0,
             $"[PREVIEWER][gl.mesh.load] 顶点数据不是 {FloatsPerVertex} 的整数倍 " +
             $"len={vertices?.Length}");
         Debug.Assert(
-            atlasLevels is null || (long)atlasLevels[0].Length == (long)atlasWidth * atlasHeight * 4,
+            atlasLevels is null || atlasLevels[0].Length == (long)atlasWidth * atlasHeight * 4,
             $"[PREVIEWER][gl.mesh.load] 图集层 0 数据长度对不上 bytes={atlasLevels?[0].Length} " +
             $"expected={(long)atlasWidth * atlasHeight * 4}");
 
         if (vertices is null)
         {
-            bool had = HasMesh;
+            var had = HasMesh;
             _vertices = null;
             _indices = null;
             _atlasLevels = null;
             _gpuDirty = true;
-            if (had)
-            {
-                Debug.WriteLine("[PREVIEWER][gl.mesh.load] cleared expected=卸载模型");
-            }
+            if (had) Debug.WriteLine("[PREVIEWER][gl.mesh.load] cleared expected=卸载模型");
             return;
         }
 
@@ -101,20 +209,14 @@ internal sealed class GlMeshRenderer : IDisposable
 
     public void Render(GlInterface gl, CameraState camera, int width, int height)
     {
-        if (!HasMesh)
-        {
-            return;
-        }
+        if (!HasMesh) return;
 
         // 惰性建（或上下文恢复后重建）。_gpuDirty 在 Abandon / Load / 清空后都为真，
         // 而 Abandon 之后旧引用已失效，必须全部重新建。
-        if (_gpuDirty)
-        {
-            RebuildGpu(gl);
-        }
+        if (_gpuDirty) RebuildGpu(gl);
 
-        float aspect = (float)width / height;
-        Matrix4x4 viewProjection = camera.GetViewMatrix() * camera.GetProjectionMatrix(aspect);
+        var aspect = (float)width / height;
+        var viewProjection = camera.GetViewMatrix() * camera.GetProjectionMatrix(aspect);
 
         _atlas!.Bind(0);
         _shader.Use();
@@ -155,7 +257,7 @@ internal sealed class GlMeshRenderer : IDisposable
         // 的 Initialize 恰好先跑：alpha 输出靠 (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) 混合
         // 才上屏，fb 的 alpha 通道由 (ZERO, ONE) 保护；半透明 pass 的稳定叠色要
         // LEQUAL（LESS 会让共面的宿主面与水壁落到插值噪声上互相抖）。
-        bool blended = GlRaw.EnableAlphaBlend(gl);
+        var blended = GlRaw.EnableAlphaBlend(gl);
         Debug.Assert(
             blended,
             "[PREVIEWER][gl.mesh] 这个上下文里没有 glBlendFuncSeparate，水的半透明会被画成不透明色块");
@@ -168,31 +270,12 @@ internal sealed class GlMeshRenderer : IDisposable
             $"indices={_indices!.Length} atlas={_atlasWidth}x{_atlasHeight} note=惰性建缓冲");
     }
 
-    public void Dispose()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        _disposed = true;
-        _mesh?.Dispose();
-        _atlas?.Dispose();
-        _shader.Dispose();
-        _vertices = null;
-        _indices = null;
-        _atlasLevels = null;
-    }
-
     // 上下文丢失。与另外三个渲染器不同，这里只把 GPU 侧丢掉，托管数据留住：
     // 上下文恢复后不需要宿主重新装填，下一次 Render 自己把缓冲建回来。
     // 这也是本类不置 null 的原因——宿主那侧对 mesh 渲染器只调 Abandon，不引用置空。
     public void Abandon()
     {
-        if (_disposed)
-        {
-            return;
-        }
+        if (_disposed) return;
 
         _mesh?.Abandon();
         _mesh = null;
@@ -202,101 +285,4 @@ internal sealed class GlMeshRenderer : IDisposable
         _shaderAbandoned = true;
         _gpuDirty = true;
     }
-
-    private const string VertexShaderSource = """
-        #version 300 es
-        precision highp float;
-
-        layout(location = 0) in vec3 aPosition;
-        layout(location = 1) in vec3 aNormal;
-        layout(location = 2) in vec2 aUv;
-        layout(location = 3) in float aTint;
-
-        uniform mat4 uViewProjection;
-
-        out vec3 vNormal;
-        out vec2 vUv;
-        out float vTint;
-
-        void main()
-        {
-            vNormal = aNormal;
-            vUv = aUv;
-            vTint = aTint;
-            gl_Position = uViewProjection * vec4(aPosition, 1.0);
-        }
-        """;
-
-    private const string FragmentShaderSource = """
-        #version 300 es
-        precision highp float;
-        precision highp sampler2D;
-
-        in vec3 vNormal;
-        in vec2 vUv;
-        in float vTint;
-
-        uniform sampler2D uAtlas;
-        uniform float uOpaquePass;
-
-        out vec4 fragColor;
-
-        void main()
-        {
-            // 光照只用来给面分出朝向：纯贴图的六个面在截图里分不清谁是谁，
-            // 一点方向光让顶面亮、底面暗，立体感来自明暗差而不是颜色差。
-            // 光的方向固定在世界空间，相机怎么转明暗关系都不变。
-            vec3 light = normalize(vec3(0.35, 0.9, 0.2));
-            float diffuse = max(dot(normalize(vNormal), light), 0.0);
-            float shade = 0.62 + 0.38 * diffuse;
-
-            vec4 texel = texture(uAtlas, vUv);
-
-            // alpha cutout：玻璃、树叶这类挖孔贴图，孔洞的 alpha 是 0，直接丢片元。
-            // 阈值取 0.5 与 MC 一致。
-            if (texel.a < 0.5)
-            {
-                discard;
-            }
-
-            // 两个 pass 的分流按 tint 槽号，不按像素 alpha——vanilla 的
-            // opaque/translucent 是按方块分 render layer，不是逐像素判断。
-            // 按像素分流的话，挖孔贴图（铁栏杆/树叶）的边缘会被三线性过滤
-            // 插值出 0.5~1 的中间 alpha，整片掉进不写深度的半透明 pass：
-            // 细杆几何大部分像素贴边，整根变虚影、透出背后的几何。
-            // 槽 3+ 是水系（水/气泡柱/海草/海带），整块走半透明。
-            bool translucent = vTint > 2.5;
-            if (uOpaquePass > 0.5 && translucent)
-            {
-                discard;
-            }
-
-            if (uOpaquePass < 0.5 && !translucent)
-            {
-                discard;
-            }
-
-            // 固定色板，槽号由网格侧按方块 id 归类写进顶点（0 不染 / 1 草 / 2 叶 / 3 水）。
-            // 颜色取 plains 群系：草 #91BD59、叶 #77AB2F、水 #3F76E4。
-            // 树叶/草的贴图本身是灰度图，不染就是用户看到的灰白。
-            vec3 tint = vec3(1.0);
-            if (vTint > 0.5 && vTint < 1.5)
-            {
-                tint = vec3(0.569, 0.741, 0.349);
-            }
-            else if (vTint > 1.5 && vTint < 2.5)
-            {
-                tint = vec3(0.467, 0.671, 0.184);
-            }
-            else if (vTint > 2.5)
-            {
-                tint = vec3(0.247, 0.463, 0.894);
-            }
-
-            // 不透明 pass 输出 alpha 1.0：cutout 层在 vanilla 里不做混合，边缘
-            // 插值像素照常写深度；半透明 pass 原样输出贴图 alpha（水 180≈0.71），
-            // 帧缓冲的 alpha 通道由 glBlendFuncSeparate 的 (ZERO, ONE) 保护。
-            fragColor = vec4(texel.rgb * tint * shade, translucent ? texel.a : 1.0);
-        }
-        """;
 }

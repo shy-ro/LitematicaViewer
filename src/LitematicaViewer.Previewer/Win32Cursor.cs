@@ -17,21 +17,27 @@ internal static class Win32Cursor
     //
     // 目标点落在可见区域之外时系统会把它挪到最近的可见点上——也就是说**它可能不落在你要的地方**，
     // 而返回值仍然是非零。所以调用方必须用 TryRead 核对，不能只看这里的返回值。
-    internal static bool MoveTo(int x, int y) => IsSupported && SetCursorPos(x, y) != 0;
+    internal static bool MoveTo(int x, int y)
+    {
+        return IsSupported && SetCursorPos(x, y) != 0;
+    }
 
     // BOOL GetCursorPos(LPPOINT)：拿回来的是同一个坐标系里的点。
     internal static bool TryRead(out (int X, int Y) position)
     {
         position = default;
 
-        if (!IsSupported || GetCursorPos(out Win32Point point) == 0)
-        {
-            return false;
-        }
+        if (!IsSupported || GetCursorPos(out var point) == 0) return false;
 
         position = (point.X, point.Y);
         return true;
     }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int GetCursorPos(out Win32Point point);
 
     // POINT 是两个 int，没有别的成员。用 StructLayout 明确顺序：
     // 默认布局对「两个 int」恰好也对，但那是巧合，而这里赌错的代价是把 Y 读成垃圾。
@@ -41,10 +47,4 @@ internal static class Win32Cursor
         public int X;
         public int Y;
     }
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern int SetCursorPos(int x, int y);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern int GetCursorPos(out Win32Point point);
 }

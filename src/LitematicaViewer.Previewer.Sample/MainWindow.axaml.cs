@@ -1,16 +1,15 @@
 using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Numerics;
-using System.Text;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Input;
 using Avalonia.Interactivity;
-using Avalonia.Media;
-using Avalonia.Threading;
-using Avalonia.VisualTree;
+using Avalonia.Platform.Storage;
+using LitematicaViewer.Core.Model;
 using LitematicaViewer.Core.Picking;
+using Vector = Avalonia.Vector;
 
 namespace LitematicaViewer.Previewer.Sample;
 
@@ -103,12 +102,10 @@ public partial class MainWindow : Window, IViewModeHost
         DragDrop.SetAllowDrop(this, true);
         AddHandler(DragDrop.DropEvent, OnDrop);
 
-        string? initial = Program.InitialLitematic;
+        var initial = Program.InitialLitematic;
         if (initial is not null && _selfTest is null)
-        {
             // 等窗口真正开出来再载入：路径无关 GL，但侧边栏文本和相机的落点都要窗口在。
             Opened += (_, _) => _source.Load(initial);
-        }
 
         // 客户端尺寸与 RenderScaling 是「视口算得对不对」的参照系：
         // 视口错了的时候，第一眼要拿来的对的就是这两个数，而不是去猜 DPI。
@@ -142,9 +139,15 @@ public partial class MainWindow : Window, IViewModeHost
             ? $"{turntable.Current.Name}  {turntable.Index + 1}/{turntable.Count}"
             : "—";
 
-    void IViewModeHost.ToggleMode() => ToggleMode();
+    void IViewModeHost.ToggleMode()
+    {
+        ToggleMode();
+    }
 
-    void IViewModeHost.StepTarget(int step) => StepTarget(step);
+    void IViewModeHost.StepTarget(int step)
+    {
+        StepTarget(step);
+    }
 
     // 模式切换是「把那两个模式各自要的零件装上去、把另一个的拆下来」。没有第三态，
     // 所以一个 Toggle 就够，而它同时是侧边栏那个按钮和数字键 1/2 的唯一入口。
@@ -162,13 +165,9 @@ public partial class MainWindow : Window, IViewModeHost
         }
 
         if (_mode == ViewMode.FreeLook)
-        {
             EnterShowcase();
-        }
         else
-        {
             EnterFreeLook();
-        }
     }
 
     private void StepTarget(int step)
@@ -184,13 +183,9 @@ public partial class MainWindow : Window, IViewModeHost
         Debug.WriteLine($"[SAMPLE][showcase.step] step={step} from={turntable.Index + 1}/{turntable.Count}");
 
         if (step > 0)
-        {
             turntable.Next();
-        }
         else
-        {
             turntable.Previous();
-        }
     }
 
     // 进自由视角。三个控制器重新装：它们的状态（按住的键、挂着的手势）在拆的时候就作废了，
@@ -248,7 +243,7 @@ public partial class MainWindow : Window, IViewModeHost
     // 而每次载入都会整体替换 mesh 与展台目标表，队列的意义只有「最后一个说了算」。
     private void OnDrop(object? sender, DragEventArgs e)
     {
-        string? path = (e.DataTransfer.TryGetFiles() ?? Enumerable.Empty<Avalonia.Platform.Storage.IStorageItem>())
+        var path = (e.DataTransfer.TryGetFiles() ?? Enumerable.Empty<IStorageItem>())
             .Select(f => f.Path.LocalPath)
             .FirstOrDefault(p => p.EndsWith(".litematic", StringComparison.OrdinalIgnoreCase));
 
@@ -280,33 +275,26 @@ public partial class MainWindow : Window, IViewModeHost
         {
             _sidebar.SetFile($"载入失败：{Path.GetFileName(path)}（看日志）");
             if (Program.ShotPath is not null)
-            {
                 // 截帧模式没有画面可截，直接退场别挂着：调用方在等进程退出。
                 ((IClassicDesktopStyleApplicationLifetime?)Application.Current?.ApplicationLifetime)?.Shutdown();
-            }
 
             return;
         }
 
         // 载入失败/换文件时旧的拾取数据源必须清掉：上一份文档的体素还在，
         // 高亮框却会指向新模型里完全不相干的位置。
-        if (_loaded is not null && document.Document != _loaded.Document)
-        {
-            Viewport.SetHighlight(null);
-        }
+        if (_loaded is not null && document.Document != _loaded.Document) Viewport.SetHighlight(null);
 
         // 空文件（调色板里只有空气）没有顶点可传：传空数组会让 GL 那边建一个零长度的
         // 索引缓冲，传 null 走「清空」语义，画面退回演示立方体。
-        bool empty = document.MergedIndices.Length == 0;
+        var empty = document.MergedIndices.Length == 0;
         if (Program.ShotPath is not null && !empty)
-        {
             // 截帧模式的取证口：GPU 收到的图集层 0 落盘，和 CPU 侧产物对账。
             ShotWriter.WriteAtlas(
                 Program.ShotPath + ".atlas.ppm",
                 document.AtlasLevels![0],
                 document.AtlasWidth,
                 document.AtlasHeight);
-        }
 
         Viewport.SetMesh(
             empty ? null : document.MergedVertices,
@@ -331,11 +319,11 @@ public partial class MainWindow : Window, IViewModeHost
         // 上限是 radius*12——半径超过 ~8 的模型一拉远，超出 100 的那截就被投影矩阵
         // 裁掉，症状是转视角时模型缺一块（我们根本没做视锥剔除，别往那查）。
         // radius*20 再加余量：覆盖最大缩放 + 模型半径 + 光环。
-        float far = MathF.Max(100f, document.WholeRadius * 20f + 64f);
+        var far = MathF.Max(100f, document.WholeRadius * 20f + 64f);
         _camera.Reset(_camera.Camera with { Far = far });
         // 滚轮步长按方块统一（不随模型缩放），滚轮语义 = 人物位置沿视线推进。
         // --shot-dist 让截帧从更近的距离取景：复现用户「凑近看」的画面。
-        float frameDistance = document.WholeRadius * TurntableController.FrameFactor * Program.ShotDistanceFactor;
+        var frameDistance = document.WholeRadius * TurntableController.FrameFactor * Program.ShotDistanceFactor;
         _camera.FrameTurntable(
             document.WholeCentre,
             TurntableController.DefaultPitch,
@@ -361,36 +349,34 @@ public partial class MainWindow : Window, IViewModeHost
 
         // --shot：取景已就位，请求下一帧渲染末尾读回像素，落盘后整个进程退场。
         if (Program.ShotPath is not null)
-        {
             Viewport.RequestCapture((pixels, width, height) =>
             {
                 ShotWriter.Write(Program.ShotPath!, pixels, width, height);
                 Debug.WriteLine($"[SAMPLE][shot] saved={Program.ShotPath} size={width}x{height}");
                 ((IClassicDesktopStyleApplicationLifetime?)Application.Current?.ApplicationLifetime)?.Shutdown();
             });
-        }
     }
 
     // 指针悬停拾取：屏幕点 → 射线（PointToRay，与渲染共用同一套矩阵）→ 体素遍历（Core 的
     // Amanatides & Woo）→ 高亮框 + 侧栏读数。事件一秒几百条，但每条只是一次几百步的遍历
     // 加一次引用比较；UI 更新只在命中方块变化时发生，指针静止时根本不来事件。
     // log=false：悬停的逐条命中日志会把终端冲掉，点击式的日志价值在 Core 里保不住这里。
-    private void OnHoverMoved(Avalonia.Vector position)
+    private void OnHoverMoved(Vector position)
     {
         if (_loaded is null || double.IsNaN(position.X))
         {
             Viewport.SetHighlight(null);
             _sidebar.SetPick(_loaded is null ? "（—）" : _sidebarPickMiss);
-            _lastPickedBlock = new Core.Model.Vector3I(int.MinValue, int.MinValue, int.MinValue);
+            _lastPickedBlock = new Vector3I(int.MinValue, int.MinValue, int.MinValue);
             return;
         }
 
-        (Vector3 origin, Vector3 direction) = Viewport.PointToRay(position);
-        if (!VoxelPicker.TryPick(_loaded.Document, origin, direction, out VoxelHit hit, log: false))
+        var (origin, direction) = Viewport.PointToRay(position);
+        if (!VoxelPicker.TryPick(_loaded.Document, origin, direction, out var hit, log: false))
         {
             Viewport.SetHighlight(null);
             _sidebar.SetPick(_sidebarPickMiss);
-            _lastPickedBlock = new Core.Model.Vector3I(int.MinValue, int.MinValue, int.MinValue);
+            _lastPickedBlock = new Vector3I(int.MinValue, int.MinValue, int.MinValue);
             return;
         }
 
@@ -404,33 +390,24 @@ public partial class MainWindow : Window, IViewModeHost
         }
     }
 
-    private Core.Model.Vector3I _lastPickedBlock = new(int.MinValue, int.MinValue, int.MinValue);
+    private Vector3I _lastPickedBlock = new(int.MinValue, int.MinValue, int.MinValue);
     private const string _sidebarPickMiss = "（未指向方块）";
 
     private void OnViewportKeyChanged(Key key, bool isDown)
     {
-        if (!isDown)
-        {
-            return;
-        }
+        if (!isDown) return;
 
         switch (key)
         {
             case Key.D1 or Key.NumPad1:
                 Debug.WriteLine("[SAMPLE][mode] 数字键 1 -> 自由视角");
-                if (_mode != ViewMode.FreeLook)
-                {
-                    ToggleMode();
-                }
+                if (_mode != ViewMode.FreeLook) ToggleMode();
 
                 break;
 
             case Key.D2 or Key.NumPad2:
                 Debug.WriteLine("[SAMPLE][mode] 数字键 2 -> 展台");
-                if (_mode != ViewMode.Showcase)
-                {
-                    ToggleMode();
-                }
+                if (_mode != ViewMode.Showcase) ToggleMode();
 
                 break;
 
@@ -667,8 +644,8 @@ public partial class MainWindow : Window, IViewModeHost
     // 在日志里长得一样，所以两者都要打出来。
     private void OnSidebarPointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        bool focused = Viewport.Focus();
-        IInputElement? focusedElement = TopLevel.GetTopLevel(Viewport)?.FocusManager?.GetFocusedElement();
+        var focused = Viewport.Focus();
+        var focusedElement = GetTopLevel(Viewport)?.FocusManager?.GetFocusedElement();
         Debug.WriteLine(
             $"[SAMPLE][sidebar.focus] 侧边栏被按下，焦点还给视口 focused={focused} " +
             $"focusedElement={focusedElement?.GetType().Name ?? "null"} expected=Previewer");
@@ -680,12 +657,12 @@ public partial class MainWindow : Window, IViewModeHost
 
         // 键盘事件只发给有焦点的元素。窗口一开就把焦点给视口，否则「打开就跑」的人
         // 先按几下键发现没反应，再去猜是代码的问题——而焦点不在时的表现和事件没接上一模一样。
-        bool focused = Viewport.Focus();
+        var focused = Viewport.Focus();
         Debug.WriteLine($"[SAMPLE][window.opened] viewportFocus={focused} expected=True");
 
         // Focus() 返回 true 只说明「请求被接受了」。真正决定键盘听到没听到的是
         // 焦点管理器此刻记着谁——两者不一致时前者会骗人。
-        IInputElement? focusedElement = TopLevel.GetTopLevel(Viewport)?.FocusManager?.GetFocusedElement();
+        var focusedElement = GetTopLevel(Viewport)?.FocusManager?.GetFocusedElement();
         Debug.WriteLine(
             $"[SAMPLE][window.opened] focusedElement={focusedElement?.GetType().Name ?? "null"} expected=Previewer");
 
@@ -698,8 +675,10 @@ public partial class MainWindow : Window, IViewModeHost
     // 滚轮在 Win32 上是发给「焦点窗口」的，不是光标底下的窗口（光标只在算坐标时用得上）。
     // 所以窗口没激活时收不到滚轮是正常的，而这一条在日志里必须留下痕迹——
     // 否则「窗口在后台」和「事件没接上」看起来完全一样。
-    private void OnActivated(object? sender, EventArgs e) =>
+    private void OnActivated(object? sender, EventArgs e)
+    {
         Debug.WriteLine($"[SAMPLE][window.activated] client={ClientSize}");
+    }
 
     // 失活时把「按住的键」和「进行中的看向手势」清掉。Alt+Tab 走了之后，抬起的按键与
     // 指针的进出/捕获丢失都送到别的窗口去了，这里不会收到：还按着的 W 会让相机一直往前走，

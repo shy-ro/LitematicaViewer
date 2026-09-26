@@ -7,8 +7,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\LitematicaViewer.Assets\LitematicaViewer.Assets.csproj" />
-    <ProjectReference Include="..\LitematicaViewer.Core\LitematicaViewer.Core.csproj" />
+    <ProjectReference Include="..\LitematicaViewer.Assets\LitematicaViewer.Assets.csproj"/>
+    <ProjectReference Include="..\LitematicaViewer.Core\LitematicaViewer.Core.csproj"/>
   </ItemGroup>
 
 </Project>

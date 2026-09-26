@@ -2,7 +2,6 @@ using System.Diagnostics;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
-using Avalonia.Media;
 
 namespace LitematicaViewer.Previewer;
 
@@ -19,19 +18,20 @@ namespace LitematicaViewer.Previewer;
 public sealed class PreviewerInputAdapter : IDisposable
 {
     private readonly Previewer _previewer;
-    private IPointer? _pointer;
-
-    // 手势是否进行中。它同时是「光标现在被钉着、藏起来了」的同一个状态，所以两个必须一起变。
-    private bool _looking;
-
-    // 右键按着的时候不接管指针：不转视角、不钉光标、不藏光标。
-    private bool _suspended;
 
     // 能不能钉光标。宿主可以关掉（验收剧本就要关），平台不支持时也自动是关的。
     private bool _confine = true;
 
+    private Cursor? _cursorBeforeHide;
+    private bool _cursorHidden;
+
+    private bool _disposed;
+
     // 转视角的手势。见 LookGesture：自由视角与展台只差这一件事。
     private LookGesture _gesture = LookGesture.FollowPointer;
+
+    // 手势是否进行中。它同时是「光标现在被钉着、藏起来了」的同一个状态，所以两个必须一起变。
+    private bool _looking;
 
     // 钉不住之后的降级标志。窗口有一部分在屏幕外时 SetCursorPos 会落到别处，
     // 而那时每次都按请求点算增量会让画面自己转起来——所以一旦发现钉不住就整段放弃，
@@ -39,9 +39,7 @@ public sealed class PreviewerInputAdapter : IDisposable
     private bool _pinBroken;
     private bool _pinBrokenLogged;
     private bool _pinLogged;
-
-    private Cursor? _cursorBeforeHide;
-    private bool _cursorHidden;
+    private IPointer? _pointer;
 
     // 参照点：上一次报出去的指针位置。手势的增量全是「当前位置减它」。
     //
@@ -50,7 +48,8 @@ public sealed class PreviewerInputAdapter : IDisposable
     // 换句话说，差值就该在这里算：控制器不知道光标被挪走过，它算出来的会是「挪动 + 手移动」的混合。
     private Point _reference;
 
-    private bool _disposed;
+    // 右键按着的时候不接管指针：不转视角、不钉光标、不藏光标。
+    private bool _suspended;
 
     // 宿主就是控件本身，不再单收一个 host 参数：多一个「事件从哪来」和「往哪发」可以不同的
     // 自由度，只会让人以为它们可以不同。
@@ -101,19 +100,14 @@ public sealed class PreviewerInputAdapter : IDisposable
 
         set
         {
-            if (_confine == value)
-            {
-                return;
-            }
+            if (_confine == value) return;
 
             _confine = value;
             Debug.WriteLine($"[PREVIEWER][input.confine] confine={value}");
 
             if (!value)
-            {
                 // 关掉的时候光标可能正被藏着。留着它不还，用户会以为鼠标坏了。
                 ShowCursor();
-            }
         }
     }
 
@@ -124,10 +118,7 @@ public sealed class PreviewerInputAdapter : IDisposable
 
         set
         {
-            if (_gesture == value)
-            {
-                return;
-            }
+            if (_gesture == value) return;
 
             _gesture = value;
 
@@ -140,10 +131,7 @@ public sealed class PreviewerInputAdapter : IDisposable
 
     public void Dispose()
     {
-        if (_disposed)
-        {
-            return;
-        }
+        if (_disposed) return;
 
         _disposed = true;
         _previewer.PointerWheelChanged -= OnPointerWheelChanged;
@@ -185,10 +173,7 @@ public sealed class PreviewerInputAdapter : IDisposable
             //
             // 所以这里按移动事件报的**实际按键状态**判断，而不是等一个可能永远不来的事件。
             // 侧边栏出现之前这条路几乎走不到（窗口里只有这一个控件），它现在是最常走的那条。
-            if (e.GetCurrentPoint(_previewer).Properties.IsRightButtonPressed)
-            {
-                return;
-            }
+            if (e.GetCurrentPoint(_previewer).Properties.IsRightButtonPressed) return;
 
             _suspended = false;
             Debug.WriteLine(
@@ -196,7 +181,7 @@ public sealed class PreviewerInputAdapter : IDisposable
                 "note=抬起事件落在别处了，这一次移动重新起手势并钉住光标");
         }
 
-        Point position = e.GetPosition(_previewer);
+        var position = e.GetPosition(_previewer);
 
         if (!_looking)
         {
@@ -218,10 +203,7 @@ public sealed class PreviewerInputAdapter : IDisposable
         // 零增量既不是异常也不是错误：钉住光标时，我们自己那一次回中会紧接着产生一个
         // 「指针回到了参照点」的事件，它的增量本来就该是零。放它过去会在控制器里留下
         // 一条没意义的移动记录，而那条记录会让「转了多少次」这类计数对不上。
-        if (delta == default)
-        {
-            return;
-        }
+        if (delta == default) return;
 
         _reference = CanPin() ? StartPin() : position;
         _previewer.RaiseLookMoved(delta);
@@ -234,10 +216,7 @@ public sealed class PreviewerInputAdapter : IDisposable
     // 拖出去就断的表现是「甩到一半没了」，而甩本来就是要求之一。
     private void OnPointerExited(object? sender, PointerEventArgs e)
     {
-        if (_gesture == LookGesture.FollowPointer)
-        {
-            EndLook();
-        }
+        if (_gesture == LookGesture.FollowPointer) EndLook();
     }
 
     // 展台：按住左键拖着转。不钉光标、不藏光标——拖动本来就要看得见光标。
@@ -246,10 +225,7 @@ public sealed class PreviewerInputAdapter : IDisposable
     private void BeginDrag(PointerPressedEventArgs e)
     {
         // 只认左键。右键在展台里没有含义（自由视角下它是「把指针还回去」，而这里指针本来就是自由的）。
-        if (_looking || !e.GetCurrentPoint(_previewer).Properties.IsLeftButtonPressed)
-        {
-            return;
-        }
+        if (_looking || !e.GetCurrentPoint(_previewer).Properties.IsLeftButtonPressed) return;
 
         _looking = true;
         _pointer = e.Pointer;
@@ -267,11 +243,9 @@ public sealed class PreviewerInputAdapter : IDisposable
     private void OnDragMoved(PointerEventArgs e)
     {
         if (!_looking)
-        {
             // 没按着左键时的移动只是路过。这里的安静是对的——而「一动就转」那套必须整个不生效，
             // 否则展台里光标一进画面视角就开始转。
             return;
-        }
 
         // 抬起事件可能落在别处（拖出控件再松手），所以这里按指针状态兜一次。
         // 与右键挂起那一段同一个理由：不信一个可能永远不来的事件。
@@ -282,20 +256,20 @@ public sealed class PreviewerInputAdapter : IDisposable
             return;
         }
 
-        Point position = e.GetPosition(_previewer);
+        var position = e.GetPosition(_previewer);
         Vector delta = position - _reference;
         _reference = position;
 
         // 零增量放过：拖动中手停一下就会产生零增量，喂给控制器只会留下一条没意义的记录。
-        if (delta != default)
-        {
-            _previewer.RaiseLookMoved(delta);
-        }
+        if (delta != default) _previewer.RaiseLookMoved(delta);
     }
 
     // 捕获被抢走（点到别的窗口、被别的元素抢了捕获）时手势到此为止。
     // 少了这一条，参照点会一直停在旧位置，下次移进来的第一帧就是一段凭空的跳转。
-    private void OnPointerCaptureLost(object? sender, PointerCaptureLostEventArgs e) => EndLook();
+    private void OnPointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+    {
+        EndLook();
+    }
 
     // 右键按下：把指针还回去。
     //
@@ -310,15 +284,9 @@ public sealed class PreviewerInputAdapter : IDisposable
             return;
         }
 
-        if (!e.GetCurrentPoint(_previewer).Properties.IsRightButtonPressed)
-        {
-            return;
-        }
+        if (!e.GetCurrentPoint(_previewer).Properties.IsRightButtonPressed) return;
 
-        if (_suspended)
-        {
-            return;
-        }
+        if (_suspended) return;
 
         EndLook();
         _suspended = true;
@@ -335,9 +303,7 @@ public sealed class PreviewerInputAdapter : IDisposable
         {
             if (!_looking ||
                 e.GetCurrentPoint(_previewer).Properties.PointerUpdateKind is not PointerUpdateKind.LeftButtonReleased)
-            {
                 return;
-            }
 
             Debug.WriteLine("[PREVIEWER][input.drag] 抬起（事件）looking=False");
             EndLook();
@@ -345,14 +311,9 @@ public sealed class PreviewerInputAdapter : IDisposable
         }
 
         if (e.GetCurrentPoint(_previewer).Properties.PointerUpdateKind is not PointerUpdateKind.RightButtonReleased)
-        {
             return;
-        }
 
-        if (!_suspended)
-        {
-            return;
-        }
+        if (!_suspended) return;
 
         _suspended = false;
         Debug.WriteLine(
@@ -375,10 +336,7 @@ public sealed class PreviewerInputAdapter : IDisposable
 
     private void EndLook()
     {
-        if (!_looking)
-        {
-            return;
-        }
+        if (!_looking) return;
 
         // 先把状态清掉再放捕获：Capture(null) 会同步回调 OnPointerCaptureLost，
         // 那时 _looking 已经是 false，不会绕回来再结束一次。
@@ -398,11 +356,13 @@ public sealed class PreviewerInputAdapter : IDisposable
     // 判据只有 Avalonia.Controls 给的 Window.IsActive：TopLevel 上在 12.1.3 没有这个概念
     // （实测它的公开成员里既没有 IsActive 也没有激活状态），所以拿不到窗口就按激活处理——
     // 嵌入式的顶层本来也没有「激活」这件事。
-    private bool CanPin() =>
-        _confine
-        && !_pinBroken
-        && Win32Cursor.IsSupported
-        && (TopLevel.GetTopLevel(_previewer) is not Window window || window.IsActive);
+    private bool CanPin()
+    {
+        return _confine
+               && !_pinBroken
+               && Win32Cursor.IsSupported
+               && (TopLevel.GetTopLevel(_previewer) is not Window window || window.IsActive);
+    }
 
     // 把光标钉到视口中心，返回「钉完之后指针在控件坐标系里的位置」。
     //
@@ -413,17 +373,17 @@ public sealed class PreviewerInputAdapter : IDisposable
     private Point StartPin()
     {
         Point centre = new(_previewer.Bounds.Width / 2, _previewer.Bounds.Height / 2);
-        PixelPoint target = _previewer.PointToScreen(centre);
+        var target = _previewer.PointToScreen(centre);
 
         HideCursor();
 
-        if (!Win32Cursor.MoveTo(target.X, target.Y) || !Win32Cursor.TryRead(out (int X, int Y) actual))
+        if (!Win32Cursor.MoveTo(target.X, target.Y) || !Win32Cursor.TryRead(out var actual))
         {
             AbandonPin($"移动光标或读回位置失败 target=({target.X},{target.Y})");
             return centre;
         }
 
-        Point reference = _previewer.PointToClient(new PixelPoint(actual.X, actual.Y));
+        var reference = _previewer.PointToClient(new PixelPoint(actual.X, actual.Y));
 
         // 判据是「钉完之后光标在不在控件里」，不是「和请求点是不是一模一样」。
         //
@@ -465,10 +425,7 @@ public sealed class PreviewerInputAdapter : IDisposable
         _pinBroken = true;
         ShowCursor();
 
-        if (_pinBrokenLogged)
-        {
-            return;
-        }
+        if (_pinBrokenLogged) return;
 
         _pinBrokenLogged = true;
         Debug.WriteLine(
@@ -480,10 +437,7 @@ public sealed class PreviewerInputAdapter : IDisposable
     // 留着它只会在中心闪——而闪烁的位置恰好是画面中心，最碍事的地方。
     private void HideCursor()
     {
-        if (_cursorHidden)
-        {
-            return;
-        }
+        if (_cursorHidden) return;
 
         _cursorHidden = true;
         _cursorBeforeHide = _previewer.Cursor;
@@ -492,17 +446,20 @@ public sealed class PreviewerInputAdapter : IDisposable
 
     private void ShowCursor()
     {
-        if (!_cursorHidden)
-        {
-            return;
-        }
+        if (!_cursorHidden) return;
 
         _cursorHidden = false;
         _previewer.Cursor = _cursorBeforeHide;
         _cursorBeforeHide = null;
     }
 
-    private void OnKeyDown(object? sender, KeyEventArgs e) => _previewer.RaiseKeyChanged(e.Key, isDown: true);
+    private void OnKeyDown(object? sender, KeyEventArgs e)
+    {
+        _previewer.RaiseKeyChanged(e.Key, true);
+    }
 
-    private void OnKeyUp(object? sender, KeyEventArgs e) => _previewer.RaiseKeyChanged(e.Key, isDown: false);
+    private void OnKeyUp(object? sender, KeyEventArgs e)
+    {
+        _previewer.RaiseKeyChanged(e.Key, false);
+    }
 }

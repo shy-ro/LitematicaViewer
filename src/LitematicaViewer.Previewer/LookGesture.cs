@@ -9,5 +9,5 @@ public enum LookGesture
     FollowPointer,
 
     // 按住左键拖才转，光标不钉不藏。拖动是一次有头有尾的手势，而要拖就得看得见光标。
-    DragPrimaryButton,
+    DragPrimaryButton
 }

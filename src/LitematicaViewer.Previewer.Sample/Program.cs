@@ -22,6 +22,9 @@ internal static class Program
     // 同一个文件、同一条渲染路径自己跑一遍，产物就是证据。
     internal static string? ShotPath { get; private set; }
 
+    // --shot-dist <倍数>：截帧取景距离 = 默认取景 × 倍数。复现「凑近看」的画面用。
+    internal static float ShotDistanceFactor { get; private set; } = 1f;
+
     [STAThread]
     public static int Main(string[] args)
     {
@@ -44,53 +47,40 @@ internal static class Program
         return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 
-    public static AppBuilder BuildAvaloniaApp() =>
-        AppBuilder.Configure<App>()
+    public static AppBuilder BuildAvaloniaApp()
+    {
+        return AppBuilder.Configure<App>()
             .UsePlatformDetect()
             // 显式挑 ANGLE/EGL，而不是让平台自己挑：Win32 下能提供 GL 上下文的后端不止一个，
             // OpenGlControlBase 需要的是能拿来直接跑 GL 的那一个。
             .With(new Win32PlatformOptions { RenderingMode = [Win32RenderingMode.AngleEgl] })
             .LogToTrace();
+    }
 
     private static double ParseSelfTestSeconds(string[] args)
     {
-        for (int i = 0; i < args.Length - 1; i++)
-        {
+        for (var i = 0; i < args.Length - 1; i++)
             if (args[i] == SelfTestSwitch &&
-                double.TryParse(args[i + 1], CultureInfo.InvariantCulture, out double seconds))
-            {
+                double.TryParse(args[i + 1], CultureInfo.InvariantCulture, out var seconds))
                 return seconds;
-            }
-        }
 
         return 0;
     }
 
     private static string? ParseShotPath(string[] args)
     {
-        for (int i = 0; i < args.Length - 1; i++)
-        {
+        for (var i = 0; i < args.Length - 1; i++)
             if (args[i] == "--shot")
-            {
                 return args[i + 1];
-            }
-        }
 
         return null;
     }
 
-    // --shot-dist <倍数>：截帧取景距离 = 默认取景 × 倍数。复现「凑近看」的画面用。
-    internal static float ShotDistanceFactor { get; private set; } = 1f;
-
     private static void ParseShotDistance(string[] args)
     {
-        for (int i = 0; i < args.Length - 1; i++)
-        {
+        for (var i = 0; i < args.Length - 1; i++)
             if (args[i] == "--shot-dist" &&
-                float.TryParse(args[i + 1], CultureInfo.InvariantCulture, out float factor))
-            {
+                float.TryParse(args[i + 1], CultureInfo.InvariantCulture, out var factor))
                 ShotDistanceFactor = factor;
-            }
-        }
     }
 }

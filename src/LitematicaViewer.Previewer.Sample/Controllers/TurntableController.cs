@@ -1,8 +1,6 @@
 using System.Collections.Immutable;
 using System.Diagnostics;
-using System.Numerics;
 using Avalonia;
-using LitematicaViewer.Previewer;
 
 namespace LitematicaViewer.Previewer.Sample;
 
@@ -39,32 +37,31 @@ internal sealed class TurntableController : IDisposable
     // 速度小到这个量级就不推相机了。一阶滞后只是无限逼近零，不截断的话静止时每帧都 SetCamera，
     // 而 SetCamera 会让画面校验重验一帧——预算只有 24 帧，几下就用光了。
     private const float StillVelocity = 0.01f;
+    private readonly CameraModel _camera;
 
     private readonly Previewer _previewer;
-    private readonly CameraModel _camera;
     private readonly ImmutableArray<ShowcaseTarget> _targets;
-    private int _index;
+
+    private bool _disposed;
+    private int _dragMoves;
+    private float _dragTotal;
+
+    // 这一帧里拖动攒下的角度、以及一次手势的总量。前者用来估手速（移动事件没有时间戳），
+    // 后者只用于收尾那一行日志。
+    private float _dragYaw;
 
     // 拖动中。起止条件与自由视角那边不同（那边靠指针进出，这边靠按键），但含义一样：
     // 手势进行中。
     private bool _dragging;
 
-    // 角速度（度/秒，正数 = yaw 增大）。拖动时由手给，松手之后它衰减、最后被自转那个目标接管。
-    private float _velocity;
-
-    // 这一帧里拖动攒下的角度、以及一次手势的总量。前者用来估手速（移动事件没有时间戳），
-    // 后者只用于收尾那一行日志。
-    private float _dragYaw;
-    private float _dragTotal;
-    private int _dragMoves;
+    // 自转起来那一刻打一条日志。一帧一条会把终端冲掉，而「自转到底起没起来」是个是非题。
+    private bool _driftLogged;
 
     // 松手之后的秒数，用来决定自转该不该起来。
     private double _idleSeconds;
 
-    // 自转起来那一刻打一条日志。一帧一条会把终端冲掉，而「自转到底起没起来」是个是非题。
-    private bool _driftLogged;
-
-    private bool _disposed;
+    // 角速度（度/秒，正数 = yaw 增大）。拖动时由手给，松手之后它衰减、最后被自转那个目标接管。
+    private float _velocity;
 
     internal TurntableController(
         Previewer previewer,
@@ -90,18 +87,15 @@ internal sealed class TurntableController : IDisposable
         Frame();
     }
 
-    internal ShowcaseTarget Current => _targets[_index];
+    internal ShowcaseTarget Current => _targets[Index];
 
-    internal int Index => _index;
+    internal int Index { get; private set; }
 
     internal int Count => _targets.Length;
 
     public void Dispose()
     {
-        if (_disposed)
-        {
-            return;
-        }
+        if (_disposed) return;
 
         _disposed = true;
         _previewer.LookStarted -= OnLookStarted;
@@ -117,9 +111,15 @@ internal sealed class TurntableController : IDisposable
 
     // 切到下一个／上一个目标。今天表里只有一个，所以它是「接口先就位」——
     // 而正因为只有一个，它必须写成能直接用的样子：等多 region 落地时改的是那张表，不是这里。
-    internal void Next() => Move(+1);
+    internal void Next()
+    {
+        Move(+1);
+    }
 
-    internal void Previous() => Move(-1);
+    internal void Previous()
+    {
+        Move(-1);
+    }
 
     // 窗口失活时由宿主调。速度清零，而不是留着：
     //
@@ -144,15 +144,15 @@ internal sealed class TurntableController : IDisposable
 
     private void Move(int step)
     {
-        _index = ((_index + step) % _targets.Length + _targets.Length) % _targets.Length;
+        Index = ((Index + step) % _targets.Length + _targets.Length) % _targets.Length;
         Frame();
     }
 
     // 把相机摆到当前目标上，并把光环按它的尺寸放好。
     private void Frame()
     {
-        ShowcaseTarget target = Current;
-        float distance = target.Radius * FrameFactor;
+        var target = Current;
+        var distance = target.Radius * FrameFactor;
 
         _camera.FrameTurntable(target.Centre, DefaultPitch, distance);
 
@@ -169,7 +169,7 @@ internal sealed class TurntableController : IDisposable
         _previewer.SetCamera(_camera.Camera);
 
         Debug.WriteLine(
-            $"[SAMPLE][showcase.frame] 目标={target.Name} index={_index + 1}/{_targets.Length} " +
+            $"[SAMPLE][showcase.frame] 目标={target.Name} index={Index + 1}/{_targets.Length} " +
             $"centre=({target.Centre}) radius={target.Radius:F4} baseY={target.BaseY:F3} " +
             $"distance={distance:F4} pitch={DefaultPitch}");
     }
@@ -191,17 +191,17 @@ internal sealed class TurntableController : IDisposable
             $"distance={_camera.Distance:F4} dragSensitivity={_previewer.DragSensitivity}");
     }
 
-    private void OnLookMoved(Avalonia.Vector delta)
+    private void OnLookMoved(Vector delta)
     {
         _dragMoves++;
 
         // 灵敏度每条重新读：拖滑块要当场生效，而一次拖动可以持续几秒。
-        float sensitivity = _previewer.DragSensitivity;
+        var sensitivity = _previewer.DragSensitivity;
 
         // 往右拖 yaw 增大（相机往右绕），往下拖 pitch 增大（相机抬高、更俯视）——
         // 与自由视角的鼠标方向一致，两套手势的手感不该打架。
-        float yaw = (float)delta.X * sensitivity;
-        float pitch = (float)delta.Y * sensitivity;
+        var yaw = (float)delta.X * sensitivity;
+        var pitch = (float)delta.Y * sensitivity;
 
         _dragYaw += yaw;
         _dragTotal += yaw;
@@ -212,10 +212,7 @@ internal sealed class TurntableController : IDisposable
 
     private void OnLookEnded()
     {
-        if (!_dragging)
-        {
-            return;
-        }
+        if (!_dragging) return;
 
         _dragging = false;
         _idleSeconds = 0d;
@@ -252,16 +249,13 @@ internal sealed class TurntableController : IDisposable
         }
 
         // 第一帧的 delta 是 0（没有上一帧），累加它没有意义。
-        if (delta <= 0d)
-        {
-            return;
-        }
+        if (delta <= 0d) return;
 
         _idleSeconds += delta;
 
         // 自转不是「到点突然起步」：速度的衰减目标从 0 换成自转速度，速度本身是连续的，
         // 于是甩出去的余速会自己接上自转，中间不会先停住、再重新起步。
-        float target = _idleSeconds >= _previewer.SpinIdleDelay
+        var target = _idleSeconds >= _previewer.SpinIdleDelay
             ? TurntableSpin.IdleSpeed(_previewer.SpinIdleSpeed)
             : 0f;
 

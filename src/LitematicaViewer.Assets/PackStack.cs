@@ -6,19 +6,25 @@ public sealed class PackStack : IDisposable
 {
     private readonly List<ResourcePack> _packs = [];
 
-    public void Add(ResourcePack pack) => _packs.Add(pack);
-
     public int Count => _packs.Count;
+
+    public void Dispose()
+    {
+        foreach (var pack in _packs) pack.Dispose();
+
+        _packs.Clear();
+    }
+
+    public void Add(ResourcePack pack)
+    {
+        _packs.Add(pack);
+    }
 
     public bool TryRead(string path, out byte[] content)
     {
-        for (int i = _packs.Count - 1; i >= 0; i--)
-        {
+        for (var i = _packs.Count - 1; i >= 0; i--)
             if (_packs[i].TryRead(path, out content))
-            {
                 return true;
-            }
-        }
 
         content = [];
         return false;
@@ -29,25 +35,9 @@ public sealed class PackStack : IDisposable
     public IEnumerable<string> Enumerate(string prefix)
     {
         HashSet<string> seen = new(StringComparer.Ordinal);
-        foreach (ResourcePack pack in _packs)
-        {
-            foreach (string entry in pack.Enumerate(prefix))
-            {
-                if (seen.Add(entry))
-                {
-                    yield return entry;
-                }
-            }
-        }
-    }
-
-    public void Dispose()
-    {
-        foreach (ResourcePack pack in _packs)
-        {
-            pack.Dispose();
-        }
-
-        _packs.Clear();
+        foreach (var pack in _packs)
+        foreach (var entry in pack.Enumerate(prefix))
+            if (seen.Add(entry))
+                yield return entry;
     }
 }

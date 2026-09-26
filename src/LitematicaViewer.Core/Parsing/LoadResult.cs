@@ -12,9 +12,13 @@ public sealed record LoadResult(
     string Message,
     ImmutableArray<string> Issues)
 {
-    public static LoadResult Ok(LitematicDocument document, ImmutableArray<string> issues) =>
-        new(true, document, LoadErrorKind.None, string.Empty, issues);
+    public static LoadResult Ok(LitematicDocument document, ImmutableArray<string> issues)
+    {
+        return new LoadResult(true, document, LoadErrorKind.None, string.Empty, issues);
+    }
 
-    public static LoadResult Fail(LoadErrorKind kind, string message, ImmutableArray<string>? issues = null) =>
-        new(false, null, kind, message, issues ?? []);
+    public static LoadResult Fail(LoadErrorKind kind, string message, ImmutableArray<string>? issues = null)
+    {
+        return new LoadResult(false, null, kind, message, issues ?? []);
+    }
 }

@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Numerics;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Interactivity;
@@ -16,43 +15,43 @@ namespace LitematicaViewer.Previewer.Sample;
 internal sealed class Sidebar : IDisposable
 {
     private const double StatsIntervalSeconds = 0.25;
+    private readonly CameraModel _camera;
+    private readonly TextBlock _distanceText;
+    private readonly Slider _dragSensitivity;
+    private readonly TextBlock _dragSensitivityText;
+    private readonly TextBlock _fileText;
+    private readonly TextBlock _forwardText;
+    private readonly TextBlock _fpsText;
+    private readonly StackPanel _freeLookGroup;
 
     private readonly IViewModeHost _host;
-    private readonly Previewer _previewer;
-    private readonly CameraModel _camera;
-    private readonly StackPanel _freeLookGroup;
-    private readonly StackPanel _showcaseGroup;
-    private readonly Button _modeButton;
-    private readonly Button _previousTarget;
-    private readonly Button _nextTarget;
-    private readonly Slider _moveSpeed;
     private readonly Slider _lookSensitivity;
-    private readonly Slider _dragSensitivity;
-    private readonly Slider _spinDamping;
-    private readonly Slider _spinIdleDelay;
-    private readonly Slider _spinIdleSpeed;
-    private readonly TextBlock _moveSpeedText;
     private readonly TextBlock _lookSensitivityText;
-    private readonly TextBlock _showcaseTargetText;
-    private readonly TextBlock _dragSensitivityText;
-    private readonly TextBlock _spinDampingText;
-    private readonly TextBlock _spinIdleDelayText;
-    private readonly TextBlock _spinIdleSpeedText;
-    private readonly TextBlock _fpsText;
-    private readonly TextBlock _viewportText;
-    private readonly TextBlock _fileText;
+    private readonly TextBlock _lookText;
+    private readonly Button _modeButton;
+    private readonly Slider _moveSpeed;
+    private readonly TextBlock _moveSpeedText;
+    private readonly Button _nextTarget;
     private readonly TextBlock _pickText;
     private readonly TextBlock _positionText;
-    private readonly TextBlock _lookText;
-    private readonly TextBlock _forwardText;
-    private readonly TextBlock _distanceText;
+    private readonly Previewer _previewer;
+    private readonly Button _previousTarget;
+    private readonly StackPanel _showcaseGroup;
+    private readonly TextBlock _showcaseTargetText;
+    private readonly Slider _spinDamping;
+    private readonly TextBlock _spinDampingText;
+    private readonly Slider _spinIdleDelay;
+    private readonly TextBlock _spinIdleDelayText;
+    private readonly Slider _spinIdleSpeed;
+    private readonly TextBlock _spinIdleSpeedText;
+    private readonly TextBlock _viewportText;
+    private bool _disposed;
+    private int _modeLogs;
+    private int _statsLogs;
+    private long _totalFrames;
+    private int _windowFrames;
 
     private double _windowSeconds;
-    private int _windowFrames;
-    private long _totalFrames;
-    private int _statsLogs;
-    private int _modeLogs;
-    private bool _disposed;
 
     // 控件用名字找，不走一长串构造参数：十来个控件的参数表没有任何一个调用点读得懂，
     // 而名字写错在 Debug 下会当场断言炸掉，比「某一行永远是空的」好查。
@@ -131,49 +130,9 @@ internal sealed class Sidebar : IDisposable
         _previewer.Tick += OnTick;
     }
 
-    // 按模式整块显隐。写在侧边栏里而不是宿主的 XAML 里：模式一变这两块要一起动，
-    // 分成两处的话「切了模式但侧边栏没跟上」是一类只看得见一部分的症状。
-    internal void SetMode(ViewMode mode)
-    {
-        bool showcase = mode == ViewMode.Showcase;
-
-        // 赋值前先比一次：TextBlock / Button 的 Content 重复赋值会走一遍属性相等性比较，
-        // 而 IsVisible 同样会向下传播一次失效——切一次模式而已，只有真的变了才写。
-        if (_freeLookGroup.IsVisible == showcase)
-        {
-            _freeLookGroup.IsVisible = !showcase;
-        }
-
-        if (_showcaseGroup.IsVisible != showcase)
-        {
-            _showcaseGroup.IsVisible = showcase;
-        }
-
-        string caption = showcase
-            ? "模式：展台（点这里或按 1 切回自由视角）"
-            : "模式：自由视角（点这里或按 2 切展台）";
-
-        if (!string.Equals(_modeButton.Content as string, caption, StringComparison.Ordinal))
-        {
-            _modeButton.Content = caption;
-        }
-
-        // 只打前两次：这条要回答的是「切换这条链走到了侧边栏」，
-        // 一次就够，而后面的每一次都会和上面那两行成对出现，多打只是噪声。
-        if (_modeLogs++ < 2)
-        {
-            Debug.WriteLine(
-                $"[SAMPLE][sidebar.mode] mode={mode} freeLookGroup={_freeLookGroup.IsVisible} " +
-                $"showcaseGroup={_showcaseGroup.IsVisible} note=只打前两次");
-        }
-    }
-
     public void Dispose()
     {
-        if (_disposed)
-        {
-            return;
-        }
+        if (_disposed) return;
 
         _disposed = true;
         _previewer.Tick -= OnTick;
@@ -188,17 +147,50 @@ internal sealed class Sidebar : IDisposable
         _nextTarget.Click -= OnNextTargetClick;
     }
 
+    // 按模式整块显隐。写在侧边栏里而不是宿主的 XAML 里：模式一变这两块要一起动，
+    // 分成两处的话「切了模式但侧边栏没跟上」是一类只看得见一部分的症状。
+    internal void SetMode(ViewMode mode)
+    {
+        var showcase = mode == ViewMode.Showcase;
+
+        // 赋值前先比一次：TextBlock / Button 的 Content 重复赋值会走一遍属性相等性比较，
+        // 而 IsVisible 同样会向下传播一次失效——切一次模式而已，只有真的变了才写。
+        if (_freeLookGroup.IsVisible == showcase) _freeLookGroup.IsVisible = !showcase;
+
+        if (_showcaseGroup.IsVisible != showcase) _showcaseGroup.IsVisible = showcase;
+
+        var caption = showcase
+            ? "模式：展台（点这里或按 1 切回自由视角）"
+            : "模式：自由视角（点这里或按 2 切展台）";
+
+        if (!string.Equals(_modeButton.Content as string, caption, StringComparison.Ordinal))
+            _modeButton.Content = caption;
+
+        // 只打前两次：这条要回答的是「切换这条链走到了侧边栏」，
+        // 一次就够，而后面的每一次都会和上面那两行成对出现，多打只是噪声。
+        if (_modeLogs++ < 2)
+            Debug.WriteLine(
+                $"[SAMPLE][sidebar.mode] mode={mode} freeLookGroup={_freeLookGroup.IsVisible} " +
+                $"showcaseGroup={_showcaseGroup.IsVisible} note=只打前两次");
+    }
+
     // 当前载入的文件那一行。文本由宿主拼好递进来，侧边栏只管显示：
     // 「文件名 / region 数 / 方块数」这三样事实的来源是载入结果，不是侧边栏自己数得出来的。
-    internal void SetFile(string text) => Set(_fileText, text);
+    internal void SetFile(string text)
+    {
+        Set(_fileText, text);
+    }
 
     // 指针悬停拾取的那一行。文本由宿主拼好递进来（方块名/坐标/命中面）。
-    internal void SetPick(string text) => Set(_pickText, text);
+    internal void SetPick(string text)
+    {
+        Set(_pickText, text);
+    }
 
     private static T Required<T>(Window window, string name)
         where T : Control
     {
-        T? control = window.FindControl<T>(name);
+        var control = window.FindControl<T>(name);
         Debug.Assert(
             control is not null,
             $"[SAMPLE][sidebar] 找不到控件 name={name} note=MainWindow.axaml 里的名字改过或者那一行被删了");
@@ -252,9 +244,15 @@ internal sealed class Sidebar : IDisposable
         _host.ToggleMode();
     }
 
-    private void OnPreviousTargetClick(object? sender, RoutedEventArgs e) => _host.StepTarget(-1);
+    private void OnPreviousTargetClick(object? sender, RoutedEventArgs e)
+    {
+        _host.StepTarget(-1);
+    }
 
-    private void OnNextTargetClick(object? sender, RoutedEventArgs e) => _host.StepTarget(+1);
+    private void OnNextTargetClick(object? sender, RoutedEventArgs e)
+    {
+        _host.StepTarget(+1);
+    }
 
     private void OnTick(double delta)
     {
@@ -262,13 +260,10 @@ internal sealed class Sidebar : IDisposable
         _windowFrames++;
         _totalFrames++;
 
-        if (_windowSeconds < StatsIntervalSeconds)
-        {
-            return;
-        }
+        if (_windowSeconds < StatsIntervalSeconds) return;
 
-        double fps = _windowSeconds > 0 ? _windowFrames / _windowSeconds : 0;
-        double frameMilliseconds = _windowFrames > 0 ? _windowSeconds * 1000 / _windowFrames : 0;
+        var fps = _windowSeconds > 0 ? _windowFrames / _windowSeconds : 0;
+        var frameMilliseconds = _windowFrames > 0 ? _windowSeconds * 1000 / _windowFrames : 0;
 
         _windowSeconds = 0;
         _windowFrames = 0;
@@ -276,9 +271,9 @@ internal sealed class Sidebar : IDisposable
         // 相机状态来自模型（它是权威），视口尺寸来自控件自己的 Bounds。
         // 两边都不是「侧边栏自己记一份」——记一份就会在某一刻和真正的权威不一致，
         // 而那时侧边栏显示的数字恰好是最不该信的那个。
-        CameraState camera = _camera.Camera;
-        Vector3 position = camera.Position;
-        Vector3 forward = camera.Forward;
+        var camera = _camera.Camera;
+        var position = camera.Position;
+        var forward = camera.Forward;
 
         Set(_fpsText, $"fps {fps:F1}  帧时 {frameMilliseconds:F1}ms  共 {_totalFrames} 帧");
         Set(_viewportText, $"视口 {BoundsText()} 缩放 {Scaling():F2} → {PixelText()}");
@@ -305,25 +300,29 @@ internal sealed class Sidebar : IDisposable
         // 「刷新这条链（Tick -> 攒计数 -> 写文本）到底跑了没有」——一次就够了。
         // 空白的侧边栏和「程序没跑起来」在界面上分不开，所以这句话得留在日志里。
         if (_statsLogs++ == 0)
-        {
             Debug.WriteLine(
                 $"[SAMPLE][sidebar.stats] 侧边栏开始刷新（只打这一条）mode={_host.Mode} fps={fps:F1} frameMs={frameMilliseconds:F1} " +
                 $"pos=({position}) yaw={camera.Yaw:F2} pitch={camera.Pitch:F2} distance={_camera.Distance:F4} " +
                 $"viewport={_previewer.Bounds.Width:F0}x{_previewer.Bounds.Height:F0} scaling={Scaling():F2}");
-        }
     }
 
     // 物理像素那一栏与 Previewer 里算视口的算式逐字相同（DIP × RenderScaling 再四舍五入）：
     // 侧边栏显示的尺寸与渲染实际用的尺寸必须是同一个数，否则它作为参照系就没用了。
-    private double Scaling() => TopLevel.GetTopLevel(_previewer)?.RenderScaling ?? 1.0;
+    private double Scaling()
+    {
+        return TopLevel.GetTopLevel(_previewer)?.RenderScaling ?? 1.0;
+    }
 
-    private string BoundsText() => $"{_previewer.Bounds.Width:F0}x{_previewer.Bounds.Height:F0} DIP";
+    private string BoundsText()
+    {
+        return $"{_previewer.Bounds.Width:F0}x{_previewer.Bounds.Height:F0} DIP";
+    }
 
     private string PixelText()
     {
-        double scaling = Scaling();
-        int width = Math.Max(1, (int)Math.Round(_previewer.Bounds.Width * scaling));
-        int height = Math.Max(1, (int)Math.Round(_previewer.Bounds.Height * scaling));
+        var scaling = Scaling();
+        var width = Math.Max(1, (int)Math.Round(_previewer.Bounds.Width * scaling));
+        var height = Math.Max(1, (int)Math.Round(_previewer.Bounds.Height * scaling));
         return $"{width}x{height} px";
     }
 
@@ -331,9 +330,6 @@ internal sealed class Sidebar : IDisposable
     // 但那之后仍然有一次布局失效的传播——每秒四次乘以八行，不必要。
     private static void Set(TextBlock block, string text)
     {
-        if (!string.Equals(block.Text, text, StringComparison.Ordinal))
-        {
-            block.Text = text;
-        }
+        if (!string.Equals(block.Text, text, StringComparison.Ordinal)) block.Text = text;
     }
 }
