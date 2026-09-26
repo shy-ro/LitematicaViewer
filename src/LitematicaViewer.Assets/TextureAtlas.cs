@@ -44,10 +44,13 @@ public sealed class TextureAtlas
     public bool TryGetRect(string sprite, out SpriteRect rect) => _rects.TryGetValue(sprite, out rect!);
 
     // 每个 sprite 四周的留白像素数。开 mipmap 后缩小采样会越出 sprite 边界采到
-    // 隔壁的颜色：留白 + 边缘外扩让 mip 链前几级的越界采样仍然落在自己颜色的复制上。
-    // 2px 养到 mip level 2（4 合 1）不串味，更深的级别影响的是缩到极小时的画面，
-    // 那时贴图本身已不到 2px，串味不可见。
-    private const int Pad = 2;
+    // 隔壁的颜色：留白 + 边缘外扩让 mip 链各层的越界采样仍然落在自己颜色的复制上。
+    //
+    // 8 不是拍脑袋：MIN_FILTER 用三线性（见 GlTexture）后层内要做双线性，
+    // 每一层都要留出 ≥1 纹素的自家颜色给越界采样。16px sprite 的 cell=32 恰是 2 的幂，
+    // 每层下采样后留白严格对齐（L1 剩 4、L2 剩 2、L3 剩 1、L4 整个 cell 都还是自家的），
+    // 大尺寸 sprite 的 cell 不是 2 的幂会有一点深层落位漂移，但 8px 的余量吞得下。
+    private const int Pad = 8;
 
     // 逐个从包栈里读 PNG 并装箱。缺的贴图给品红/黑棋盘（MC missingno 的样式），
     // 网格照常生成，缺什么在画面上一眼能认出来——比静默用白块好查得多。

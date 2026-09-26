@@ -133,4 +133,68 @@ internal static class GlRaw
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate void ReadPixelsDelegate(int x, int y, int width, int height, int format, int type, IntPtr pixels);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate IntPtr GetStringDelegate(int name);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void GetFloatvDelegate(int pname, IntPtr data);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void TexParameterfDelegate(int target, int pname, float param);
+
+    // const GLubyte* glGetString(GLenum name)
+    //
+    // 查扩展名用的。返回值指向 GL 内部的字符串，只读不写、不保存指针，
+    // 立刻 marshal 成托管串——GL 什么时候改写它不受我们管。
+    internal static string? GetString(GlInterface gl, int name)
+    {
+        IntPtr entry = gl.GetProcAddress("glGetString");
+        if (entry == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        IntPtr result = Marshal.GetDelegateForFunctionPointer<GetStringDelegate>(entry)(name);
+        return result == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(result);
+    }
+
+    // void glGetFloatv(GLenum pname, GLfloat* data)
+    //
+    // 查标量上限（这里是 MAX_TEXTURE_MAX_ANISOTROPY）。单值查询，data 指向一个 float。
+    internal static float? GetFloat(GlInterface gl, int pname)
+    {
+        IntPtr entry = gl.GetProcAddress("glGetFloatv");
+        if (entry == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        IntPtr buffer = Marshal.AllocHGlobal(sizeof(float));
+        try
+        {
+            Marshal.GetDelegateForFunctionPointer<GetFloatvDelegate>(entry)(pname, buffer);
+            return Marshal.PtrToStructure<float>(buffer);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    // void glTexParameterf(GLenum target, GLenum pname, GLfloat param)
+    //
+    // 各向异性过滤的档位是 float 参数，GlInterface 自带的 TexParameteri 签名对不上
+    // （发 int 过去在 x64 上参数寄存器宽度一致侥幸能用，但不赌——正确原型就一行）。
+    internal static bool TexParameterf(GlInterface gl, int target, int pname, float param)
+    {
+        IntPtr entry = gl.GetProcAddress("glTexParameterf");
+        if (entry == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        Marshal.GetDelegateForFunctionPointer<TexParameterfDelegate>(entry)(target, pname, param);
+        return true;
+    }
 }

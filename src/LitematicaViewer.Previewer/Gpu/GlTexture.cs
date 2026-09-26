@@ -19,11 +19,16 @@ internal sealed class GlTexture : IDisposable
     }
 
     // GlConsts 只收了 GL_NEAREST/GL_LINEAR 这组，缩小带 mip 的三档没有，数值来自 GL 规范。
-    private const int GlNearestMipmapLinear = 0x2702;
+    private const int GlLinearMipmapLinear = 0x2703;
 
     // 只上传部分 mip 链时必须声明链顶：MIN_FILTER 带 mip 的默认完整要求是链一路到 1x1，
     // 缺层 = 纹理不完整 = 采样全黑，不是退化到层 0。
     private const int GlTextureMaxLevel = 0x813D;
+
+    // EXT_texture_filter_anisotropic：扩展名、每方向取样上限、本纹理档位。
+    private const int GlTextureMaxAnisotropy = 0x84FE;
+    private const int GlMaxTextureMaxAnisotropy = 0x84FF;
+    private const int GlExtensions = 0x1F03;
 
     public static GlTexture Create(GlInterface gl, byte[][] levels, int width, int height)
     {
@@ -40,15 +45,17 @@ internal sealed class GlTexture : IDisposable
         gl.BindTexture(GlConsts.GL_TEXTURE_2D, handle);
 
         // 放大保持 NEAREST：MC 的像素风要的是棱角，双线性放大会糊。
-        // 缩小走 mipmap：mip 链由图集侧按 sprite 独立生成（见 TextureAtlas.Build），
-        // 这里逐层上传即可。绝不能 glGenerateMipmap 整图压缩：深层把相邻 sprite
-        // 混进同一纹素，alpha 被稀释过 0.5 后 cutout discard 把整个面丢没。
-        gl.TexParameteri(GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_MIN_FILTER, GlNearestMipmapLinear);
+        // 缩小走三线性 mipmap：层间插值消掉「相邻像素跳 mip 层」的噪点；
+        // 层内双线性需要的越界留白由图集侧 Pad=8 兜住（见 TextureAtlas.Build）。
+        // 绝不能 glGenerateMipmap 整图压缩：深层把相邻 sprite 混进同一纹素，
+        // alpha 被稀释过 0.5 后 cutout discard 把整个面丢没。
+        gl.TexParameteri(GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_MIN_FILTER, GlLinearMipmapLinear);
         gl.TexParameteri(GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_MAG_FILTER, GlConsts.GL_NEAREST);
         gl.TexParameteri(GlConsts.GL_TEXTURE_2D, GlTextureMaxLevel, levels.Length - 1);
         // 图集边缘的 sprite 越过边采样会包到对面去，夹住。
         gl.TexParameteri(GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_WRAP_S, GlConsts.GL_CLAMP_TO_EDGE);
         gl.TexParameteri(GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_WRAP_T, GlConsts.GL_CLAMP_TO_EDGE);
+        ApplyAnisotropicFiltering(gl);
 
         for (int level = 0; level < levels.Length; level++)
         {
@@ -103,6 +110,33 @@ internal sealed class GlTexture : IDisposable
 
         _disposed = true;
         _gl.DeleteTexture(_handle);
+    }
+
+    // 各向异性过滤：平掠角（近乎平行于屏幕的地面/墙面）的 Footprint 是长条，
+    // 普通 mipmap 按「最大边」选层会把整层糊掉，AF 沿长边多次取样保住细节。
+    // 档位封顶 8：再高与 8 的肉眼差别趋零，但带宽按比例烧。
+    // 扩展或入口缺席就静默跳过（三线性本身已经把噪点大头消掉），不做成开关——
+    // 没有它画面只是「斜看更闪」，不影响正确性。
+    private static void ApplyAnisotropicFiltering(GlInterface gl)
+    {
+        string? extensions = GlRaw.GetString(gl, GlExtensions);
+        if (extensions is null || !extensions.Contains("EXT_texture_filter_anisotropic", StringComparison.Ordinal))
+        {
+            Debug.WriteLine("[PREVIEWER][gl.texture] 无 EXT_texture_filter_anisotropic，跳过 AF");
+            return;
+        }
+
+        float? max = GlRaw.GetFloat(gl, GlMaxTextureMaxAnisotropy);
+        if (max is not float maxAnisotropy || maxAnisotropy < 1f)
+        {
+            return;
+        }
+
+        float requested = MathF.Min(8f, maxAnisotropy);
+        if (GlRaw.TexParameterf(gl, GlConsts.GL_TEXTURE_2D, GlTextureMaxAnisotropy, requested))
+        {
+            Debug.WriteLine($"[PREVIEWER][gl.texture] AF={requested} (max={maxAnisotropy})");
+        }
     }
 
     // 上下文丢失时用：GPU 侧的对象已经不在了，只能丢引用，不能发 Delete*。
