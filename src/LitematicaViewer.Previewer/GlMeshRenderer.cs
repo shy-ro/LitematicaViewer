@@ -224,6 +224,14 @@ internal sealed class GlMeshRenderer : IDisposable
             float shade = 0.62 + 0.38 * diffuse;
 
             vec4 texel = texture(uAtlas, vUv);
+
+            // alpha cutout：玻璃、树叶这类挖孔贴图，孔洞的 alpha 是 0，直接丢片元。
+            // 阈值取 0.5 与 MC 一致；半透明纹理（水 ~0.8）不受影响照常画。
+            if (texel.a < 0.5)
+            {
+                discard;
+            }
+
             fragColor = vec4(texel.rgb * shade, 1.0);
         }
         """;
