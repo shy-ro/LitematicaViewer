@@ -439,15 +439,30 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
                     $"pos=({position.X:F0},{position.Y:F0})");
             }
 
-            HoverMoved?.Invoke(new Avalonia.Vector(position.X, position.Y));
         };
-
-        PointerExited += (_, _) => HoverMoved?.Invoke(new Avalonia.Vector(double.NaN, double.NaN));
     }
+
 
     // 这里原本还有 ReadFrameBuffer 与 ReadGlError：GlInterface 没有包 glReadPixels 与 glGetError，
     // 那两条自己从上下文取函数地址、自己配委托。轴线渲染器也要用同一条路（混合与线宽），
     // 于是这类入口统一挪到了 Gpu/GlRaw.cs——同一件事有两个写法时，签名写错的那一份
     // 要等到运行期把栈搅乱才暴露，而它长得跟另一份一模一样。
 #endif
+
+
+    // 拾取链路的入口事件（Release 同样要发），所以装在 DEBUG 探针区之外：
+    // [Conditional("DEBUG")] 的丢弃发生在语义分析之后，但 #if DEBUG 是预处理期的事——
+    // 区内的订阅在 Release 下根本不存在，事件就成了「声明了但从没人用」。
+    // 静态构造一次订阅，永远发。PointerExited 报 NaN 让宿主知道指针已经离开视口。
+    // 移动一秒几百条，宿主自己节流：存最新位置、Tick 里每帧算一次拾取即可。
+    internal void AttachHoverEvents()
+    {
+        PointerMoved += (_, e) =>
+        {
+            Point position = e.GetPosition(this);
+            HoverMoved?.Invoke(new Avalonia.Vector(position.X, position.Y));
+        };
+
+        PointerExited += (_, _) => HoverMoved?.Invoke(new Avalonia.Vector(double.NaN, double.NaN));
+    }
 }

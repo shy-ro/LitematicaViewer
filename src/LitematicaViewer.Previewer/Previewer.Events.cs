@@ -205,7 +205,12 @@ public partial class Previewer
         // System.Numerics 的投影是右手的：NDC z=-1 是近平面、+1 是远平面。
         // 用 GL 深度那套 [0,1] 会得到两条完全不一样的射线，而且不报错。
         Matrix4x4 viewProjection = _camera.GetViewMatrix() * _camera.GetProjectionMatrix((float)(width / height));
-        Debug.Assert(Matrix4x4.Invert(viewProjection, out Matrix4x4 inverse), "[PREVIEWER][pick] 视图投影矩阵不可逆");
+
+        // Invert 的结果先接出来再断言：Debug.Assert 的调用点在 Release 下整个消失，
+        // 但 out 变量的「明确赋值」是语义分析期的事——直接在 Assert 里 out 的话，
+        // Release 编译器会认为 inverse 未赋值，恰好是 C# 那条 Conditional 的老坑。
+        bool invertible = Matrix4x4.Invert(viewProjection, out Matrix4x4 inverse);
+        Debug.Assert(invertible, "[PREVIEWER][pick] 视图投影矩阵不可逆");
         Vector4 nearPoint = Vector4.Transform(new Vector4(ndcX, ndcY, -1f, 1f), inverse);
         Vector4 farPoint = Vector4.Transform(new Vector4(ndcX, ndcY, 1f, 1f), inverse);
 
