@@ -12,7 +12,10 @@ namespace LitematicaViewer.Meshing;
 // 的调色板数组包成 World 视图喂进来——本类不碰 region，纯函数可单测。
 //
 // waterlogged 宿主（台阶/楼梯/栅栏……）算 level 0 的水：本体走正常模型路径，
-// 水面叠画在宿主格里，vanilla 同样双层渲染。
+// 水面叠画在宿主格里。水面高不照抄 vanilla 流体渲染器的 8/9——那会让水面
+// 悬在下半砖上方半格，宿主从「水里」穿过，查看器里读作穿模；这里按
+// 「水填充方块未占满的部分」取宿主模型最高点（调用方算好经 World 喂入），
+// 水面贴台阶顶，宿主只被「打湿」不被穿透。
 public sealed class FluidMesher(TextureAtlas atlas)
 {
     // ---- 状态分类 ----
@@ -46,14 +49,16 @@ public sealed class FluidMesher(TextureAtlas atlas)
     {
         private readonly bool[] _water;
         private readonly int[] _levels;
+        private readonly float[] _surface;
         private readonly bool[] _occluding;
         private readonly int[] _blocks;
         private readonly Vector3I _size;
 
-        public World(bool[] water, int[] levels, bool[] occluding, int[] blocks, Vector3I size)
+        public World(bool[] water, int[] levels, float[] surface, bool[] occluding, int[] blocks, Vector3I size)
         {
             _water = water;
             _levels = levels;
+            _surface = surface;
             _occluding = occluding;
             _blocks = blocks;
             _size = size;
@@ -83,6 +88,9 @@ public sealed class FluidMesher(TextureAtlas atlas)
 
         public int Level(int x, int y, int z) => Lookup(x, y, z, out int i) ? _levels[i] : 0;
 
+        // 这格水的表面高：裸流体按 (8-level)/9，含水宿主按宿主顶（调用方备好）。
+        public float Surface(int x, int y, int z) => Lookup(x, y, z, out int i) ? _surface[i] : 1f;
+
         public bool Occludes(int x, int y, int z) => Lookup(x, y, z, out int i) && _occluding[i];
     }
 
@@ -90,7 +98,7 @@ public sealed class FluidMesher(TextureAtlas atlas)
 
     public void EmitCell(
         List<float> vertices, List<int> indices, Vector3 origin, World world,
-        int x, int y, int z, int level, string sprite, float tint)
+        int x, int y, int z, string sprite, float tint)
     {
         if (!atlas.TryGetRect(sprite, out SpriteRect rect))
         {
@@ -100,10 +108,10 @@ public sealed class FluidMesher(TextureAtlas atlas)
             return;
         }
 
-        float h00 = Corner(world, x, y, z, level, -1, -1);
-        float h10 = Corner(world, x, y, z, level, +1, -1);
-        float h11 = Corner(world, x, y, z, level, +1, +1);
-        float h01 = Corner(world, x, y, z, level, -1, +1);
+        float h00 = Corner(world, x, y, z, -1, -1);
+        float h10 = Corner(world, x, y, z, +1, -1);
+        float h11 = Corner(world, x, y, z, +1, +1);
+        float h01 = Corner(world, x, y, z, -1, +1);
 
         if (!world.IsWater(x, y + 1, z))
         {
@@ -138,15 +146,16 @@ public sealed class FluidMesher(TextureAtlas atlas)
 
     // 四角高。vanilla 思路：头顶同流体 → 满格（列内部）；两侧与对角的同流体列
     // 参与平均 → 水面向低处倾斜；两侧都不是流体就保持自身高——池边贴实心墙时
-    // 池面是平的，不往墙上塌。
-    internal static float Corner(World world, int x, int y, int z, int level, int dx, int dz)
+    // 池面是平的，不往墙上塌。自身高取 World 的每格表面（裸流体 (8-level)/9、
+    // 含水宿主贴宿主顶），倾斜/持平规则与 level 无关。
+    internal static float Corner(World world, int x, int y, int z, int dx, int dz)
     {
         if (world.IsWater(x, y + 1, z))
         {
             return 1f;
         }
 
-        float self = OwnHeight(level);
+        float self = world.Surface(x, y, z);
         float side1 = ColumnTop(world, x + dx, y, z);
         float side2 = ColumnTop(world, x, y, z + dz);
         if (side1 < 0f && side2 < 0f)
@@ -174,7 +183,7 @@ public sealed class FluidMesher(TextureAtlas atlas)
             return -1f;
         }
 
-        return world.IsWater(x, y + 1, z) ? 1f : OwnHeight(world.Level(x, y, z));
+        return world.IsWater(x, y + 1, z) ? 1f : world.Surface(x, y, z);
     }
 
     // 顶点序与 BlockMeshBuilder.BuildQuad 的 FaceBasis 推法一致（Up 面从

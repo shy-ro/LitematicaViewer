@@ -409,21 +409,23 @@ public static class MeshSmoke
         bool[] water = new bool[palette.Length];
         int[] levels = new int[palette.Length];
         bool[] occ = new bool[palette.Length];
+        float[] surface = new float[palette.Length];
         for (int i = 0; i < palette.Length; i++)
         {
             water[i] = FluidMesher.IsWaterCell(palette[i]);
             levels[i] = FluidMesher.LevelOf(palette[i]);
+            surface[i] = FluidMesher.OwnHeight(levels[i]);
             occ[i] = i == 0;
         }
 
         // 贴墙：3x3x3 全石头，中心一格水。四角两侧都不是流体 → 保持自身高，
         // 池边贴实心墙的池面是平的，不往墙上塌。
         int[] solidBlocks = new int[27];
-        FluidMesher.World solidWorld = new(water, levels, occ, solidBlocks, new Vector3I(3, 3, 3));
+        FluidMesher.World solidWorld = new(water, levels, surface, occ, solidBlocks, new Vector3I(3, 3, 3));
         solidBlocks[(1 * 3 + 1) * 3 + 1] = 1;
         foreach ((int dx, int dz) in new[] { (-1, -1), (1, -1), (1, 1), (-1, 1) })
         {
-            float corner = FluidMesher.Corner(solidWorld, 1, 1, 1, 0, dx, dz);
+            float corner = FluidMesher.Corner(solidWorld, 1, 1, 1, dx, dz);
             Debug.Assert(
                 MathF.Abs(corner - own0) < 1e-5f,
                 $"[MESH][smoke] 贴实心墙的角高应保持自身高 dx={dx} dz={dz} got={corner}");
@@ -431,8 +433,8 @@ public static class MeshSmoke
 
         // 阶梯：L0 与 L2 相邻，共享边的角高是两格平均 → 倾斜水面。
         int[] rowBlocks = [1, 2, 3];
-        FluidMesher.World rowWorld = new(water, levels, occ, rowBlocks, new Vector3I(3, 1, 1));
-        float slope = FluidMesher.Corner(rowWorld, 0, 0, 0, 0, +1, -1);
+        FluidMesher.World rowWorld = new(water, levels, surface, occ, rowBlocks, new Vector3I(3, 1, 1));
+        float slope = FluidMesher.Corner(rowWorld, 0, 0, 0, +1, -1);
         Debug.Assert(
             MathF.Abs(slope - ((own0 + FluidMesher.OwnHeight(2)) / 2f)) < 1e-5f,
             $"[MESH][smoke] 相邻水格的角高应是平均 got={slope}");
@@ -494,7 +496,7 @@ public static class MeshSmoke
 
         Debug.Assert(fallingFull, "[MESH][smoke] 下落柱侧壁应满格 y=1.0");
 
-        // waterlogged 宿主：本体照画，8/9 水面叠在格里且染水色；
+        // waterlogged 宿主：本体照画，水面贴宿主顶（下半砖 0.5）且染水色；
         // CollectSprites 必须补 water_still（只有宿主没有裸水的调色板场景）。
         BlockStateDefinition slab = new(
             "minecraft:oak_slab",
@@ -513,11 +515,11 @@ public static class MeshSmoke
             int o = v * MeshData.FloatsPerVertex;
             float vy = sMesh.Vertices[o + 1];
             float tint = sMesh.Vertices[o + MeshData.TintOffset];
-            hasWaterTop |= MathF.Abs(vy - own0) < 1e-4f && MathF.Abs(tint - 3f) < 0.5f;
+            hasWaterTop |= MathF.Abs(vy - 0.5f) < 1e-4f && MathF.Abs(tint - 3f) < 0.5f;
             hasHost |= vy < 0.5f;
         }
 
-        Debug.Assert(hasWaterTop, "[MESH][smoke] waterlogged 台阶里没有 8/9 水面（tint=3）");
+        Debug.Assert(hasWaterTop, "[MESH][smoke] waterlogged 台阶里没有贴宿主顶(0.5)的水面（tint=3）");
         Debug.Assert(hasHost, "[MESH][smoke] waterlogged 台阶本体丢了");
         Debug.WriteLine("[MESH][smoke] 流体: 高度曲线/贴墙/阶梯/连通面数/下落柱/waterlogged ✓");
         _checks++;
