@@ -17,6 +17,35 @@ public static class MeshSmoke
 
     public static int Main(string[] args)
     {
+        // --resolve <blockId> <资源包...>：打印一个状态串的解析结果（命中哪些模型、
+        // 每个模型的盒子与面数），排查 variant/when 匹配问题用。
+        if (args.Length >= 3 && args[0] == "--resolve")
+        {
+            using TextWriterTraceListener resolveListener = new(Console.Out);
+            Trace.Listeners.Add(resolveListener);
+            Trace.AutoFlush = true;
+            PackStack resolvePacks = new();
+            foreach (string packPath in args.Skip(2))
+            {
+                resolvePacks.Add(Directory.Exists(packPath) ? ResourcePack.OpenFolder(packPath) : ResourcePack.OpenZip(packPath));
+            }
+            BlockStateResolver resolveResolver = new(resolvePacks);
+            ResolvedBlockState resolved = resolveResolver.Resolve(args[1]);
+            Debug.WriteLine($"[MESH][resolve] {args[1]} -> {resolved.Variants.Count} variant(s)");
+            foreach (ResolvedVariant variant in resolved.Variants)
+            {
+                int boxes = variant.Model.Elements.Count;
+                int faces = variant.Model.Elements.Sum(e => e.Faces.Count);
+                Debug.WriteLine($"[MESH][resolve]   model={variant.ModelId} rot=({variant.XDegrees},{variant.YDegrees}) elements={boxes} faces={faces}");
+                foreach (ModelElement element in variant.Model.Elements)
+                {
+                    Debug.WriteLine($"[MESH][resolve]     box from={element.From} to={element.To}");
+                }
+            }
+
+            return 0;
+        }
+
         // --preview <outDir> <资源包...>：逐方块状态出三面视图 PNG（见 PreviewBlocks）。
         if (args.Length >= 2 && args[0] == "--preview")
         {
@@ -105,7 +134,7 @@ public static class MeshSmoke
             MeshData dvMesh = dvBuilder.BuildRegion(dvResult.Document.Regions[0]);
             int fpv = MeshData.FloatsPerVertex;
             Debug.WriteLine($"[MESH][dumpverts] verts={dvMesh.Vertices.Length / fpv} indices={dvMesh.Indices.Length} atlas={dvAtlas.Width}x{dvAtlas.Height}");
-            for (int face = 0; face < Math.Min(48, dvMesh.Indices.Length); face += 6)
+            for (int face = 0; face < dvMesh.Indices.Length; face += 6)
             {
                 for (int k = 0; k < 4; k++)
                 {
