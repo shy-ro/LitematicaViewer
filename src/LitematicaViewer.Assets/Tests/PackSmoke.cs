@@ -38,6 +38,7 @@ public static class PackSmoke
         CheckElementRotation(resolver);
         CheckOverridePack(packs, resolver);
         CheckBatchRealBlocks(resolver);
+        CheckAtlas(packs);
 
         Debug.WriteLine($"[ASSETS][smoke] 完成 checks={_checks} {resolver.Stats}");
         return 0;
@@ -203,6 +204,55 @@ public static class PackSmoke
             spritesWithoutTexture == 0,
             $"[ASSETS][smoke] 批量解析中有 {spritesWithoutTexture} 个面的贴图引用解不开 note=看上面的 resolve 日志找是哪个模型");
         Debug.WriteLine($"[ASSETS][smoke] 批量 {batch.Length} 个方块: {totalVariants} variants / {totalFaces} faces ✓");
+        _checks++;
+    }
+
+    private static void CheckAtlas(PackStack packs)
+    {
+        // 缺的贴图给棋盘占位、动画取首帧、装箱不重叠——三条是图集的最低保证。
+        TextureAtlas atlas = TextureAtlas.Build(packs,
+        [
+            "minecraft:block/stone",
+            "minecraft:block/oak_log",
+            "minecraft:block/oak_log_top",
+            "minecraft:block/water_still",          // 动画：竖排多帧 + mcmeta
+            "minecraft:block/oak_planks",
+            "minecraft:block/__nope__",             // 故意缺失
+        ]);
+
+        Debug.Assert(atlas.MissingCount == 1, $"[ASSETS][smoke] 缺失贴图应正好 1 张 实得 {atlas.MissingCount}");
+
+        // 落位不越界 + 两两不重叠（占格检查：图集不大，直接开一张占用表）。
+        bool[] occupied = new bool[atlas.Width * atlas.Height];
+        foreach (SpriteRect rect in atlas.Rects)
+        {
+            Debug.Assert(
+                rect.X >= 0 && rect.Y >= 0 && rect.X + rect.Width <= atlas.Width && rect.Y + rect.Height <= atlas.Height,
+                $"[ASSETS][smoke] {rect.Sprite} 落位越界 rect={rect} atlas={atlas.Width}x{atlas.Height}");
+            for (int y = rect.Y; y < rect.Y + rect.Height; y++)
+            {
+                for (int x = rect.X; x < rect.X + rect.Width; x++)
+                {
+                    int index = (y * atlas.Width) + x;
+                    Debug.Assert(!occupied[index], $"[ASSETS][smoke] {rect.Sprite} 与别的 sprite 重叠在 ({x},{y})");
+                    occupied[index] = true;
+                }
+            }
+        }
+
+        // 动画贴图只留首帧：water_still 源文件是 16x512，进图集必须是 16x16。
+        SpriteRect water = atlas.Rects.Single(r => r.Sprite == "minecraft:block/water_still");
+        Debug.Assert(water.Width == 16 && water.Height == 16, $"[ASSETS][smoke] water_still 应只取首帧 实得 {water.Width}x{water.Height}");
+
+        // 占位棋盘的 (0,0) 是品红：缺贴图在画面上要一眼认得出来。
+        SpriteRect missing = atlas.Rects.Single(r => r.Sprite == "minecraft:block/__nope__");
+        int offset = ((missing.Y * atlas.Width) + missing.X) * 4;
+        Debug.Assert(
+            atlas.Pixels[offset] == 248 && atlas.Pixels[offset + 1] == 0 && atlas.Pixels[offset + 2] == 248 && atlas.Pixels[offset + 3] == 255,
+            $"[ASSETS][smoke] 缺失贴图的占位色不是品红 got=({atlas.Pixels[offset]},{atlas.Pixels[offset + 1]},{atlas.Pixels[offset + 2]},{atlas.Pixels[offset + 3]})");
+
+        Debug.WriteLine(
+            $"[ASSETS][smoke] 图集 {atlas.Width}x{atlas.Height}，{atlas.Rects.Count} 个 sprite（缺 {atlas.MissingCount}），装箱无重叠 ✓");
         _checks++;
     }
 }
