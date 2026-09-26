@@ -251,7 +251,23 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
             VerifyFrame(gl, width, height);
         }
 #endif
+
+        // 截帧诊断（--shot）：这一帧已经画完、还在当前上下文里，此刻读回是唯一可靠的时机。
+        // 回调在渲染线程（也就是 UI 线程）上执行，宿主拿去存盘后自行退出。
+        if (_capture is { } capture)
+        {
+            _capture = null;
+            byte[]? pixels = GlRaw.ReadPixels(gl, 0, 0, width, height);
+            Debug.Assert(pixels is not null, "[PREVIEWER][gl.shot] glReadPixels 没拿到入口");
+            capture(pixels ?? [], width, height);
+        }
     }
+
+    // 只截一次：请求之后的第一个渲染帧末尾读回并回调，然后自动清空。
+    private Action<byte[], int, int>? _capture;
+
+    // public 而不是 internal：控件的对外成员都在这条公开面上（Sample 是另一个程序集）。
+    public void RequestCapture(Action<byte[], int, int> onCaptured) => _capture = onCaptured;
 
     protected override void OnOpenGlDeinit(GlInterface gl)
     {

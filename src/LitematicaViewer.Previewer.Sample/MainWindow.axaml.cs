@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Text;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media;
@@ -278,6 +279,12 @@ public partial class MainWindow : Window, IViewModeHost
         if (document is null)
         {
             _sidebar.SetFile($"载入失败：{Path.GetFileName(path)}（看日志）");
+            if (Program.ShotPath is not null)
+            {
+                // 截帧模式没有画面可截，直接退场别挂着：调用方在等进程退出。
+                ((IClassicDesktopStyleApplicationLifetime?)Application.Current?.ApplicationLifetime)?.Shutdown();
+            }
+
             return;
         }
 
@@ -317,10 +324,12 @@ public partial class MainWindow : Window, IViewModeHost
         float far = MathF.Max(100f, document.WholeRadius * 20f + 64f);
         _camera.Reset(_camera.Camera with { Far = far });
         // 滚轮步长按方块统一（不随模型缩放），滚轮语义 = 人物位置沿视线推进。
+        // --shot-dist 让截帧从更近的距离取景：复现用户「凑近看」的画面。
+        float frameDistance = document.WholeRadius * TurntableController.FrameFactor * Program.ShotDistanceFactor;
         _camera.FrameTurntable(
             document.WholeCentre,
             TurntableController.DefaultPitch,
-            document.WholeRadius * TurntableController.FrameFactor);
+            frameDistance);
         Viewport.SetCamera(_camera.Camera);
         Debug.WriteLine($"[SAMPLE][source] 取景 far={far:F1} radius={document.WholeRadius:F2}");
 
@@ -339,6 +348,17 @@ public partial class MainWindow : Window, IViewModeHost
             $"targets={_showcaseTargets.Length} {document.DebugNotes}");
         _sidebar.SetFile(
             $"{document.FileName}  {document.RegionCount} region  {document.TotalBlocks} 方块");
+
+        // --shot：取景已就位，请求下一帧渲染末尾读回像素，落盘后整个进程退场。
+        if (Program.ShotPath is not null)
+        {
+            Viewport.RequestCapture((pixels, width, height) =>
+            {
+                ShotWriter.Write(Program.ShotPath!, pixels, width, height);
+                Debug.WriteLine($"[SAMPLE][shot] saved={Program.ShotPath} size={width}x{height}");
+                ((IClassicDesktopStyleApplicationLifetime?)Application.Current?.ApplicationLifetime)?.Shutdown();
+            });
+        }
     }
 
     // 指针悬停拾取：屏幕点 → 射线（PointToRay，与渲染共用同一套矩阵）→ 体素遍历（Core 的

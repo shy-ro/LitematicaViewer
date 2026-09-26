@@ -17,6 +17,11 @@ internal static class Program
     // 自检模式下宿主会拒绝载入，所以这里照收不误、由调用方把关。
     internal static string? InitialLitematic { get; private set; }
 
+    // --shot <路径>：载入 InitialLitematic 渲染几帧后读回像素存盘退出。
+    // 存在的理由：用户报「画面不对」时口述 + 截图猜不出根因，
+    // 同一个文件、同一条渲染路径自己跑一遍，产物就是证据。
+    internal static string? ShotPath { get; private set; }
+
     [STAThread]
     public static int Main(string[] args)
     {
@@ -27,6 +32,8 @@ internal static class Program
         SelfTestSeconds = ParseSelfTestSeconds(args);
         InitialLitematic = args.FirstOrDefault(a =>
             a.EndsWith(".litematic", StringComparison.OrdinalIgnoreCase) && File.Exists(a));
+        ShotPath = ParseShotPath(args);
+        ParseShotDistance(args);
 
         Debug.WriteLine(
             $"[SAMPLE][app.start] args=[{string.Join(' ', args)}] baseDir='{AppContext.BaseDirectory}'");
@@ -57,5 +64,33 @@ internal static class Program
         }
 
         return 0;
+    }
+
+    private static string? ParseShotPath(string[] args)
+    {
+        for (int i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] == "--shot")
+            {
+                return args[i + 1];
+            }
+        }
+
+        return null;
+    }
+
+    // --shot-dist <倍数>：截帧取景距离 = 默认取景 × 倍数。复现「凑近看」的画面用。
+    internal static float ShotDistanceFactor { get; private set; } = 1f;
+
+    private static void ParseShotDistance(string[] args)
+    {
+        for (int i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] == "--shot-dist" &&
+                float.TryParse(args[i + 1], CultureInfo.InvariantCulture, out float factor))
+            {
+                ShotDistanceFactor = factor;
+            }
+        }
     }
 }
