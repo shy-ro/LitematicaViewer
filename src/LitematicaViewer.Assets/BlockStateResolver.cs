@@ -32,7 +32,23 @@ public sealed class BlockStateResolver
 
         (string ns, string path) = SplitId(name);
         string statePath = $"assets/{ns}/blockstates/{path}.json";
-        if (!_packs.TryRead(statePath, out byte[] stateBytes))
+        bool found = _packs.TryRead(statePath, out byte[] stateBytes);
+        if (!found && ns == "minecraft"
+            && BlockstateAliases.TryGetValue(path, out string? aliased))
+        {
+            // 投影文件按旧版本 id 写，资产按新版本存：26.x 把 chain 改名成了 iron_chain，
+            // 老 id 直接 miss 的方块整个消失（模型一个面都没有），比缺贴图难看得多。
+            // 表只收已实测改名的项；别名的 blockstate 模型同构，直接当原名解析。
+            string aliasPath = $"assets/{ns}/blockstates/{aliased}.json";
+            if (_packs.TryRead(aliasPath, out byte[] aliasBytes))
+            {
+                stateBytes = aliasBytes;
+                found = true;
+                Debug.WriteLine($"[ASSETS][resolve] blockstate 别名 {statePath} -> {aliasPath}");
+            }
+        }
+
+        if (!found)
         {
             _missCount++;
             Debug.WriteLine($"[ASSETS][resolve] 找不到 blockstate {statePath}");
@@ -66,6 +82,12 @@ public sealed class BlockStateResolver
     }
 
     public string Stats => $"resolveCount={_resolveCount} missCount={_missCount}";
+
+    // 投影文件 id（旧版本）→ 资产 id（新版本）的改名桥。键值都是 blockstates/ 下的名字。
+    private static readonly Dictionary<string, string> BlockstateAliases = new(StringComparer.Ordinal)
+    {
+        ["chain"] = "iron_chain",
+    };
 
     // ---------- blockstate 层 ----------
 

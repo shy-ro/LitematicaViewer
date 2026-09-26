@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using StbImageSharp;
 
 namespace LitematicaViewer.Assets;
@@ -114,6 +115,16 @@ public sealed class TextureAtlas
             {
                 int source = row * w * 4;
                 int target = (((rect.Y + row) * atlasWidth) + rect.X) * 4;
+                // 越界说明装箱的落位与数据形状对不上（解码尺寸或首帧裁剪出了错）；
+                // BlockCopy 的报错不带 sprite 名，先在这里把它钉出来。
+                Debug.Assert(
+                    source + (w * 4) <= rgba.Length,
+                    $"[ASSETS][atlas] 源数据不够 sprite={sprite} w={w} h={h} bytes={rgba.Length} " +
+                    $"expected={(long)w * h * 4}");
+                Debug.Assert(
+                    rect.Y + row < atlasHeight && rect.X + w <= atlasWidth,
+                    $"[ASSETS][atlas] 落位越界 sprite={sprite} rect=({rect.X},{rect.Y},{w},{h}) " +
+                    $"atlas={atlasWidth}x{atlasHeight}");
                 Buffer.BlockCopy(rgba, source, pixels, target, w * 4);
             }
         }
@@ -125,10 +136,12 @@ public sealed class TextureAtlas
     // 取最顶上的正方形首帧，其余帧直接丢。帧时序将来做「活水」时再说。
     private static (byte[] Rgba, int Height) TakeFirstFrame(ImageResult image)
     {
-        int frame = image.Width * 4;
-        byte[] first = new byte[frame];
-        Buffer.BlockCopy(image.Data, 0, first, 0, frame);
-        return (first, image.Width);
+        // 竖排帧：第一帧占最上面 w×w 的一块，行主序拷贝正好按行取。
+        // 之前只拷了一行（w*4 字节）却把高度报成 w，装箱拷贝时在 BlockCopy 越界炸掉。
+        int side = image.Width;
+        byte[] first = new byte[side * side * 4];
+        Buffer.BlockCopy(image.Data, 0, first, 0, first.Length);
+        return (first, side);
     }
 
     private static int Pow2Ceiling(int value)

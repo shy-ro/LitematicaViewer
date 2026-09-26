@@ -69,9 +69,11 @@ public sealed class BlockMeshBuilder
         // 调色板的空气标记一次备好：内层循环里查数组比查 HashSet 快一个量级，
         // 大模型（几百万体素 × 6 邻居）全靠这里。
         bool[] airFlags = new bool[region.Palette.Length];
+        bool[] occludeFlags = new bool[region.Palette.Length];
         for (int i = 0; i < airFlags.Length; i++)
         {
             airFlags[i] = region.Palette[i].IsAir;
+            occludeFlags[i] = !airFlags[i] && OccludesNeighbours(region.Palette[i].ToString());
         }
 
         List<float> vertices = [];
@@ -110,7 +112,8 @@ public sealed class BlockMeshBuilder
                     Vector3 origin = new(region.Bounds.Min.X + x, region.Bounds.Min.Y + y, region.Bounds.Min.Z + z);
                     foreach (CachedQuad quad in variant.Quads)
                     {
-                        if (quad.Cullface is Vector3 cull && IsNeighborSolid(blocks, airFlags, size, x, y, z, cull))
+                        if (quad.Cullface is Vector3 cull
+                            && IsNeighborOccluding(blocks, occludeFlags, size, x, y, z, cull))
                         {
                             _skippedFaces++;
                             continue;
@@ -246,6 +249,15 @@ public sealed class BlockMeshBuilder
         Vector2 uvD = MapUv(face.Uv.X, face.Uv.W, rect);
 
         Vector3? cullface = face.Cullface is string dir && TryDirection(dir, out Vector3 cull) ? cull : null;
+
+        // variant 的 x/y 旋转同样转 cullface：横放的原木（axis=x 的 variant 带 x=90），
+        // 「up」面实际朝 ±X，剔除要查的是东西两侧的邻居。不转的话剔除查错了邻居，
+        // 横放原木堆上会错删该画的面、留出本来该删的。
+        if (cullface is { } cullDir && (variant.XDegrees != 0f || variant.YDegrees != 0f))
+        {
+            cullface = RotateDirection(cullDir, variant);
+        }
+
         return new CachedQuad(a, b, c, e, normal, uvA, uvB, uvC, uvD, face.Sprite, cullface);
     }
 
@@ -324,7 +336,7 @@ public sealed class BlockMeshBuilder
         return (normal, r, d);
     }
 
-    private bool IsNeighborSolid(int[] blocks, bool[] airFlags, Vector3I size, int x, int y, int z, Vector3 direction)
+    private static bool IsNeighborOccluding(int[] blocks, bool[] occludeFlags, Vector3I size, int x, int y, int z, Vector3 direction)
     {
         int nx = x + (int)direction.X;
         int ny = y + (int)direction.Y;
@@ -336,9 +348,56 @@ public sealed class BlockMeshBuilder
 
         int index = ((ny * size.Z) + nz) * size.X + nx;
         return (uint)index < (uint)blocks.Length
-            && (uint)blocks[index] < (uint)airFlags.Length
-            && !airFlags[blocks[index]];
+            && (uint)blocks[index] < (uint)occludeFlags.Length
+            && occludeFlags[blocks[index]];
     }
+
+    // 邻居要「完整不透明的方块」才有资格剔除贴着它的面。之前只要邻居非空气就剔除，
+    // 栅栏、台阶、活板门、链这些非完整方块也把邻居的面删掉——热气球的吊篮（活板门 +
+    // 台阶拼的）大片缺面就是这么来的。MC 的对应属性是 canOcclude，由方块代码决定，
+    // 资产 JSON 里没有；这里用「模型是单个占满整格的元素」近似，再按 id 排除
+    // 那些模型是整方块但不该遮挡的（玻璃、树叶这类透明/挖孔方块）。
+    private bool OccludesNeighbours(string stateId)
+    {
+        string block = stateId;
+        int bracket = stateId.IndexOf('[');
+        if (bracket >= 0)
+        {
+            block = stateId[..bracket];
+        }
+
+        foreach (string marker in NonOccludingMarkers)
+        {
+            if (block.Contains(marker, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        ResolvedBlockState resolved = _resolver.Resolve(stateId);
+        if (resolved.Variants.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (ResolvedVariant variant in resolved.Variants)
+        {
+            if (variant.Model.Elements is not [ModelElement sole]
+                || sole.From != Vector3.Zero
+                || sole.To != new Vector3(16f))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // id 里含这些片段的不遮挡邻居。模型判据把它们认成整方块（cube_all），只能按 id 排除。
+    private static readonly string[] NonOccludingMarkers =
+    [
+        "glass", "leaves", "ice", "slime_block", "honey_block", "tinted_", "barrier", "sea_lantern",
+    ];
 
     private static void EmitQuad(List<float> vertices, List<int> indices, Vector3 origin, CachedQuad quad)
     {
