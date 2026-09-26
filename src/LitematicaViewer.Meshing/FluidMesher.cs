@@ -40,6 +40,13 @@ public sealed class FluidMesher(TextureAtlas atlas)
     // level 7 剩 1/9 薄膜，8+ 下落柱整格满。
     public static float OwnHeight(int level) => level >= 8 ? 1f : (8 - level) / 9f;
 
+    // 每个外表面沿法线向水体内部缩进的量。水logged 宿主（台阶/楼梯/墙）的模型面
+    // 常在格边界上，水壁原样画在格边界就与之完全共面：半透明 pass 与不透明 pass
+    // 深度相等，光栅化逐像素竞争，一半像素被宿主面吃掉——侧面出现锯齿摩尔纹、
+    // 看着像水「穿」进方块。缩进只动平面位置、不动四角高：相邻同流体格之间本就
+    // 不画壁，顶面在水平方向仍满格相接，缝隙只在亚像素级。
+    internal const float Inset = 0.002f;
+
     // ---- 邻居视图：BuildRegion 的调色板数组直接喂进来，流体侧不碰 region ----
 
     public readonly struct World
@@ -183,37 +190,37 @@ public sealed class FluidMesher(TextureAtlas atlas)
     private void Top(List<float> vertices, List<int> indices, Vector3 origin,
         float h00, float h10, float h11, float h01, SpriteRect rect, float tint) =>
         Emit(vertices, indices, origin,
-            new Vector3(0, h00, 0), new Vector3(1, h10, 0),
-            new Vector3(1, h11, 1), new Vector3(0, h01, 1),
+            new Vector3(0, h00 - Inset, 0), new Vector3(1, h10 - Inset, 0),
+            new Vector3(1, h11 - Inset, 1), new Vector3(0, h01 - Inset, 1),
             new Vector3(0, 1, 0), rect, tint);
 
     private void Bottom(List<float> vertices, List<int> indices, Vector3 origin, SpriteRect rect, float tint) =>
         Emit(vertices, indices, origin,
-            new Vector3(0, 0, 1), new Vector3(1, 0, 1), new Vector3(1, 0, 0), new Vector3(0, 0, 0),
+            new Vector3(0, Inset, 1), new Vector3(1, Inset, 1), new Vector3(1, Inset, 0), new Vector3(0, Inset, 0),
             new Vector3(0, -1, 0), rect, tint);
 
     private void South(List<float> vertices, List<int> indices, Vector3 origin,
         float hWest, float hEast, SpriteRect rect, float tint) =>
         Emit(vertices, indices, origin,
-            new Vector3(0, hWest, 1), new Vector3(1, hEast, 1), new Vector3(1, 0, 1), new Vector3(0, 0, 1),
+            new Vector3(0, hWest, 1 - Inset), new Vector3(1, hEast, 1 - Inset), new Vector3(1, 0, 1 - Inset), new Vector3(0, 0, 1 - Inset),
             new Vector3(0, 0, 1), rect, tint);
 
     private void North(List<float> vertices, List<int> indices, Vector3 origin,
         float hWest, float hEast, SpriteRect rect, float tint) =>
         Emit(vertices, indices, origin,
-            new Vector3(1, hEast, 0), new Vector3(0, hWest, 0), new Vector3(0, 0, 0), new Vector3(1, 0, 0),
+            new Vector3(1, hEast, Inset), new Vector3(0, hWest, Inset), new Vector3(0, 0, Inset), new Vector3(1, 0, Inset),
             new Vector3(0, 0, -1), rect, tint);
 
     private void East(List<float> vertices, List<int> indices, Vector3 origin,
         float hNorth, float hSouth, SpriteRect rect, float tint) =>
         Emit(vertices, indices, origin,
-            new Vector3(1, hSouth, 1), new Vector3(1, hNorth, 0), new Vector3(1, 0, 0), new Vector3(1, 0, 1),
+            new Vector3(1 - Inset, hSouth, 1), new Vector3(1 - Inset, hNorth, 0), new Vector3(1 - Inset, 0, 0), new Vector3(1 - Inset, 0, 1),
             new Vector3(1, 0, 0), rect, tint);
 
     private void West(List<float> vertices, List<int> indices, Vector3 origin,
         float hNorth, float hSouth, SpriteRect rect, float tint) =>
         Emit(vertices, indices, origin,
-            new Vector3(0, hNorth, 0), new Vector3(0, hSouth, 1), new Vector3(0, 0, 1), new Vector3(0, 0, 0),
+            new Vector3(Inset, hNorth, 0), new Vector3(Inset, hSouth, 1), new Vector3(Inset, 0, 1), new Vector3(Inset, 0, 0),
             new Vector3(-1, 0, 0), rect, tint);
 
     // 顶点布局与 MeshData 的 9 floats 契约一致（pos3 normal3 uv2 tint1）。
