@@ -45,6 +45,7 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
     private GlCubeRenderer? _cube;
     private GlAxesRenderer? _axes;
     private GlPedestalRenderer? _pedestal;
+    private GlMeshRenderer? _meshRenderer;
 
     // 指针能不能选中本控件，由这一条说了算，而默认答案是「不能」。
     //
@@ -132,6 +133,21 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
 
         // 光环和另外两个一起建、常驻，只在展台模式下画：模式切换不该创建或销毁 GPU 资源（R5）。
         _pedestal = GlPedestalRenderer.Create(gl);
+
+        // 网格渲染器跨上下文持有数据：OnOpenGlLost 之后宿主不需要重新装填，
+        // 所以这里只在第一次建，恢复场景下沿用旧实例（渲染器内部自愈）。
+        if (_meshRenderer is null)
+        {
+            _meshRenderer = GlMeshRenderer.Create(gl);
+
+            // init 之前到达的装填在这里补上。之后再有 SetMesh 直接走渲染器。
+            if (_pendingMesh is { } pending)
+            {
+                _pendingMesh = null;
+                _meshRenderer.Load(
+                    pending.Vertices, pending.Indices, pending.Atlas, pending.Width, pending.Height);
+            }
+        }
     }
 
     protected override void OnOpenGlRender(GlInterface gl, int fb)
@@ -175,7 +191,16 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         gl.Viewport(0, 0, width, height);
         gl.Clear(GlConsts.GL_COLOR_BUFFER_BIT | GlConsts.GL_DEPTH_BUFFER_BIT);
 
-        _cube?.Render(_camera, width, height);
+        // 装了模型就不再画演示立方体：立方体是「什么都没有时的参照物」，
+        // 和真模型同时画只会互相穿插。axes 在两种模式下都画（xyz 参考线是独立功能）。
+        if (_meshRenderer is { HasMesh: true } mesh)
+        {
+            mesh.Render(gl, _camera, width, height);
+        }
+        else
+        {
+            _cube?.Render(_camera, width, height);
+        }
 
         // 轴线接着画：落在立方体里的那一段被深度测试挡住，露在外面的是从方块里伸出来的三根轴。
         _axes?.Render(_camera, width, height);
@@ -237,6 +262,8 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         _axes = null;
         _cube?.Dispose();
         _cube = null;
+        _meshRenderer?.Dispose();
+        _meshRenderer = null;
 
         base.OnOpenGlDeinit(gl);
     }
@@ -252,6 +279,10 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         _axes = null;
         _cube?.Abandon();
         _cube = null;
+
+        // 网格渲染器是唯一不置 null 的：托管副本在它手里，置 null 就等于要宿主重新装填。
+        // 下一次 init 沿用旧实例，下一次 Render 自愈（惰性重建缓冲与着色器）。
+        _meshRenderer?.Abandon();
 
         base.OnOpenGlLost();
     }
@@ -279,6 +310,21 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
                 Debug.WriteLine(
                     $"[PREVIEWER][gl.readback] 读回预算用尽 {MaxCameraVerifications} 次，" +
                     $"本次会话不再做画面校验 cameraVersion={_cameraVersion}");
+            }
+
+            return;
+        }
+
+        // mesh 模式没有像素断言可做：DebugCube 的全部判据（六面法线色、面像素数、
+        // 轮廓几何）都建立在「画面是那个已知立方体」上，真模型的画面不属于任何一条。
+        // GL 错误检查在上面已经做过了，剩下的读回不做、预算不花。
+        if (_meshRenderer is { HasMesh: true })
+        {
+            if (_skipLogs++ % CameraSetLogInterval == 0)
+            {
+                Debug.WriteLine(
+                    $"[PREVIEWER][gl.readback] mesh 模式跳过立方体像素校验 " +
+                    $"cameraVersion={_cameraVersion} note=每{CameraSetLogInterval}条一条");
             }
 
             return;
