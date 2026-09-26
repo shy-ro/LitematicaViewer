@@ -241,10 +241,6 @@ internal sealed class GlMeshRenderer : IDisposable
 
         out vec4 fragColor;
 
-        // 半透明与不透明的分界：水贴图 alpha=180（≈0.71），染色玻璃 ~0.75，
-        // 挖孔贴图（树叶/玻璃板）是 0/255 二值。0.99 以上按不透明处理。
-        const float TranslucentThreshold = 0.99;
-
         void main()
         {
             // 光照只用来给面分出朝向：纯贴图的六个面在截图里分不清谁是谁，
@@ -263,11 +259,13 @@ internal sealed class GlMeshRenderer : IDisposable
                 discard;
             }
 
-            // 两个 pass 分流（vanilla 的 opaque + translucent 同构）：
-            // 不透明 pass 丢掉半透明片元并写深度；半透明 pass 只画水这类片元、
-            // 不写深度。混在一个 pass 里的话，半透明水写进的深度会把之后画的
-            // 不透明方块挡掉——隔着水看到背景洞，谁挡谁全看图元顺序。
-            bool translucent = texel.a < TranslucentThreshold;
+            // 两个 pass 的分流按 tint 槽号，不按像素 alpha——vanilla 的
+            // opaque/translucent 是按方块分 render layer，不是逐像素判断。
+            // 按像素分流的话，挖孔贴图（铁栏杆/树叶）的边缘会被三线性过滤
+            // 插值出 0.5~1 的中间 alpha，整片掉进不写深度的半透明 pass：
+            // 细杆几何大部分像素贴边，整根变虚影、透出背后的几何。
+            // 槽 3+ 是水系（水/气泡柱/海草/海带），整块走半透明。
+            bool translucent = vTint > 2.5;
             if (uOpaquePass > 0.5 && translucent)
             {
                 discard;
@@ -295,10 +293,10 @@ internal sealed class GlMeshRenderer : IDisposable
                 tint = vec3(0.247, 0.463, 0.894);
             }
 
-            // alpha 原样输出：贴图里的半透明（水 180≈0.71）是画面的真实信息，
-            // 写死 1.0 会把水变成不透明色块吞掉带水宿主。帧缓冲的 alpha 通道由
-            // glBlendFuncSeparate 的 (ZERO, ONE) 保护，不会漏进窗口合成。
-            fragColor = vec4(texel.rgb * tint * shade, texel.a);
+            // 不透明 pass 输出 alpha 1.0：cutout 层在 vanilla 里不做混合，边缘
+            // 插值像素照常写深度；半透明 pass 原样输出贴图 alpha（水 180≈0.71），
+            // 帧缓冲的 alpha 通道由 glBlendFuncSeparate 的 (ZERO, ONE) 保护。
+            fragColor = vec4(texel.rgb * tint * shade, translucent ? texel.a : 1.0);
         }
         """;
 }
