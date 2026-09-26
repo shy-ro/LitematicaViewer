@@ -14,9 +14,9 @@ namespace LitematicaViewer.Previewer;
 // 缓冲的销毁仍只在 Dispose / Abandon，R5 的「建」放宽到渲染回调是本类存在的理由。
 internal sealed class GlMeshRenderer : IDisposable
 {
-    // pos3 + normal3 + uv2。与 Meshing 的 MeshData.FloatsPerVertex 相同，
+    // pos3 + normal3 + uv2 + tint1。与 Meshing 的 MeshData.FloatsPerVertex 相同，
     // 但这里不给引用——两个工程零引用，布局改了会在下面的断言处炸出来。
-    internal const int FloatsPerVertex = 8;
+    internal const int FloatsPerVertex = 9;
 
     private GlShader _shader;
 
@@ -138,7 +138,7 @@ internal sealed class GlMeshRenderer : IDisposable
         _atlas = null;
 
         _atlas = GlTexture.Create(gl, _atlasRgba!, _atlasWidth, _atlasHeight);
-        _mesh = GlMesh.Create(gl, _vertices!, _vertices!.Length / FloatsPerVertex, _indices!, [3, 3, 2]);
+        _mesh = GlMesh.Create(gl, _vertices!, _vertices!.Length / FloatsPerVertex, _indices!, [3, 3, 2, 1]);
         _gpuDirty = false;
 
         Debug.WriteLine(
@@ -188,16 +188,19 @@ internal sealed class GlMeshRenderer : IDisposable
         layout(location = 0) in vec3 aPosition;
         layout(location = 1) in vec3 aNormal;
         layout(location = 2) in vec2 aUv;
+        layout(location = 3) in float aTint;
 
         uniform mat4 uViewProjection;
 
         out vec3 vNormal;
         out vec2 vUv;
+        out float vTint;
 
         void main()
         {
             vNormal = aNormal;
             vUv = aUv;
+            vTint = aTint;
             gl_Position = uViewProjection * vec4(aPosition, 1.0);
         }
         """;
@@ -209,6 +212,7 @@ internal sealed class GlMeshRenderer : IDisposable
 
         in vec3 vNormal;
         in vec2 vUv;
+        in float vTint;
 
         uniform sampler2D uAtlas;
 
@@ -232,7 +236,24 @@ internal sealed class GlMeshRenderer : IDisposable
                 discard;
             }
 
-            fragColor = vec4(texel.rgb * shade, 1.0);
+            // 固定色板，槽号由网格侧按方块 id 归类写进顶点（0 不染 / 1 草 / 2 叶 / 3 水）。
+            // 颜色取 plains 群系：草 #91BD59、叶 #77AB2F、水 #3F76E4。
+            // 树叶/草的贴图本身是灰度图，不染就是用户看到的灰白。
+            vec3 tint = vec3(1.0);
+            if (vTint > 0.5 && vTint < 1.5)
+            {
+                tint = vec3(0.569, 0.741, 0.349);
+            }
+            else if (vTint > 1.5 && vTint < 2.5)
+            {
+                tint = vec3(0.467, 0.671, 0.184);
+            }
+            else if (vTint > 2.5)
+            {
+                tint = vec3(0.247, 0.463, 0.894);
+            }
+
+            fragColor = vec4(texel.rgb * tint * shade, 1.0);
         }
         """;
 }

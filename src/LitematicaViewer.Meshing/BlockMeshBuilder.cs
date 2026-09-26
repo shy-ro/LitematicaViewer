@@ -146,7 +146,8 @@ public sealed class BlockMeshBuilder
         Vector3 Normal,
         Vector2 UvA, Vector2 UvB, Vector2 UvC, Vector2 UvD,
         string Sprite,
-        Vector3? Cullface);
+        Vector3? Cullface,
+        float TintSlot);
 
     private sealed record CachedVariant(List<CachedQuad> Quads);
 
@@ -162,6 +163,9 @@ public sealed class BlockMeshBuilder
             return cached;
         }
 
+        // tint 只跟方块 id 与面的 tintindex 有关，与 variant 无关：整个状态一份就够。
+        // 槽号在缓存时定死写进顶点，渲染侧按槽查固定色板，不再回头碰资产层。
+        float tintSlot = TintSlotFor(key);
         ResolvedBlockState resolved = _resolver.Resolve(key);
         List<CachedVariant> variants = [];
         foreach (ResolvedVariant variant in resolved.Variants)
@@ -171,7 +175,7 @@ public sealed class BlockMeshBuilder
             {
                 foreach (ElementFace face in element.Faces)
                 {
-                    if (BuildQuad(element, face, variant) is { } quad)
+                    if (BuildQuad(element, face, variant, face.TintIndex >= 0 ? tintSlot : 0f) is { } quad)
                     {
                         quads.Add(quad);
                     }
@@ -186,7 +190,7 @@ public sealed class BlockMeshBuilder
         return result;
     }
 
-    private CachedQuad? BuildQuad(ModelElement element, ElementFace face, ResolvedVariant variant)
+    private CachedQuad? BuildQuad(ModelElement element, ElementFace face, ResolvedVariant variant, float tintSlot)
     {
         if (!TryGetRect(face.Sprite, out SpriteRect rect))
         {
@@ -258,7 +262,7 @@ public sealed class BlockMeshBuilder
             cullface = RotateDirection(cullDir, variant);
         }
 
-        return new CachedQuad(a, b, c, e, normal, uvA, uvB, uvC, uvD, face.Sprite, cullface);
+        return new CachedQuad(a, b, c, e, normal, uvA, uvB, uvC, uvD, face.Sprite, cullface, tintSlot);
     }
 
     private Vector3 ApplyVariantRotation(Vector3 v, ResolvedVariant variant)
@@ -399,6 +403,45 @@ public sealed class BlockMeshBuilder
         "glass", "leaves", "ice", "slime_block", "honey_block", "tinted_", "barrier", "sea_lantern",
     ];
 
+    // tint 槽号：0 不染 / 1 草绿 / 2 叶绿 / 3 水蓝，着色器里的固定色板按同一套编号。
+    // MC 原版按方块 id 查 colormap 注册表，tintindex 只是槽位号；这里用同一思路把
+    // 「哪个方块染什么色」定在网格侧。按 plains 群系的固定色走（litematica 本体
+    // 默认也是固定色），不做群系插值。
+    private static float TintSlotFor(string stateId)
+    {
+        string block = stateId;
+        int bracket = stateId.IndexOf('[');
+        if (bracket >= 0)
+        {
+            block = stateId[..bracket];
+        }
+
+        // seagrass 含 "grass"，必须先于草绿判；kelp 是水色同理。
+        if (block.Contains("water", StringComparison.Ordinal)
+            || block.Contains("seagrass", StringComparison.Ordinal)
+            || block.Contains("kelp", StringComparison.Ordinal))
+        {
+            return 3f;
+        }
+
+        if (block.Contains("leaves", StringComparison.Ordinal)
+            || block.Contains("vine", StringComparison.Ordinal))
+        {
+            return 2f;
+        }
+
+        if (block.Contains("grass", StringComparison.Ordinal)
+            || block.Contains("fern", StringComparison.Ordinal)
+            || block.Contains("sugar_cane", StringComparison.Ordinal))
+        {
+            return 1f;
+        }
+
+        // 没归类的 tint（红石线的红、气泡柱之类）宁可不染保持灰白，
+        // 也不要染成草绿——错色比缺色更难排查。
+        return 0f;
+    }
+
     private static void EmitQuad(List<float> vertices, List<int> indices, Vector3 origin, CachedQuad quad)
     {
         int baseIndex = vertices.Count / MeshData.FloatsPerVertex;
@@ -415,6 +458,7 @@ public sealed class BlockMeshBuilder
             vertices.Add(quad.Normal.Z);
             vertices.Add(uv.X);
             vertices.Add(uv.Y);
+            vertices.Add(quad.TintSlot);
         }
 
         indices.Add(baseIndex);
