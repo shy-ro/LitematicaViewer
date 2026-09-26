@@ -246,7 +246,7 @@ public sealed class BlockMeshBuilder
         e = ApplyVariantRotation(e, variant);
         normal = RotateDirection(normal, variant);
 
-        // uv：元素面 0..16 → 图集像素 → [0,1]，v 在这里翻转（图集左上 vs GL 左下）。
+        // uv：元素面 0..16 → 图集像素 → [0,1]。v 不翻转，理由见 MapUv。
         Vector2 uvA = MapUv(face.Uv.X, face.Uv.Y, rect);
         Vector2 uvB = MapUv(face.Uv.Z, face.Uv.Y, rect);
         Vector2 uvC = MapUv(face.Uv.Z, face.Uv.W, rect);
@@ -472,11 +472,15 @@ public sealed class BlockMeshBuilder
 
     private Vector2 MapUv(float u16, float v16, SpriteRect rect)
     {
-        // uv 0..16（MC 纹素）→ 图集像素 → [0,1]。v 取 1 -：图集行 0 是贴图顶，
-        // GL 采样 v=0 在底下。
+        // uv 0..16（MC 纹素）→ 图集像素 → [0,1]。不做 1-v 翻转：GL 采样的 t=0
+        // 就是上传数据的第一行，而图集字节数组行 0 是图集顶（PNG 约定），
+        // 所以 v = y/H 直接对应。曾经在这里翻转过，单行图集的 cell 上下对称
+        // （16px sprite + 上下各 8px pad）镜像后仍落回自己 cell，完全看不出来；
+        // 多行图集时行 0 的 sprite 会镜像进行 1 的区域，采样到挖孔贴图
+        // 的透明黑后被 cutout discard 整片丢光——机甲文件「大面积缺面」的根因。
         float u = (rect.X + ((u16 / 16f) * rect.Width)) / _atlas.Width;
         float v = (rect.Y + ((v16 / 16f) * rect.Height)) / _atlas.Height;
-        return new Vector2(u, 1f - v);
+        return new Vector2(u, v);
     }
 
     private bool TryGetRect(string sprite, out SpriteRect rect) => _atlas.TryGetRect(sprite, out rect);
