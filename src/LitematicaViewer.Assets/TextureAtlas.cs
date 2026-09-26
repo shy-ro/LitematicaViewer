@@ -208,10 +208,14 @@ public sealed class TextureAtlas
         return padded;
     }
 
-    // 2x2 盒式压缩。RGB 按 alpha 加权平均（孔洞不把颜色拖黑），alpha 取平均；
+    // 2x2 盒式压缩。RGB 按 alpha 加权平均（孔洞不把颜色拖黑），alpha 取 2x2 的最大值；
     // 之后补一轮膨胀：透明纹素只要有不透明邻居就借邻居的颜色——
     // 没有这一步，树叶这类挖孔贴图的 alpha 逐层减半，缩到远处就被
     // cutout discard 丢光，整片树叶凭空消失。
+    // alpha 不能取平均：铁栅栏/玻璃板这类稀疏挖孔贴图（覆盖 <50%）逐层平均
+    // 会让深层纹素 alpha 齐刷刷掉到 discard 阈值之下，且均匀稀释时
+    // 膨胀找不到不透明邻居，整片 sprite 远看直接消失。「足迹里有不透明就
+    // 算不透明」正是「孔在远处收拢」的语义。
     private static byte[] Downsample2x(byte[] src, int w, int h, out int nw, out int nh)
     {
         nw = Math.Max(1, w >> 1);
@@ -221,7 +225,7 @@ public sealed class TextureAtlas
         {
             for (int x = 0; x < nw; x++)
             {
-                int r = 0, g = 0, b = 0, a = 0, weight = 0;
+                int r = 0, g = 0, b = 0, a = 0, aMax = 0;
                 for (int dy = 0; dy < 2; dy++)
                 {
                     int sy = Math.Min((y * 2) + dy, h - 1);
@@ -238,7 +242,10 @@ public sealed class TextureAtlas
                         }
 
                         a += sa;
-                        weight++;
+                        if (sa > aMax)
+                        {
+                            aMax = sa;
+                        }
                     }
                 }
 
@@ -250,7 +257,7 @@ public sealed class TextureAtlas
                     dst[target + 2] = (byte)(b / a);
                 }
 
-                dst[target + 3] = (byte)(a / weight);
+                dst[target + 3] = (byte)aMax;
             }
         }
 
