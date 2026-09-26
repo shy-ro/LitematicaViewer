@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>LitematicaViewer.Assets</RootNamespace>
+    <AssemblyName>LitematicaViewer.Assets</AssemblyName>
+    <!-- 与 Core 同一个约定：Debug 下是可执行程序（PackSmoke 要在真实 jar/材质包上跑），
+         Release 回 Library，下游引用不带 Main。 -->
+    <OutputType Condition="'$(Configuration)' == 'Debug'">Exe</OutputType>
+  </PropertyGroup>
+
+</Project>
