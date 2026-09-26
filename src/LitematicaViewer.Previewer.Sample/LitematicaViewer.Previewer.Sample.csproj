@@ -15,6 +15,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\LitematicaViewer.Previewer\LitematicaViewer.Previewer.csproj" />
+    <!-- 数据源三件套都在这两层里：载入走 Core，网格与图集走 Meshing（连带引 Assets）。 -->
+    <ProjectReference Include="..\LitematicaViewer.Core\LitematicaViewer.Core.csproj" />
+    <ProjectReference Include="..\LitematicaViewer.Meshing\LitematicaViewer.Meshing.csproj" />
   </ItemGroup>
 
 </Project>

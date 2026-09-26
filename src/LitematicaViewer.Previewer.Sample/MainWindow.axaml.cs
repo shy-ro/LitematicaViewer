@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Numerics;
 using System.Text;
@@ -29,6 +30,11 @@ public partial class MainWindow : Window, IViewModeHost
     private TurntableController? _turntable;
 
     private ViewMode _mode = ViewMode.FreeLook;
+
+    // 数据源与它的产出。展台目标表在载入文件后被替换成「逐 region」；
+    // 没载入时保持演示立方体那份（自检与空启动都走它）。
+    private readonly DocumentSource _source = new();
+    private ImmutableArray<ShowcaseTarget> _showcaseTargets = ShowcaseTargets.All;
 
     public MainWindow()
     {
@@ -81,6 +87,21 @@ public partial class MainWindow : Window, IViewModeHost
 
         _selfTest = Program.SelfTestSeconds > 0 ? new InputSelfTest(this, Viewport, _camera, _input) : null;
         _selfTest?.Attach();
+
+        // 数据源三件套：后台载入完成回调、拖拽放文件、命令行带文件路径。
+        // 自检跑着的时候三件全都不接活——剧本的期望是按演示立方体算的，
+        // 载入真模型后那些断言全部对不上，而断言失败是直接杀进程。
+        _source.Completed += OnDocumentCompleted;
+
+        DragDrop.SetAllowDrop(this, true);
+        AddHandler(DragDrop.DropEvent, OnDrop);
+
+        string? initial = Program.InitialLitematic;
+        if (initial is not null && _selfTest is null)
+        {
+            // 等窗口真正开出来再载入：路径无关 GL，但侧边栏文本和相机的落点都要窗口在。
+            Opened += (_, _) => _source.Load(initial);
+        }
 
         // 客户端尺寸与 RenderScaling 是「视口算得对不对」的参照系：
         // 视口错了的时候，第一眼要拿来的对的就是这两个数，而不是去猜 DPI。
@@ -212,8 +233,85 @@ public partial class MainWindow : Window, IViewModeHost
 
         // 构造里就把相机摆到展台上（俯仰归 25 度、距离按目标尺寸反解），并把光环点起来，
         // 所以这一行之后画面已经对了，不需要再来一次 SetCamera。
-        _turntable = new TurntableController(Viewport, _camera, ShowcaseTargets.All);
+        _turntable = new TurntableController(Viewport, _camera, _showcaseTargets);
         _sidebar.SetMode(_mode);
+    }
+
+    // 拖进来的文件。多个文件只认第一个 .litematic：多选拖入时逐个排队载入，
+    // 而每次载入都会整体替换 mesh 与展台目标表，队列的意义只有「最后一个说了算」。
+    private void OnDrop(object? sender, DragEventArgs e)
+    {
+        string? path = (e.DataTransfer.TryGetFiles() ?? Enumerable.Empty<Avalonia.Platform.Storage.IStorageItem>())
+            .Select(f => f.Path.LocalPath)
+            .FirstOrDefault(p => p.EndsWith(".litematic", StringComparison.OrdinalIgnoreCase));
+
+        if (path is null)
+        {
+            Debug.WriteLine("[SAMPLE][source.drop] 拖入的东西里没有 .litematic，忽略");
+            return;
+        }
+
+        LoadDocument(path);
+    }
+
+    private void LoadDocument(string path)
+    {
+        if (_selfTest is not null)
+        {
+            // 有意拒绝：载入真模型后剧本按演示立方体算的断言会全部炸掉，而那是直接杀进程。
+            Debug.WriteLine($"[SAMPLE][source.drop] 自检进行中，拒绝载入 {path}");
+            return;
+        }
+
+        Debug.WriteLine($"[SAMPLE][source.drop] path={path}");
+        _source.Load(path);
+    }
+
+    private void OnDocumentCompleted(string path, DocumentSource.LoadedDocument? document)
+    {
+        if (document is null)
+        {
+            _sidebar.SetFile($"载入失败：{Path.GetFileName(path)}（看日志）");
+            return;
+        }
+
+        // 空文件（调色板里只有空气）没有顶点可传：传空数组会让 GL 那边建一个零长度的
+        // 索引缓冲，传 null 走「清空」语义，画面退回演示立方体。
+        bool empty = document.MergedIndices.Length == 0;
+        Viewport.SetMesh(
+            empty ? null : document.MergedVertices,
+            empty ? null : document.MergedIndices,
+            empty ? null : document.AtlasRgba,
+            empty ? 0 : document.AtlasWidth,
+            empty ? 0 : document.AtlasHeight);
+
+        // 展台目标换成逐 region。region 一个都没有的文件保持演示目标，
+        // 否则展台一个目标都没有，进去就是断言。
+        _showcaseTargets = document.Targets.IsEmpty ? ShowcaseTargets.All : document.Targets;
+
+        // 自由视角的相机对准整体：距离用展台同一条取景算式（系数只有一份），
+        // 朝向不动——视线本来就该指向它，位置照 (目标, 视线, 距离) 反解。
+        _camera.FrameTurntable(
+            document.WholeCentre,
+            TurntableController.DefaultPitch,
+            document.WholeRadius * TurntableController.FrameFactor);
+        Viewport.SetCamera(_camera.Camera);
+
+        // 如果展台正开着，旧控制器手里的目标表还是载入前那份：拆了重进一次，
+        // 让光环与取景跟着新表走。手动走 EnterFreeLook/EnterShowcase 而不是 ToggleMode，
+        // 因为 ToggleMode 里的自检闸门会把这条路整个挡掉。
+        if (_mode == ViewMode.Showcase)
+        {
+            EnterFreeLook();
+            EnterShowcase();
+        }
+
+        Debug.WriteLine(
+            $"[SAMPLE][source] 载入完成 file={document.FileName} regions={document.RegionCount} " +
+            $"blocks={document.TotalBlocks} vertices={document.MergedVertices.Length / 8} " +
+            $"targets={_showcaseTargets.Length} {document.DebugNotes}");
+        _sidebar.SetFile(
+            $"{document.FileName}  {document.RegionCount} region  {document.TotalBlocks} 方块");
     }
 
     private void OnViewportKeyChanged(Key key, bool isDown)

@@ -13,6 +13,10 @@ internal static class Program
 
     internal static double SelfTestSeconds { get; private set; }
 
+    // 命令行带上 .litematic 路径时开窗即载入（验收用的通道，与拖拽走同一条路）。
+    // 自检模式下宿主会拒绝载入，所以这里照收不误、由调用方把关。
+    internal static string? InitialLitematic { get; private set; }
+
     [STAThread]
     public static int Main(string[] args)
     {
@@ -21,10 +25,14 @@ internal static class Program
         Trace.AutoFlush = true;
 
         SelfTestSeconds = ParseSelfTestSeconds(args);
+        InitialLitematic = args.FirstOrDefault(a =>
+            a.EndsWith(".litematic", StringComparison.OrdinalIgnoreCase) && File.Exists(a));
 
         Debug.WriteLine(
             $"[SAMPLE][app.start] args=[{string.Join(' ', args)}] baseDir='{AppContext.BaseDirectory}'");
-        Debug.WriteLine($"[SAMPLE][app.start] selftest={SelfTestSeconds}s expected=0 表示窗口一直开着");
+        Debug.WriteLine(
+            $"[SAMPLE][app.start] selftest={SelfTestSeconds}s initial={InitialLitematic ?? "无"} " +
+            "expected=0 表示窗口一直开着");
 
         return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }

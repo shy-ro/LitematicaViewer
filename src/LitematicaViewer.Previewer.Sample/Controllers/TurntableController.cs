@@ -24,7 +24,9 @@ internal sealed class TurntableController : IDisposable
 
     // 取景距离 = 目标的水平半对角线 × 这个数。6.6 让模型连同外圈光环一起舒服地落在画面里
     // ——按 fov 45 度竖着算，模型的投影高度约占画面的三分之一。
-    private const float FrameFactor = 6.6f;
+    // internal：载入文件后自由视角那一步「把相机对准模型」用的是同一条取景算式，
+    // 两处各写一个系数迟早分叉。
+    internal const float FrameFactor = 6.6f;
 
     // 缩放的夹取。太近会推进模型里面去，太远模型就成了一小块。展台的主语是模型，
     // 这两个界是「展示」这件事本身要求的，所以这次没有留给调用方去配。

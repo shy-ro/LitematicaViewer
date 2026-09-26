@@ -40,6 +40,7 @@ internal sealed class Sidebar : IDisposable
     private readonly TextBlock _spinIdleSpeedText;
     private readonly TextBlock _fpsText;
     private readonly TextBlock _viewportText;
+    private readonly TextBlock _fileText;
     private readonly TextBlock _positionText;
     private readonly TextBlock _lookText;
     private readonly TextBlock _forwardText;
@@ -80,6 +81,7 @@ internal sealed class Sidebar : IDisposable
         _spinIdleSpeedText = Required<TextBlock>(window, "SpinIdleSpeedText");
         _fpsText = Required<TextBlock>(window, "FpsText");
         _viewportText = Required<TextBlock>(window, "ViewportText");
+        _fileText = Required<TextBlock>(window, "FileText");
         _positionText = Required<TextBlock>(window, "PositionText");
         _lookText = Required<TextBlock>(window, "LookText");
         _forwardText = Required<TextBlock>(window, "ForwardText");
@@ -183,6 +185,10 @@ internal sealed class Sidebar : IDisposable
         _previousTarget.Click -= OnPreviousTargetClick;
         _nextTarget.Click -= OnNextTargetClick;
     }
+
+    // 当前载入的文件那一行。文本由宿主拼好递进来，侧边栏只管显示：
+    // 「文件名 / region 数 / 方块数」这三样事实的来源是载入结果，不是侧边栏自己数得出来的。
+    internal void SetFile(string text) => Set(_fileText, text);
 
     private static T Required<T>(Window window, string name)
         where T : Control
