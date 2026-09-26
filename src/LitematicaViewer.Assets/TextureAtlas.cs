@@ -55,10 +55,10 @@ public sealed class TextureAtlas
             if (packs.TryRead($"assets/{ns}/textures/{path}.png", out byte[] png))
             {
                 ImageResult image = ImageResult.FromMemory(png, ColorComponents.RedGreenBlueAlpha);
-                (byte[] rgba, int h) = image.Width == image.Height
-                    ? (image.Data, image.Height)
+                (byte[] rgba, int w, int h) = image.Width == image.Height
+                    ? (image.Data, image.Width, image.Height)
                     : TakeFirstFrame(image);
-                decoded.Add((sprite, rgba, image.Width, h));
+                decoded.Add((sprite, rgba, w, h));
             }
             else
             {
@@ -181,16 +181,21 @@ public sealed class TextureAtlas
         }
     }
 
-    // 动画贴图（水、熔岩、火）是竖排的多帧 + 同名 .mcmeta。首版只要静止画面：
-    // 取最顶上的正方形首帧，其余帧直接丢。帧时序将来做「活水」时再说。
-    private static (byte[] Rgba, int Height) TakeFirstFrame(ImageResult image)
+    // 非正方形贴图两种形状：竖排动画（水、熔岩、火，h 是 w 的整数倍）取最顶上
+    // 的 w×w 首帧；横排实体皮肤图集（64x32 之类，头颅贴图就是这种）没有「帧」的
+    // 概念，取左上角 min(w,h)² 的正方——头颅都画在皮肤图集的左上角，正好落在里面。
+    // 之前只认竖排：横排贴图按 w×w 去拷直接把 BlockCopy 越界炸掉。
+    private static (byte[] Rgba, int Width, int Height) TakeFirstFrame(ImageResult image)
     {
-        // 竖排帧：第一帧占最上面 w×w 的一块，行主序拷贝正好按行取。
-        // 之前只拷了一行（w*4 字节）却把高度报成 w，装箱拷贝时在 BlockCopy 越界炸掉。
-        int side = image.Width;
-        byte[] first = new byte[side * side * 4];
-        Buffer.BlockCopy(image.Data, 0, first, 0, first.Length);
-        return (first, side);
+        int side = Math.Min(image.Width, image.Height);
+        byte[] crop = new byte[side * side * 4];
+        for (int row = 0; row < side; row++)
+        {
+            int source = row * image.Width * 4;
+            Buffer.BlockCopy(image.Data, source, crop, row * side * 4, side * 4);
+        }
+
+        return (crop, side, side);
     }
 
     private static int Pow2Ceiling(int value)

@@ -416,10 +416,11 @@ public sealed class BlockMeshBuilder
             block = stateId[..bracket];
         }
 
-        // seagrass 含 "grass"，必须先于草绿判；kelp 是水色同理。
+        // seagrass 含 "grass"，必须先于草绿判；kelp、bubble_column 是水色同理。
         if (block.Contains("water", StringComparison.Ordinal)
             || block.Contains("seagrass", StringComparison.Ordinal)
-            || block.Contains("kelp", StringComparison.Ordinal))
+            || block.Contains("kelp", StringComparison.Ordinal)
+            || block.Contains("bubble_column", StringComparison.Ordinal))
         {
             return 3f;
         }

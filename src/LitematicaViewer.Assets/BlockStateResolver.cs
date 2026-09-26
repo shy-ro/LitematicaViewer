@@ -61,11 +61,11 @@ public sealed class BlockStateResolver
         List<ResolvedVariant> variants = [];
         if (root.TryGetProperty("variants", out JsonElement variantsElement))
         {
-            ResolveVariants(variantsElement, properties, variants);
+            ResolveVariants(variantsElement, properties, name, variants);
         }
         else if (root.TryGetProperty("multipart", out JsonElement multipartElement))
         {
-            ResolveMultipart(multipartElement, properties, variants);
+            ResolveMultipart(multipartElement, properties, name, variants);
         }
         else
         {
@@ -91,7 +91,7 @@ public sealed class BlockStateResolver
 
     // ---------- blockstate 层 ----------
 
-    private void ResolveVariants(JsonElement variants, ImmutableDictionary<string, string> properties, List<ResolvedVariant> output)
+    private void ResolveVariants(JsonElement variants, ImmutableDictionary<string, string> properties, string blockName, List<ResolvedVariant> output)
     {
         foreach (JsonProperty entry in variants.EnumerateObject())
         {
@@ -105,12 +105,12 @@ public sealed class BlockStateResolver
             switch (entry.Value.ValueKind)
             {
                 case JsonValueKind.Object:
-                    AddVariant(entry.Value, output);
+                    AddVariant(entry.Value, blockName, output);
                     break;
                 case JsonValueKind.Array:
                     foreach (JsonElement item in entry.Value.EnumerateArray())
                     {
-                        AddVariant(item, output);
+                        AddVariant(item, blockName, output);
                     }
                     break;
                 default:
@@ -120,7 +120,7 @@ public sealed class BlockStateResolver
         }
     }
 
-    private void ResolveMultipart(JsonElement multipart, ImmutableDictionary<string, string> properties, List<ResolvedVariant> output)
+    private void ResolveMultipart(JsonElement multipart, ImmutableDictionary<string, string> properties, string blockName, List<ResolvedVariant> output)
     {
         foreach (JsonElement part in multipart.EnumerateArray())
         {
@@ -133,20 +133,20 @@ public sealed class BlockStateResolver
             {
                 if (apply.ValueKind == JsonValueKind.Object)
                 {
-                    AddVariant(apply, output);
+                    AddVariant(apply, blockName, output);
                 }
                 else if (apply.ValueKind == JsonValueKind.Array)
                 {
                     foreach (JsonElement item in apply.EnumerateArray())
                     {
-                        AddVariant(item, output);
+                        AddVariant(item, blockName, output);
                     }
                 }
             }
         }
     }
 
-    private void AddVariant(JsonElement variant, List<ResolvedVariant> output)
+    private void AddVariant(JsonElement variant, string blockName, List<ResolvedVariant> output)
     {
         if (!variant.TryGetProperty("model", out JsonElement modelElement))
         {
@@ -157,7 +157,16 @@ public sealed class BlockStateResolver
         float x = variant.TryGetProperty("x", out JsonElement xElement) ? xElement.GetSingle() : 0f;
         float y = variant.TryGetProperty("y", out JsonElement yElement) ? yElement.GetSingle() : 0f;
         string modelId = NormalizeId(modelElement.GetString()!, "models");
-        output.Add(new ResolvedVariant(modelId, LoadModel(modelId), x, y));
+        ResolvedBlockModel model = LoadModel(modelId);
+
+        // builtin/entity（方块实体渲染的方块）与流体模型的 elements 是空的，
+        // 原样返回就是「整块消失」；按方块名换一个占位几何再出去。
+        if (FallbackModels.TryGet(blockName, modelId, model, out ResolvedBlockModel fallback))
+        {
+            model = fallback;
+        }
+
+        output.Add(new ResolvedVariant(modelId, model, x, y));
     }
 
     private static ImmutableDictionary<string, string> ParseProperties(string inner) =>
@@ -368,8 +377,14 @@ public sealed class BlockStateResolver
                     string? sprite;
                     if (!textureRef.StartsWith('#'))
                     {
-                        // 直接写贴图路径而不是 #引用 的情况（mod 资产里常见）。
-                        sprite = textureRef;
+                        // 不带 # 的值先查贴图表：26.3 的 heavy_core 面引用写的是裸 "all"，
+                        // 意图是表里的 "all" 键；查不到才当直接贴图路径（mod 资产常见）。
+                        sprite = textures.TryGetValue(textureRef, out string? tabled) ? tabled : textureRef;
+                        int hops = 0;
+                        while (sprite is not null && sprite.StartsWith('#') && textures.TryGetValue(sprite[1..], out string? next) && hops++ < 8)
+                        {
+                            sprite = next;
+                        }
                     }
                     else
                     {
