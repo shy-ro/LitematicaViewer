@@ -47,6 +47,7 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
     private GlPedestalRenderer? _pedestal;
     private GlHighlightRenderer? _highlight;
     private GlMeshRenderer? _meshRenderer;
+    private SupersampleTarget? _ssaa;
 
     // 指针能不能选中本控件，由这一条说了算，而默认答案是「不能」。
     //
@@ -152,6 +153,9 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
                     pending.Vertices, pending.Indices, pending.AtlasLevels, pending.Width, pending.Height);
             }
         }
+
+        // 超采样：先画进 2x FBO 再降采样回交换链。入口不齐时返回 null，渲染路径原样直画。
+        _ssaa = SupersampleTarget.Create(gl);
     }
 
     protected override void OnOpenGlRender(GlInterface gl, int fb)
@@ -189,30 +193,44 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
             RaiseViewportResized(width, height, previousWidth, previousHeight);
         }
 
-        // 显式绑一次 Avalonia 交给我们的那个 framebuffer。省掉这一步不会立刻报错，
-        // 症状是画到别处去了，而屏幕上什么都没有。
-        gl.BindFramebuffer(GlConsts.GL_FRAMEBUFFER, fb);
-        gl.Viewport(0, 0, width, height);
+        // 超采样把渲染分辨率乘 Scale：aspect 不变，投影矩阵对宽高只是取比值，
+        // 各渲染器拿到的宽高换成放大后的值即可。
+        int renderWidth = _ssaa is null ? width : width * SupersampleTarget.Scale;
+        int renderHeight = _ssaa is null ? height : height * SupersampleTarget.Scale;
+
+        // 显式绑一次画布：超采样时是我们的 2x FBO，否则是 Avalonia 交给的那个表面。
+        // 省掉这一步不会立刻报错，症状是画到别处去了，而屏幕上什么都没有。
+        if (_ssaa is null)
+        {
+            gl.BindFramebuffer(GlConsts.GL_FRAMEBUFFER, fb);
+        }
+        else
+        {
+            _ssaa.EnsureSize(renderWidth, renderHeight);
+            _ssaa.BindForRender();
+        }
+
+        gl.Viewport(0, 0, renderWidth, renderHeight);
         gl.Clear(GlConsts.GL_COLOR_BUFFER_BIT | GlConsts.GL_DEPTH_BUFFER_BIT);
 
         // 装了模型就不再画演示立方体：立方体是「什么都没有时的参照物」，
         // 和真模型同时画只会互相穿插。axes 在两种模式下都画（xyz 参考线是独立功能）。
         if (_meshRenderer is { HasMesh: true } mesh)
         {
-            mesh.Render(gl, _camera, width, height);
+            mesh.Render(gl, _camera, renderWidth, renderHeight);
         }
         else
         {
-            _cube?.Render(_camera, width, height);
+            _cube?.Render(_camera, renderWidth, renderHeight);
         }
 
         // 轴线接着画：落在立方体里的那一段被深度测试挡住，露在外面的是从方块里伸出来的三根轴。
-        _axes?.Render(_camera, width, height);
+        _axes?.Render(_camera, renderWidth, renderHeight);
 
         // 拾取高亮框：线框 + 深度测试，被模型挡住的边自然看不见。位置没设就不画。
         if (_highlightPosition is { } highlightBlock)
         {
-            _highlight?.Render(_camera, width, height, highlightBlock);
+            _highlight?.Render(_camera, renderWidth, renderHeight, highlightBlock);
         }
 
         // 光环最后画。半透明的三个东西（轴线、光环）只有按「从远到近」画才对得上，
@@ -221,8 +239,16 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         // 深度上就成了「轴线在光环前面」——两处都是半透明，画面看起来只是「有点怪」。
         if (_pedestalVisible)
         {
-            _pedestal?.Render(_camera, width, height, _pedestalCentre, _pedestalRadius, _pedestalBaseY);
+            _pedestal?.Render(_camera, renderWidth, renderHeight, _pedestalCentre, _pedestalRadius, _pedestalBaseY);
         }
+
+        // 降采样回交换链：LINEAR 把 2x 的过采样平均掉，等于内置了一层抗锯齿。
+        if (_ssaa is { } ssaa)
+        {
+            ssaa.ResolveTo(fb, width, height);
+        }
+
+        gl.Viewport(0, 0, width, height);
 
         // 自驱动渲染循环：这一帧的末尾换来下一帧，节流交给 Avalonia 的合成器（实测就是显示刷新率）。
         // 不改成「只在相机变化时才请求」是因为 Tick 是控制器的时间来源：一旦没有输入就不出帧，
@@ -292,6 +318,8 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         _cube = null;
         _meshRenderer?.Dispose();
         _meshRenderer = null;
+        _ssaa?.Dispose();
+        _ssaa = null;
 
         base.OnOpenGlDeinit(gl);
     }
@@ -309,6 +337,8 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         _axes = null;
         _cube?.Abandon();
         _cube = null;
+        _ssaa?.Dispose();
+        _ssaa = null;
 
         // 网格渲染器是唯一不置 null 的：托管副本在它手里，置 null 就等于要宿主重新装填。
         // 下一次 init 沿用旧实例，下一次 Render 自愈（惰性重建缓冲与着色器）。

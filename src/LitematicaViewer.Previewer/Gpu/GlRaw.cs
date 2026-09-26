@@ -31,6 +31,16 @@ internal static class GlRaw
     // 后画的水稳定地叠上去——vanilla 的半透明 pass 用的也是 LEQUAL。
     internal const int GL_LEQUAL = 0x0203;
 
+    // 超采样 FBO 用的 target/attachment/格式组。GlConsts 只收合成后端用得上的，
+    // 这一整组它都没有，数值来自 GLES 3.0 规范。
+    internal const int GL_RENDERBUFFER = 0x8D41;
+    internal const int GL_COLOR_ATTACHMENT0 = 0x8CE0;
+    internal const int GL_DEPTH_ATTACHMENT = 0x8D00;
+    internal const int GL_DEPTH_COMPONENT24 = 0x81A6;
+    internal const int GL_READ_FRAMEBUFFER = 0x8CA8;
+    internal const int GL_DRAW_FRAMEBUFFER = 0x8CA9;
+    internal const int GL_FRAMEBUFFER_COMPLETE = 0x8CD5;
+
     // 半透明绘制需要的两件事：开混合、把因子设成 srcAlpha / oneMinusSrcAlpha。
     //
     // 抽成一个入口是因为用它的人不止一个（轴线、展台光环），而「谁先建谁顺手设一下」是隐式依赖：
@@ -222,4 +232,97 @@ internal static class GlRaw
         Marshal.GetDelegateForFunctionPointer<TexParameterfDelegate>(entry)(target, pname, param);
         return true;
     }
+
+    // ---- 离屏 FBO（超采样）。GLES 3.0 core 的整组入口，ANGLE 上必有；
+    // 入口缺失时 SupersampleTarget.Create 返回 null，调用方退回直画。 ----
+
+    // 入口只在 EnsureSize/Resolve/Dispose 里用，频率远低于每帧一次 GetProcAddress 的代价可忽略，
+    // 但和 Uniform1f 同一处理：缓存委托，省掉重复查表。指针跨上下文安全。
+    private static GenDeleteDelegate? _genFramebuffers;
+    private static BindDelegate? _bindFramebuffer;
+    private static FramebufferTextureDelegate? _framebufferTexture2D;
+    private static GenDeleteDelegate? _genRenderbuffers;
+    private static BindDelegate? _bindRenderbuffer;
+    private static RenderbufferStorageDelegate? _renderbufferStorage;
+    private static FramebufferRenderbufferDelegate? _framebufferRenderbuffer;
+    private static GenDeleteDelegate? _deleteFramebuffers;
+    private static GenDeleteDelegate? _deleteRenderbuffers;
+    private static CheckFramebufferStatusDelegate? _checkFramebufferStatus;
+    private static BlitFramebufferDelegate? _blitFramebuffer;
+
+    private static T Cache<T>(GlInterface gl, string name, ref T? cache) where T : Delegate
+    {
+        if (cache is null)
+        {
+            IntPtr entry = gl.GetProcAddress(name);
+            cache = entry == IntPtr.Zero
+                ? throw new InvalidOperationException($"[PREVIEWER][gl.raw] 入口缺失 {name}")
+                : Marshal.GetDelegateForFunctionPointer<T>(entry);
+        }
+
+        return cache;
+    }
+
+    // 这组入口没有「可缺省」的余量：要 FBO 就得全有。Create 里逐个探测太啰嗦，
+    // 直接约定——任何一个缺失就抛，SupersampleTarget.Create 捕获后整体降级直画。
+    internal static void GenFramebuffers(GlInterface gl, int count, IntPtr ids) =>
+        Cache(gl, "glGenFramebuffers", ref _genFramebuffers)(count, ids);
+
+    internal static void BindFramebuffer(GlInterface gl, int target, int handle) =>
+        Cache(gl, "glBindFramebuffer", ref _bindFramebuffer)(target, handle);
+
+    internal static void FramebufferTexture2D(GlInterface gl, int target, int attachment, int textureTarget, int texture, int level) =>
+        Cache(gl, "glFramebufferTexture2D", ref _framebufferTexture2D)(target, attachment, textureTarget, texture, level);
+
+    internal static void GenRenderbuffers(GlInterface gl, int count, IntPtr ids) =>
+        Cache(gl, "glGenRenderbuffers", ref _genRenderbuffers)(count, ids);
+
+    internal static void BindRenderbuffer(GlInterface gl, int target, int handle) =>
+        Cache(gl, "glBindRenderbuffer", ref _bindRenderbuffer)(target, handle);
+
+    internal static void RenderbufferStorage(GlInterface gl, int target, int internalFormat, int width, int height) =>
+        Cache(gl, "glRenderbufferStorage", ref _renderbufferStorage)(target, internalFormat, width, height);
+
+    internal static void FramebufferRenderbuffer(GlInterface gl, int target, int attachment, int renderbufferTarget, int renderbuffer) =>
+        Cache(gl, "glFramebufferRenderbuffer", ref _framebufferRenderbuffer)(target, attachment, renderbufferTarget, renderbuffer);
+
+    internal static void DeleteFramebuffers(GlInterface gl, int count, IntPtr ids) =>
+        Cache(gl, "glDeleteFramebuffers", ref _deleteFramebuffers)(count, ids);
+
+    internal static void DeleteRenderbuffers(GlInterface gl, int count, IntPtr ids) =>
+        Cache(gl, "glDeleteRenderbuffers", ref _deleteRenderbuffers)(count, ids);
+
+    internal static int CheckFramebufferStatus(GlInterface gl, int target) =>
+        Cache(gl, "glCheckFramebufferStatus", ref _checkFramebufferStatus)(target);
+
+    internal static void BlitFramebuffer(GlInterface gl,
+        int srcX0, int srcY0, int srcX1, int srcY1,
+        int dstX0, int dstY0, int dstX1, int dstY1,
+        int mask, int filter) =>
+        Cache(gl, "glBlitFramebuffer", ref _blitFramebuffer)(
+            srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void GenDeleteDelegate(int count, IntPtr ids);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void BindDelegate(int target, int handle);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void FramebufferTextureDelegate(int target, int attachment, int textureTarget, int texture, int level);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void RenderbufferStorageDelegate(int target, int internalFormat, int width, int height);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void FramebufferRenderbufferDelegate(int target, int attachment, int renderbufferTarget, int renderbuffer);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int CheckFramebufferStatusDelegate(int target);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void BlitFramebufferDelegate(
+        int srcX0, int srcY0, int srcX1, int srcY1,
+        int dstX0, int dstY0, int dstX1, int dstY1,
+        int mask, int filter);
 }
