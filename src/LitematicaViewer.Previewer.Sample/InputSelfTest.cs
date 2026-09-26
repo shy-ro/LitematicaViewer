@@ -888,11 +888,14 @@ internal sealed class InputSelfTest
             1e-3f,
             "展台推近之后的距离");
 
+        // 步长是 2 方块/档：3 档从起点（≈3.7，StepWheel 剧本残留推近一档）会穿过圆心，
+        // 距离变负。穿过后相机在圆心另一侧，「看向圆心」的 dot 变成 -1——这正是穿越语义，
+        // 所以这里钉的是 |dot|=1（视线沿圆心连线，不管在哪一侧）。
         Expect(
-            Vector3.Dot(_camera.Camera.Forward, Vector3.Normalize(_showcaseCentre - _camera.Camera.Position)),
+            MathF.Abs(Vector3.Dot(_camera.Camera.Forward, Vector3.Normalize(_showcaseCentre - _camera.Camera.Position))),
             1f,
             1e-3f,
-            "推近之后视线是否仍指向圆心");
+            "推近之后视线是否沿圆心连线");
 
         for (int i = 0; i < ZoomOutSteps; i++)
         {

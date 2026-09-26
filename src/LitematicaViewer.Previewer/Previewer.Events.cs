@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Avalonia;
 using Avalonia.Input;
+using Vector3 = System.Numerics.Vector3;
 
 namespace LitematicaViewer.Previewer;
 
@@ -129,33 +130,39 @@ public partial class Previewer
         set => SetValue(SpinIdleSpeedProperty, value);
     }
 
-    // 展台底面那个光环。三个参数一组（画不画、半径、底面高度），所以是一次调用而不是三个属性：
-    // 半径与底面高度都来自「当前展示的目标」，分开设会出现「半径已经换了、高度还是上一个目标的」
-    // 那一帧——而那一帧看起来只是「光环陷进去了」。
+    // 展台底面那个光环。四个参数一组（画不画、圆心、半径、底面高度），所以是一次调用而不是四个属性：
+    // 半径、圆心与底面高度都来自「当前展示的目标」，分开设会出现「半径已经换了、圆心还是上一个目标的」
+    // 那一帧——而那一帧看起来只是「光环陷进去了」。圆心丢了 X/Z 的话光环会钉在世界原点，
+    // 模型一挪位置圈和模型就分家，转展台时模型绕着圈外的一个点公转。
     //
-    // 它不碰 GPU 资源：光环的网格是半径为 1 的那一份，缩放与抬升走矩阵，
+    // 它不碰 GPU 资源：光环的网格是半径为 1 的那一份，平移缩放抬升走矩阵，
     // 于是换目标不重建任何东西（R5）。
-    public void SetPedestal(bool visible, float radius, float baseY)
+    public void SetPedestal(bool visible, Vector3 centre, float radius, float baseY)
     {
         Debug.Assert(
-            !visible || (float.IsFinite(radius) && radius > 0f && float.IsFinite(baseY)),
-            $"[PREVIEWER][gl.pedestal] 光环参数不合法 visible={visible} radius={radius} baseY={baseY}");
+            !visible || (float.IsFinite(radius) && radius > 0f && float.IsFinite(baseY)
+                && float.IsFinite(centre.X) && float.IsFinite(centre.Y) && float.IsFinite(centre.Z)),
+            $"[PREVIEWER][gl.pedestal] 光环参数不合法 visible={visible} centre=({centre}) radius={radius} baseY={baseY}");
 
         // 同一个值重复设不打桩：宿主可能在每帧的末尾都推一次，而这里要的是「变没变」这件事。
-        if (_pedestalVisible == visible && _pedestalRadius == radius && _pedestalBaseY == baseY)
+        if (_pedestalVisible == visible && _pedestalRadius == radius && _pedestalBaseY == baseY
+            && _pedestalCentre == centre)
         {
             return;
         }
 
         _pedestalVisible = visible;
+        _pedestalCentre = centre;
         _pedestalRadius = radius;
         _pedestalBaseY = baseY;
 
         Debug.WriteLine(
-            $"[PREVIEWER][gl.pedestal.set] visible={visible} radius={radius:F3} baseY={baseY:F3}");
+            $"[PREVIEWER][gl.pedestal.set] visible={visible} centre=({centre.X:F2},{centre.Y:F2},{centre.Z:F2}) " +
+            $"radius={radius:F3} baseY={baseY:F3}");
     }
 
     private bool _pedestalVisible;
+    private Vector3 _pedestalCentre;
     private float _pedestalRadius = 1f;
     private float _pedestalBaseY;
 

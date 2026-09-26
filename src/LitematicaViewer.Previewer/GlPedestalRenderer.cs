@@ -94,18 +94,19 @@ internal sealed class GlPedestalRenderer : IDisposable
         return new GlPedestalRenderer(gl, shader, mesh);
     }
 
-    // 半径与底面高度由调用方给：控件不知道当前展示的是什么，那是宿主的事。
-    public void Render(CameraState camera, int width, int height, float radius, float baseY)
+    // 圆心、半径与底面高度由调用方给：控件不知道当前展示的是什么，那是宿主的事。
+    // 圆心缺了 X/Z 的话圆环钉在世界原点，模型一挪位置圈就和模型分家。
+    public void Render(CameraState camera, int width, int height, Vector3 centre, float radius, float baseY)
     {
         float aspect = (float)width / height;
         Matrix4x4 viewProjection = camera.GetViewMatrix() * camera.GetProjectionMatrix(aspect);
 
-        // 顶点是「半径为 1、落在 y=0 平面上」的那一份，缩放与抬升折进矩阵。
+        // 顶点是「半径为 1、圆心在原点、落在 y=0 平面上」的那一份，平移缩放抬升折进矩阵。
         // 折进矩阵而不是重建网格：重建意味着换目标就删一次 VBO 再建一次，而 R5 把
         // GPU 资源的创建销毁只留给 Initialize / Dispose。
         Matrix4x4 transform =
             Matrix4x4.CreateScale(radius, 1f, radius) *
-            Matrix4x4.CreateTranslation(0f, baseY, 0f);
+            Matrix4x4.CreateTranslation(centre.X, baseY, centre.Z);
 
         _shader.Use();
         _shader.SetMatrix4("uViewProjection", transform * viewProjection);

@@ -211,7 +211,7 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
         // 深度上就成了「轴线在光环前面」——两处都是半透明，画面看起来只是「有点怪」。
         if (_pedestalVisible)
         {
-            _pedestal?.Render(_camera, width, height, _pedestalRadius, _pedestalBaseY);
+            _pedestal?.Render(_camera, width, height, _pedestalCentre, _pedestalRadius, _pedestalBaseY);
         }
 
         // 自驱动渲染循环：这一帧的末尾换来下一帧，节流交给 Avalonia 的合成器（实测就是显示刷新率）。

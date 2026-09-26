@@ -112,7 +112,7 @@ internal sealed class TurntableController : IDisposable
 
         // 光环是这个控制器点起来的，也由它熄掉：留着不管的话，切回自由视角之后底面上还浮着一圈
         // 发蓝的东西，而那时它没有任何含义。
-        _previewer.SetPedestal(false, Current.Radius, Current.BaseY);
+        _previewer.SetPedestal(false, Current.Centre, Current.Radius, Current.BaseY);
     }
 
     // 切到下一个／上一个目标。今天表里只有一个，所以它是「接口先就位」——
@@ -165,7 +165,7 @@ internal sealed class TurntableController : IDisposable
 
         // 光环的半径就是目标的水平半对角线：网格那一份是按「半径为 1 = 刚好贴住目标外接圆」画的，
         // 内缘贴着它外侧一点点（具体倍数在 GlPedestalRenderer.RingRadii[0]），留出一条细缝。
-        _previewer.SetPedestal(true, target.Radius, target.BaseY);
+        _previewer.SetPedestal(true, target.Centre, target.Radius, target.BaseY);
         _previewer.SetCamera(_camera.Camera);
 
         Debug.WriteLine(
