@@ -21,11 +21,15 @@ internal sealed class GlTexture : IDisposable
     // GlConsts 只收了 GL_NEAREST/GL_LINEAR 这组，缩小带 mip 的三档没有，数值来自 GL 规范。
     private const int GlNearestMipmapLinear = 0x2702;
 
-    public static GlTexture Create(GlInterface gl, byte[] rgba, int width, int height)
+    // 只上传部分 mip 链时必须声明链顶：MIN_FILTER 带 mip 的默认完整要求是链一路到 1x1，
+    // 缺层 = 纹理不完整 = 采样全黑，不是退化到层 0。
+    private const int GlTextureMaxLevel = 0x813D;
+
+    public static GlTexture Create(GlInterface gl, byte[][] levels, int width, int height)
     {
         Debug.Assert(
-            (long)rgba.Length == (long)width * height * 4,
-            $"[PREVIEWER][gl.texture] 数据长度对不上 bytes={rgba.Length} " +
+            levels.Length > 0 && levels[0].Length == width * height * 4,
+            $"[PREVIEWER][gl.texture] 层 0 数据对不上 bytes={levels[0].Length} " +
             $"expected={(long)width * height * 4} size={width}x{height}");
         Debug.Assert(
             MathF.Log2(width) % 1 == 0 && MathF.Log2(height) % 1 == 0,
@@ -36,42 +40,50 @@ internal sealed class GlTexture : IDisposable
         gl.BindTexture(GlConsts.GL_TEXTURE_2D, handle);
 
         // 放大保持 NEAREST：MC 的像素风要的是棱角，双线性放大会糊。
-        // 缩小走 mipmap：图集装箱时每个 sprite 留了边距并外扩了边缘（见 TextureAtlas.Pad），
-        // 这里才敢把 MIN_FILTER 打开——没有 padding 的图集开 mipmap 会让 sprite 接缝互相串色。
-        // NEAREST_MIPMAP_LINEAR 在 mip 层间也取最近：既压住缩小时的闪烁，又不引入模糊。
+        // 缩小走 mipmap：mip 链由图集侧按 sprite 独立生成（见 TextureAtlas.Build），
+        // 这里逐层上传即可。绝不能 glGenerateMipmap 整图压缩：深层把相邻 sprite
+        // 混进同一纹素，alpha 被稀释过 0.5 后 cutout discard 把整个面丢没。
         gl.TexParameteri(GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_MIN_FILTER, GlNearestMipmapLinear);
         gl.TexParameteri(GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_MAG_FILTER, GlConsts.GL_NEAREST);
+        gl.TexParameteri(GlConsts.GL_TEXTURE_2D, GlTextureMaxLevel, levels.Length - 1);
         // 图集边缘的 sprite 越过边采样会包到对面去，夹住。
         gl.TexParameteri(GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_WRAP_S, GlConsts.GL_CLAMP_TO_EDGE);
         gl.TexParameteri(GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_WRAP_T, GlConsts.GL_CLAMP_TO_EDGE);
 
-        IntPtr staging = Marshal.AllocHGlobal(rgba.Length);
-        try
+        for (int level = 0; level < levels.Length; level++)
         {
-            Marshal.Copy(rgba, 0, staging, rgba.Length);
-            gl.TexImage2D(
-                GlConsts.GL_TEXTURE_2D,
-                0,
-                GlConsts.GL_RGBA8,
-                width,
-                height,
-                0,
-                GlConsts.GL_RGBA,
-                GlConsts.GL_UNSIGNED_BYTE,
-                staging);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(staging);
-        }
+            int lw = Math.Max(1, width >> level);
+            int lh = Math.Max(1, height >> level);
+            byte[] data = levels[level];
+            Debug.Assert(
+                data.Length == lw * lh * 4,
+                $"[PREVIEWER][gl.texture] mip 层 {level} 数据对不上 bytes={data.Length} " +
+                $"expected={(long)lw * lh * 4} size={lw}x{lh}");
 
-        // mip 链现在建好，之后不更新：图集是一次性数据，改图就整个重建。
-        bool generated = GlRaw.GenerateMipmap(gl, GlConsts.GL_TEXTURE_2D);
-        Debug.Assert(generated, "[PREVIEWER][gl.texture] glGenerateMipmap 入口缺失，mip 链没建");
+            IntPtr staging = Marshal.AllocHGlobal(data.Length);
+            try
+            {
+                Marshal.Copy(data, 0, staging, data.Length);
+                gl.TexImage2D(
+                    GlConsts.GL_TEXTURE_2D,
+                    level,
+                    GlConsts.GL_RGBA8,
+                    lw,
+                    lh,
+                    0,
+                    GlConsts.GL_RGBA,
+                    GlConsts.GL_UNSIGNED_BYTE,
+                    staging);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(staging);
+            }
+        }
 
         gl.BindTexture(GlConsts.GL_TEXTURE_2D, 0);
 
-        Debug.WriteLine($"[PREVIEWER][gl.texture] created size={width}x{height} bytes={rgba.Length} mipmap={(generated ? "on" : "off")}");
+        Debug.WriteLine($"[PREVIEWER][gl.texture] created size={width}x{height} levels={levels.Length}");
         return new GlTexture(gl, handle);
     }
 

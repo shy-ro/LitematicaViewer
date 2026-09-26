@@ -23,7 +23,7 @@ internal sealed class GlMeshRenderer : IDisposable
     // 托管副本。调用方可能装完就改数组，渲染层拿到的必须是自己那一份。
     private float[]? _vertices;
     private int[]? _indices;
-    private byte[]? _atlasRgba;
+    private byte[][]? _atlasLevels;
     private int _atlasWidth;
     private int _atlasHeight;
 
@@ -53,22 +53,22 @@ internal sealed class GlMeshRenderer : IDisposable
     //
     // 这里只做拷贝，一个 GL 调用都没有：调用方可能在任何时刻调它（后台解析完通过
     // Dispatcher 推过来），而真正的上传等下一次 Render。
-    public void Load(float[]? vertices, int[]? indices, byte[]? atlasRgba, int atlasWidth, int atlasHeight)
+    public void Load(float[]? vertices, int[]? indices, byte[][]? atlasLevels, int atlasWidth, int atlasHeight)
     {
         Debug.Assert(
             (vertices is null) == (indices is null),
             $"[PREVIEWER][gl.mesh.load] 网格与索引必须同时给或同时不给 " +
             $"vertices={vertices?.Length.ToString() ?? "null"} indices={indices?.Length.ToString() ?? "null"}");
         Debug.Assert(
-            vertices is null || (atlasRgba is not null && atlasWidth > 0 && atlasHeight > 0),
+            vertices is null || (atlasLevels is not null && atlasLevels.Length > 0 && atlasWidth > 0 && atlasHeight > 0),
             "[PREVIEWER][gl.mesh.load] 有网格必须有图集：uv 采样没有别的来源");
         Debug.Assert(
             vertices is null || vertices.Length % FloatsPerVertex == 0,
             $"[PREVIEWER][gl.mesh.load] 顶点数据不是 {FloatsPerVertex} 的整数倍 " +
             $"len={vertices?.Length}");
         Debug.Assert(
-            atlasRgba is null || (long)atlasRgba.Length == (long)atlasWidth * atlasHeight * 4,
-            $"[PREVIEWER][gl.mesh.load] 图集数据长度对不上 bytes={atlasRgba?.Length} " +
+            atlasLevels is null || (long)atlasLevels[0].Length == (long)atlasWidth * atlasHeight * 4,
+            $"[PREVIEWER][gl.mesh.load] 图集层 0 数据长度对不上 bytes={atlasLevels?[0].Length} " +
             $"expected={(long)atlasWidth * atlasHeight * 4}");
 
         if (vertices is null)
@@ -76,7 +76,7 @@ internal sealed class GlMeshRenderer : IDisposable
             bool had = HasMesh;
             _vertices = null;
             _indices = null;
-            _atlasRgba = null;
+            _atlasLevels = null;
             _gpuDirty = true;
             if (had)
             {
@@ -89,7 +89,7 @@ internal sealed class GlMeshRenderer : IDisposable
         // 拷贝是因为调用方可能装完就改数组：渲染层拿到的必须是自己那一份。
         _vertices = (float[])vertices!.Clone();
         _indices = (int[])indices!.Clone();
-        _atlasRgba = (byte[])atlasRgba!.Clone();
+        _atlasLevels = atlasLevels!.Select(l => (byte[])l.Clone()).ToArray();
         _atlasWidth = atlasWidth;
         _atlasHeight = atlasHeight;
         _gpuDirty = true;
@@ -137,7 +137,7 @@ internal sealed class GlMeshRenderer : IDisposable
         _atlas?.Dispose();
         _atlas = null;
 
-        _atlas = GlTexture.Create(gl, _atlasRgba!, _atlasWidth, _atlasHeight);
+        _atlas = GlTexture.Create(gl, _atlasLevels!, _atlasWidth, _atlasHeight);
         _mesh = GlMesh.Create(gl, _vertices!, _vertices!.Length / FloatsPerVertex, _indices!, [3, 3, 2, 1]);
         _gpuDirty = false;
 
@@ -159,7 +159,7 @@ internal sealed class GlMeshRenderer : IDisposable
         _shader.Dispose();
         _vertices = null;
         _indices = null;
-        _atlasRgba = null;
+        _atlasLevels = null;
     }
 
     // 上下文丢失。与另外三个渲染器不同，这里只把 GPU 侧丢掉，托管数据留住：

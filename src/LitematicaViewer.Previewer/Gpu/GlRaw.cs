@@ -120,23 +120,6 @@ internal static class GlRaw
         }
     }
 
-    // void glGenerateMipmap(GLenum target)
-    //
-    // GLES 3.0 core 之一（ANGLE 必有），照理不会缺失；但 GlInterface 没包它，
-    // 走的还是 GetProcAddress 的老路。返回值沿用其它入口的约定：
-    // false = 这个上下文里没有入口，mip 链没建，调用方退化成不过滤也不崩。
-    internal static bool GenerateMipmap(GlInterface gl, int target)
-    {
-        IntPtr entry = gl.GetProcAddress("glGenerateMipmap");
-        if (entry == IntPtr.Zero)
-        {
-            return false;
-        }
-
-        Marshal.GetDelegateForFunctionPointer<GenerateMipmapDelegate>(entry)(target);
-        return true;
-    }
-
     // GL 的 C 原型在 Windows 上就是 stdcall（x64 上只有一种调用约定，这一栏写什么都一样，
     // 但签名本身必须与原型逐项对上）。这与项目里已有那条 glReadPixels 的写法保持一致。
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
@@ -150,7 +133,4 @@ internal static class GlRaw
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate void ReadPixelsDelegate(int x, int y, int width, int height, int format, int type, IntPtr pixels);
-
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate void GenerateMipmapDelegate(int target);
 }

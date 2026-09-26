@@ -222,7 +222,7 @@ public partial class Previewer
         return (origin, Vector3.Normalize(farWorld - nearWorld));
     }
 
-    // 装填一个有贴图的网格（pos3+normal3+uv2 交错）与它采样的 RGBA 图集。
+    // 装填一个有贴图的网格（pos3+normal3+uv2 交错）与它采样的 RGBA 图集（含 mip 链）。
     // 这是宿主把投影数据送进渲染的唯一口子：网格与图集一次装齐——uv 是按那张图集算出来的，
     // 分两个口子装就会出现「顶点已是新 uv、纹理还是上一张」的一帧，画面上只是颜色错乱一闪。
     // 全部 null 是清空（卸掉模型），清空之后画演示立方体。
@@ -230,7 +230,7 @@ public partial class Previewer
     // 这里只拷贝托管副本、不发任何 GL 调用：控件可能还没走到 OnOpenGlInit
     // （宿主在窗口内容加载完就装数据是合法的），上下文在不在不由调用方操心。
     // 那种情况下数据先存在 _pendingMesh 里，init 建好渲染器后推过去。
-    public void SetMesh(float[]? vertices, int[]? indices, byte[]? atlasRgba, int atlasWidth, int atlasHeight)
+    public void SetMesh(float[]? vertices, int[]? indices, byte[][]? atlasLevels, int atlasWidth, int atlasHeight)
     {
         Debug.Assert(
             Environment.CurrentManagedThreadId == _uiThreadId,
@@ -239,19 +239,19 @@ public partial class Previewer
 
         if (_meshRenderer is null)
         {
-            _pendingMesh = (vertices, indices, atlasRgba, atlasWidth, atlasHeight);
+            _pendingMesh = (vertices, indices, atlasLevels, atlasWidth, atlasHeight);
             Debug.WriteLine(
                 $"[PREVIEWER][gl.mesh.set] 上下文未初始化，先暂存 " +
                 $"vertices={vertices?.Length.ToString() ?? "null"} atlas={atlasWidth}x{atlasHeight}");
             return;
         }
 
-        _meshRenderer.Load(vertices, indices, atlasRgba, atlasWidth, atlasHeight);
+        _meshRenderer.Load(vertices, indices, atlasLevels, atlasWidth, atlasHeight);
     }
 
     // init 之前到达的装填。四元组与 SetMesh 入参一致；null 表示「暂存的也是清空请求」，
     // 这种请求本来就不需要暂存，所以只会在有真数据时出现。
-    private (float[]? Vertices, int[]? Indices, byte[]? Atlas, int Width, int Height)? _pendingMesh;
+    private (float[]? Vertices, int[]? Indices, byte[][]? AtlasLevels, int Width, int Height)? _pendingMesh;
 
     private CameraState _camera = CameraState.Default;
 

@@ -301,7 +301,7 @@ public partial class MainWindow : Window, IViewModeHost
         Viewport.SetMesh(
             empty ? null : document.MergedVertices,
             empty ? null : document.MergedIndices,
-            empty ? null : document.AtlasRgba,
+            empty ? null : document.AtlasLevels,
             empty ? 0 : document.AtlasWidth,
             empty ? 0 : document.AtlasHeight);
 

@@ -14,11 +14,12 @@ public sealed class TextureAtlas
 {
     private readonly Dictionary<string, SpriteRect> _rects;
 
-    private TextureAtlas(int width, int height, byte[] pixels, Dictionary<string, SpriteRect> rects, List<string> missingSprites)
+    private TextureAtlas(int width, int height, byte[][] levels, Dictionary<string, SpriteRect> rects, List<string> missingSprites)
     {
         Width = width;
         Height = height;
-        Pixels = pixels;
+        Levels = levels;
+        Pixels = levels[0];
         _rects = rects;
         MissingCount = missingSprites.Count;
         MissingSprites = [.. missingSprites];
@@ -27,6 +28,12 @@ public sealed class TextureAtlas
     public int Width { get; }
     public int Height { get; }
     public byte[] Pixels { get; }
+
+    // mip 链：Levels[0] 是原图，之后每级尺寸减半，最多 MaxMipLevels+1 级。
+    // 上传走逐层 TexImage2D，绝不用 glGenerateMipmap——它把整张图集一路压到 1x1，
+    // 深层会把相邻 sprite 混进同一个纹素：alpha 被稀释过 0.5 就被 cutout discard
+    // 丢光，整个面凭空消失（铁块面空就是这个）。每 sprite 独立缩、限层数是 MC 的做法。
+    public byte[][] Levels { get; }
     public int MissingCount { get; }
 
     // 缺的是哪几张：包栈覆盖面有缺口时（原版没有、材质包也没补），名单是唯一的排查入口。
@@ -116,68 +123,216 @@ public sealed class TextureAtlas
         }
 
         int atlasHeight = Pow2Ceiling(cursorY + rowHeight);
-        byte[] pixels = new byte[atlasWidth * atlasHeight * 4];
+
+        // 层数 = min(上限, 图集边长能减半的次数)。4 级是 MC 的默认档：
+        // 16px sprite 到第 4 级正好 1x1，再深只会把整张图集搅成一锅。
+        int levelCount = 0;
+        while (levelCount < MaxMipLevels &&
+               (atlasWidth >> (levelCount + 1)) >= 1 &&
+               (atlasHeight >> (levelCount + 1)) >= 1)
+        {
+            levelCount++;
+        }
+
+        byte[][] levels = new byte[levelCount + 1][];
+        levels[0] = new byte[atlasWidth * atlasHeight * 4];
+        for (int level = 1; level <= levelCount; level++)
+        {
+            int lw = Math.Max(1, atlasWidth >> level);
+            int lh = Math.Max(1, atlasHeight >> level);
+            levels[level] = new byte[lw * lh * 4];
+        }
+
         foreach ((string sprite, byte[] rgba, int w, int h) in decoded)
         {
             SpriteRect rect = rects[sprite];
-            for (int row = 0; row < h; row++)
+            Debug.Assert(
+                (long)rgba.Length == (long)w * h * 4,
+                $"[ASSETS][atlas] 源数据不够 sprite={sprite} w={w} h={h} bytes={rgba.Length} " +
+                $"expected={(long)w * h * 4}");
+
+            // 先做带留白的独立副本（内区 + 边缘外扩），所有 mip 层都从它出：
+            // 层 0 直接 blit 进图集；深层各自减半后 blit 到对应层的落位。
+            // 之前把外扩直接写在图集上再 glGenerateMipmap 整图压缩，深层必然串到邻居。
+            byte[] padded = MakePadded(rgba, w, h, Pad);
+
+            byte[] chain = padded;
+            int cw = w + Pad * 2;
+            int ch = h + Pad * 2;
+            for (int level = 0; level <= levelCount && cw > 0 && ch > 0; level++)
             {
-                int source = row * w * 4;
-                int target = (((rect.Y + row) * atlasWidth) + rect.X) * 4;
-                // 越界说明装箱的落位与数据形状对不上（解码尺寸或首帧裁剪出了错）；
-                // BlockCopy 的报错不带 sprite 名，先在这里把它钉出来。
-                Debug.Assert(
-                    source + (w * 4) <= rgba.Length,
-                    $"[ASSETS][atlas] 源数据不够 sprite={sprite} w={w} h={h} bytes={rgba.Length} " +
-                    $"expected={(long)w * h * 4}");
-                Debug.Assert(
-                    rect.Y + row < atlasHeight && rect.X + w <= atlasWidth,
-                    $"[ASSETS][atlas] 落位越界 sprite={sprite} rect=({rect.X},{rect.Y},{w},{h}) " +
-                    $"atlas={atlasWidth}x{atlasHeight}");
-                Buffer.BlockCopy(rgba, source, pixels, target, w * 4);
-            }
-
-            ExtrudeEdges(pixels, atlasWidth, atlasHeight, rect.X, rect.Y, w, h, Pad);
-        }
-
-        return new TextureAtlas(atlasWidth, atlasHeight, pixels, rects, missing);
-    }
-
-    // 把 sprite 内区的边缘像素向外复制 pad 圈（含四角）。mipmap 缩小采样时
-    // 越出 sprite 的 UV 落在这些复制出来的像素上，采到的是自己的边缘色而不是邻居的。
-    private static void ExtrudeEdges(byte[] pixels, int atlasWidth, int atlasHeight, int x, int y, int w, int h, int pad)
-    {
-        for (int dy = -pad; dy < h + pad; dy++)
-        {
-            int targetY = y + dy;
-            if ((uint)targetY >= (uint)atlasHeight)
-            {
-                continue;
-            }
-
-            // 源行 clamp 进内区：留白圈之外的 dy 全部取内区最靠边的行。
-            int sourceY = y + Math.Clamp(dy, 0, h - 1);
-            for (int dx = -pad; dx < w + pad; dx++)
-            {
-                if (dx >= 0 && dx < w && dy >= 0 && dy < h)
+                if (level > 0)
                 {
-                    continue; // 内区本体不动
+                    chain = Downsample2x(chain, cw, ch, out cw, out ch);
                 }
 
-                int targetX = x + dx;
-                if ((uint)targetX >= (uint)atlasWidth)
+                Blit(
+                    chain, cw, ch,
+                    levels[level],
+                    Math.Max(1, atlasWidth >> level),
+                    Math.Max(1, atlasHeight >> level),
+                    (rect.X - Pad) >> level,
+                    (rect.Y - Pad) >> level);
+            }
+        }
+
+        return new TextureAtlas(atlasWidth, atlasHeight, levels, rects, missing);
+    }
+
+    private const int MaxMipLevels = 4;
+
+    // sprite 内区四周复制 pad 圈边缘像素（含四角），返回 (w+2pad)x(h+2pad) 的新图。
+    private static byte[] MakePadded(byte[] rgba, int w, int h, int pad)
+    {
+        int pw = w + pad * 2;
+        int ph = h + pad * 2;
+        byte[] padded = new byte[pw * ph * 4];
+        for (int dy = -pad; dy < h + pad; dy++)
+        {
+            int sourceY = Math.Clamp(dy, 0, h - 1);
+            for (int dx = -pad; dx < w + pad; dx++)
+            {
+                int sourceX = Math.Clamp(dx, 0, w - 1);
+                int source = ((sourceY * w) + sourceX) * 4;
+                int target = (((dy + pad) * pw) + (dx + pad)) * 4;
+                padded[target] = rgba[source];
+                padded[target + 1] = rgba[source + 1];
+                padded[target + 2] = rgba[source + 2];
+                padded[target + 3] = rgba[source + 3];
+            }
+        }
+
+        return padded;
+    }
+
+    // 2x2 盒式压缩。RGB 按 alpha 加权平均（孔洞不把颜色拖黑），alpha 取平均；
+    // 之后补一轮膨胀：透明纹素只要有不透明邻居就借邻居的颜色——
+    // 没有这一步，树叶这类挖孔贴图的 alpha 逐层减半，缩到远处就被
+    // cutout discard 丢光，整片树叶凭空消失。
+    private static byte[] Downsample2x(byte[] src, int w, int h, out int nw, out int nh)
+    {
+        nw = Math.Max(1, w >> 1);
+        nh = Math.Max(1, h >> 1);
+        byte[] dst = new byte[nw * nh * 4];
+        for (int y = 0; y < nh; y++)
+        {
+            for (int x = 0; x < nw; x++)
+            {
+                int r = 0, g = 0, b = 0, a = 0, weight = 0;
+                for (int dy = 0; dy < 2; dy++)
+                {
+                    int sy = Math.Min((y * 2) + dy, h - 1);
+                    for (int dx = 0; dx < 2; dx++)
+                    {
+                        int sx = Math.Min((x * 2) + dx, w - 1);
+                        int source = ((sy * w) + sx) * 4;
+                        int sa = src[source + 3];
+                        if (sa > 0)
+                        {
+                            r += src[source] * sa;
+                            g += src[source + 1] * sa;
+                            b += src[source + 2] * sa;
+                        }
+
+                        a += sa;
+                        weight++;
+                    }
+                }
+
+                int target = ((y * nw) + x) * 4;
+                if (a > 0)
+                {
+                    dst[target] = (byte)(r / a);
+                    dst[target + 1] = (byte)(g / a);
+                    dst[target + 2] = (byte)(b / a);
+                }
+
+                dst[target + 3] = (byte)(a / weight);
+            }
+        }
+
+        DilateAlpha(dst, nw, nh);
+        return dst;
+    }
+
+    // 一轮 4 邻域膨胀：alpha < 32 的纹素取不透明邻居（>=128）的平均颜色，
+    // alpha 拉满。挖孔贴图的 mip 链靠它保持「孔在远处收拢而不是整片消失」。
+    private static void DilateAlpha(byte[] img, int w, int h)
+    {
+        byte[] snapshot = (byte[])img.Clone();
+        for (int y = 0; y < h; y++)
+        {
+            for (int x = 0; x < w; x++)
+            {
+                int index = ((y * w) + x) * 4;
+                if (snapshot[index + 3] >= 32)
                 {
                     continue;
                 }
 
-                int sourceX = x + Math.Clamp(dx, 0, w - 1);
-                int source = ((sourceY * atlasWidth) + sourceX) * 4;
-                int target = ((targetY * atlasWidth) + targetX) * 4;
-                pixels[target] = pixels[source];
-                pixels[target + 1] = pixels[source + 1];
-                pixels[target + 2] = pixels[source + 2];
-                pixels[target + 3] = pixels[source + 3];
+                int r = 0, g = 0, b = 0, count = 0;
+                for (int dy = -1; dy <= 1; dy++)
+                {
+                    int ny = y + dy;
+                    if ((uint)ny >= (uint)h)
+                    {
+                        continue;
+                    }
+
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        int nx = x + dx;
+                        if ((uint)nx >= (uint)w || (dx == 0 && dy == 0))
+                        {
+                            continue;
+                        }
+
+                        int source = ((ny * w) + nx) * 4;
+                        if (snapshot[source + 3] < 128)
+                        {
+                            continue;
+                        }
+
+                        r += snapshot[source];
+                        g += snapshot[source + 1];
+                        b += snapshot[source + 2];
+                        count++;
+                    }
+                }
+
+                if (count > 0)
+                {
+                    img[index] = (byte)(r / count);
+                    img[index + 1] = (byte)(g / count);
+                    img[index + 2] = (byte)(b / count);
+                    img[index + 3] = 255;
+                }
             }
+        }
+    }
+
+    // 把独立 sprite 图拷进某一 mip 层的图集，越层边界裁掉。
+    // 落位坐标 >> level 后可能不对齐 1px，clamp 保证不越界即可：
+    // 深层的落位误差影响的是收拢期的 1px 边缘，肉眼不可见。
+    private static void Blit(byte[] src, int w, int h, byte[] dst, int dstW, int dstH, int ox, int oy)
+    {
+        for (int row = 0; row < h; row++)
+        {
+            int ty = oy + row;
+            if ((uint)ty >= (uint)dstH)
+            {
+                continue;
+            }
+
+            int columns = Math.Min(w, dstW - ox);
+            if (columns <= 0)
+            {
+                continue;
+            }
+
+            int source = row * w * 4;
+            int target = ((ty * dstW) + ox) * 4;
+            Buffer.BlockCopy(src, source, dst, target, columns * 4);
         }
     }
 

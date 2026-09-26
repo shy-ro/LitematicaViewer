@@ -149,7 +149,7 @@ public partial class Previewer : OpenGlControlBase, ICustomHitTest
             {
                 _pendingMesh = null;
                 _meshRenderer.Load(
-                    pending.Vertices, pending.Indices, pending.Atlas, pending.Width, pending.Height);
+                    pending.Vertices, pending.Indices, pending.AtlasLevels, pending.Width, pending.Height);
             }
         }
     }
