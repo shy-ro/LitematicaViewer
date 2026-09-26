@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>LitematicaViewer.Meshing</RootNamespace>
+    <AssemblyName>LitematicaViewer.Meshing</AssemblyName>
+    <OutputType Condition="'$(Configuration)' == 'Debug'">Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\LitematicaViewer.Assets\LitematicaViewer.Assets.csproj" />
+    <ProjectReference Include="..\LitematicaViewer.Core\LitematicaViewer.Core.csproj" />
+  </ItemGroup>
+
+</Project>

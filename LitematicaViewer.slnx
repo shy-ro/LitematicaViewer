@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/LitematicaViewer.Assets/LitematicaViewer.Assets.csproj" />
     <Project Path="src/LitematicaViewer.Core/LitematicaViewer.Core.csproj" />
+    <Project Path="src/LitematicaViewer.Meshing/LitematicaViewer.Meshing.csproj" />
     <Project Path="src/LitematicaViewer.Previewer.Sample/LitematicaViewer.Previewer.Sample.csproj" />
     <Project Path="src/LitematicaViewer.Previewer/LitematicaViewer.Previewer.csproj" />
   </Folder>
