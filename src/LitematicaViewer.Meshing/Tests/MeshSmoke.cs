@@ -171,7 +171,9 @@ public static class MeshSmoke
                         $"{document.TotalBlocks} 方块、{sprites.Count} 张 sprite");
 
         TextureAtlas atlas = TextureAtlas.Build(_packs, sprites);
-        Debug.WriteLine($"[MESH][smoke] 图集 {atlas.Width}x{atlas.Height}（缺 {atlas.MissingCount} 张）");
+        Debug.WriteLine(
+            $"[MESH][smoke] 图集 {atlas.Width}x{atlas.Height}（缺 {atlas.MissingCount} 张" +
+            (atlas.MissingCount > 0 ? $"：{string.Join(", ", atlas.MissingSprites)}）" : "）"));
 
         BlockMeshBuilder builder = new(_resolver, atlas);
         long totalFaces = 0;

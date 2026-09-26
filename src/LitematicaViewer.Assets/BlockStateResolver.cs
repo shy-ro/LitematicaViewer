@@ -234,6 +234,15 @@ public sealed class BlockStateResolver
                     {
                         textures[entry.Name] = entry.Value.GetString()!;
                     }
+                    else if (entry.Value.ValueKind == JsonValueKind.Object &&
+                             entry.Value.TryGetProperty("sprite", out JsonElement spriteElement) &&
+                             spriteElement.ValueKind == JsonValueKind.String)
+                    {
+                        // 26.3 的新写法：值可以是 {"sprite": "...", "force_translucent": ...}
+                        // 这样的对象（原版 glass 就在用）。贴图表里只关心 sprite 一项；
+                        // 对象值静默丢弃的话，引用它的一条链全断，画面上是一块品红。
+                        textures[entry.Name] = spriteElement.GetString()!;
+                    }
                 }
             }
 
@@ -353,10 +362,14 @@ public sealed class BlockStateResolver
                         }
                     }
 
-                    if (sprite is null)
+                    if (sprite is null || sprite.StartsWith('#'))
                     {
-                        // 解不开的引用（模型写错或 mod 资产残缺）记日志给空 sprite，
+                        // 两种解不开：表里没有那个键（sprite 保持 null 或仍是原引用），
+                        // 或迭代到上限还在引用里打转。统一记日志给空 sprite，
                         // 网格阶段把它当「这面没有贴图」处理，不炸整个模型。
+                        // 不加这个判断的话，断在半路的引用会带着 "#" 逃进 NormalizeSprite，
+                        // 变成 "minecraft:#all" 这样的假 sprite 名，图集为它放一张棋盘格、
+                        // 网格照常出面——画面上是一块品红，而日志里什么都没有。
                         Debug.WriteLine($"[ASSETS][resolve] 贴图引用解不开 model={modelId} ref={textureRef}");
                         sprite = "";
                     }

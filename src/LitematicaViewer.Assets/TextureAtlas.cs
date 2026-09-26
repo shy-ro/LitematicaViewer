@@ -13,19 +13,23 @@ public sealed class TextureAtlas
 {
     private readonly Dictionary<string, SpriteRect> _rects;
 
-    private TextureAtlas(int width, int height, byte[] pixels, Dictionary<string, SpriteRect> rects, int missingCount)
+    private TextureAtlas(int width, int height, byte[] pixels, Dictionary<string, SpriteRect> rects, List<string> missingSprites)
     {
         Width = width;
         Height = height;
         Pixels = pixels;
         _rects = rects;
-        MissingCount = missingCount;
+        MissingCount = missingSprites.Count;
+        MissingSprites = [.. missingSprites];
     }
 
     public int Width { get; }
     public int Height { get; }
     public byte[] Pixels { get; }
     public int MissingCount { get; }
+
+    // 缺的是哪几张：包栈覆盖面有缺口时（原版没有、材质包也没补），名单是唯一的排查入口。
+    public IReadOnlyList<string> MissingSprites { get; }
 
     public IReadOnlyCollection<SpriteRect> Rects => _rects.Values;
 
@@ -36,7 +40,7 @@ public sealed class TextureAtlas
     public static TextureAtlas Build(PackStack packs, IEnumerable<string> sprites)
     {
         List<(string Sprite, byte[] Rgba, int W, int H)> decoded = [];
-        int missing = 0;
+        List<string> missing = [];
 
         foreach (string sprite in sprites.Distinct().OrderBy(s => s, StringComparer.Ordinal))
         {
@@ -67,7 +71,7 @@ public sealed class TextureAtlas
                 }
 
                 decoded.Add((sprite, checker, side, side));
-                missing++;
+                missing.Add(sprite);
             }
         }
 
