@@ -16,5 +16,13 @@ tools/
 packs/
 
 # 逐方块预览输出（6841 张 PNG，--preview 可随时重新生成）与截帧
-blockpreviews/
+blockpreviews*/
 *.ppm
+
+# 诊断产物：--montage 出的拼图与索引、报告、本机查图用的临时 PNG
+montage_*.png
+montage_*.txt
+audit_probe.png
+audit_probe.txt
+_report.txt
+

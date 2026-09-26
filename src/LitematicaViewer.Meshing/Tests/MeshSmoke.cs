@@ -23,6 +23,13 @@ public static class MeshSmoke
             return PreviewBlocks.Run(args[1], [.. args.Skip(2)]);
         }
 
+        // --montage <out.png> [过滤] [格边长] [上限] <资源包...>：同一条 Render 链路
+        // 拼成网格大图，快速人检某类方块（见 PreviewBlocks.RunMontage）。
+        if (args.Length >= 2 && args[0] == "--montage")
+        {
+            return PreviewBlocks.RunMontage(args);
+        }
+
         using TextWriterTraceListener listener = new(Console.Out);
         Trace.Listeners.Add(listener);
         Trace.AutoFlush = true;
