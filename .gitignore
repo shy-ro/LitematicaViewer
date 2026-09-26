@@ -14,3 +14,7 @@ tools/
 
 # 原版与材质包缓存，体积大且可重新下载，不进仓库
 packs/
+
+# 逐方块预览输出（6841 张 PNG，--preview 可随时重新生成）与截帧
+blockpreviews/
+*.ppm

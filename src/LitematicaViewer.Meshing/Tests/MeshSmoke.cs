@@ -17,6 +17,12 @@ public static class MeshSmoke
 
     public static int Main(string[] args)
     {
+        // --preview <outDir> <资源包...>：逐方块状态出三面视图 PNG（见 PreviewBlocks）。
+        if (args.Length >= 2 && args[0] == "--preview")
+        {
+            return PreviewBlocks.Run(args[1], [.. args.Skip(2)]);
+        }
+
         using TextWriterTraceListener listener = new(Console.Out);
         Trace.Listeners.Add(listener);
         Trace.AutoFlush = true;
