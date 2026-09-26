@@ -291,11 +291,19 @@ public partial class MainWindow : Window, IViewModeHost
 
         // 自由视角的相机对准整体：距离用展台同一条取景算式（系数只有一份），
         // 朝向不动——视线本来就该指向它，位置照 (目标, 视线, 距离) 反解。
+        //
+        // 远平面按模型尺寸重设：CameraState 默认 far=100 是给演示立方体的，而展台缩放
+        // 上限是 radius*12——半径超过 ~8 的模型一拉远，超出 100 的那截就被投影矩阵
+        // 裁掉，症状是转视角时模型缺一块（我们根本没做视锥剔除，别往那查）。
+        // radius*20 再加余量：覆盖最大缩放 + 模型半径 + 光环。
+        float far = MathF.Max(100f, document.WholeRadius * 20f + 64f);
+        _camera.Reset(_camera.Camera with { Far = far });
         _camera.FrameTurntable(
             document.WholeCentre,
             TurntableController.DefaultPitch,
             document.WholeRadius * TurntableController.FrameFactor);
         Viewport.SetCamera(_camera.Camera);
+        Debug.WriteLine($"[SAMPLE][source] 取景 far={far:F1} radius={document.WholeRadius:F2}");
 
         // 如果展台正开着，旧控制器手里的目标表还是载入前那份：拆了重进一次，
         // 让光环与取景跟着新表走。手动走 EnterFreeLook/EnterShowcase 而不是 ToggleMode，
