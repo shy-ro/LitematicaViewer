@@ -310,11 +310,14 @@ public sealed class BlockMeshBuilder
     private static Vector3 RotateAround(Vector3 v, int axis, float degrees, Vector3 origin) =>
         Rotate(v - origin, axis, degrees) + origin;
 
-    // 右手系、绕正轴逆时针。MC variant/element 的旋转符号是否同向，由
-    // oak_log[axis=x] 的冒烟断言（端面帽必须朝 ±X）钉着，反了就改这里。
+    // MC 的 variant/element 旋转角是「从轴正端看顺时针」（furnace facing=east 的
+    // y=90 必须把北面转到东面；ladder facing=east 的 y=90 必须把贴面从南缘转到西缘），
+    // 换成右手系向量数学就是取负角。正角会把 y=90/270 的方块镜像到格子的另一侧
+    // （东西向梯子悬空、按钮贴错边），南北向（0/180）恰好自逆掩盖了半个世纪。
+    // oak_log[axis=x] 的冒烟断言端面朝 ±X，对符号不敏感，改符号后仍然钉着顺序约定。
     private static Vector3 Rotate(Vector3 v, int axis, float degrees)
     {
-        float radians = degrees * MathF.PI / 180f;
+        float radians = -degrees * MathF.PI / 180f;
         float cos = MathF.Cos(radians);
         float sin = MathF.Sin(radians);
         return axis switch
