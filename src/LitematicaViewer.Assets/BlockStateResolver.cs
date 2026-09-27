@@ -91,18 +91,37 @@ public sealed class BlockStateResolver
             // 不会匹配两个键，多收是我们解析器的错，交给断言盯着。
             if (!Matches(entry.Name, properties)) continue;
 
-            switch (entry.Value.ValueKind)
-            {
-                case JsonValueKind.Object:
-                    AddVariant(entry.Value, blockName, output);
-                    break;
-                case JsonValueKind.Array:
-                    foreach (var item in entry.Value.EnumerateArray()) AddVariant(item, blockName, output);
-                    break;
-                default:
-                    Debug.WriteLine($"[ASSETS][resolve] variants 值类型异常 kind={entry.Value.ValueKind} key={entry.Name}");
-                    break;
-            }
+            AddEntry(entry.Value, blockName, output);
+            return;
+        }
+
+        // 精确匹配全灭：状态缺属性（有的工具写 litematic 不带全属性，如 piston_head
+        // 缺 type）。MC 语义该按默认值匹配，我们没有属性默认值表，退而求其次——
+        // 对键里状态没有的属性按通配收第一个命中的 variant：对这类块 JSON 首个
+        // 命中通常就是原版默认值，远好过整块消失。完整状态的文件永远走不到这里。
+        foreach (var entry in variants.EnumerateObject())
+        {
+            if (!MatchesLenient(entry.Name, properties)) continue;
+
+            Debug.WriteLine($"[ASSETS][resolve] 精确匹配全灭，按通配兜底 key={entry.Name} block={blockName}");
+            AddEntry(entry.Value, blockName, output);
+            return;
+        }
+    }
+
+    private void AddEntry(JsonElement variant, string blockName, List<ResolvedVariant> output)
+    {
+        switch (variant.ValueKind)
+        {
+            case JsonValueKind.Object:
+                AddVariant(variant, blockName, output);
+                break;
+            case JsonValueKind.Array:
+                foreach (var item in variant.EnumerateArray()) AddVariant(item, blockName, output);
+                break;
+            default:
+                Debug.WriteLine($"[ASSETS][resolve] variants 值类型异常 kind={variant.ValueKind}");
+                break;
         }
     }
 
@@ -162,6 +181,22 @@ public sealed class BlockStateResolver
         {
             var parts = pair.Split('=', 2);
             if (parts.Length != 2 || !properties.TryGetValue(parts[0], out var value) || value != parts[1])
+                return false;
+        }
+
+        return true;
+    }
+
+    // 宽松匹配：键里状态没有的属性按通配处理（状态缺属性时的兜底；见 ResolveVariants）。
+    private static bool MatchesLenient(string key, ImmutableDictionary<string, string> properties)
+    {
+        if (key.Length == 0) return true;
+
+        foreach (var pair in key.Split(','))
+        {
+            var parts = pair.Split('=', 2);
+            if (parts.Length != 2) return false;
+            if (properties.TryGetValue(parts[0], out var value) && value != parts[1])
                 return false;
         }
 
