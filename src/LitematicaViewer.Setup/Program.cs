@@ -90,10 +90,13 @@ internal static class Program
         var exePath = Path.Combine(InstallDir, "LitematicaViewer.Setup.exe");
         File.Copy(Environment.ProcessPath!, exePath, overwrite: true);
 
-        // 预览 handler 的最小注册面：SystemFileAssociations shellex + CLSID + AppID。
-        // shellex 必须挂 SystemFileAssociations\.ext（文档定义的按扩展名位置）——
-        // 裸 HKCR\.ext\shellex 不在现代查找链里，且没有 ProgID 时扩展名不构成文件类。
-        // 故意不写默认 ProgID / shell\open——不做双击关联。
+        // 预览 handler 注册（实战检验的路线：专用 ProgID + shellex 挂 ProgID 下）。
+        // ProgID 故意不带 shell\open：双击仍是系统「选择打开方式」弹窗，不绑定程序。
+        // SystemFileAssociations 那份是保险带（文档定义的按扩展名位置），留着无害。
+        SetValues(rf(@"Software\Classes\LitematicaViewer.Projection"),
+            ("", "Litematica Projection File"));
+        SetValues(rf($@"Software\Classes\LitematicaViewer.Projection\shellex\{PreviewIid}"), ("", Clsid));
+        SetValues(rf(@"Software\Classes\.litematic"), ("", "LitematicaViewer.Projection"));
         SetValues(rf($@"Software\Classes\SystemFileAssociations\.litematic\shellex\{PreviewIid}"), ("", Clsid));
         SetValues(rf($@"Software\Classes\CLSID\{Clsid}"),
             ("", "Litematica Preview Handler"),
@@ -144,14 +147,15 @@ internal static class Program
             return;
         }
 
-        // 只删自己注册的东西；两个历史挂点都清（SystemFileAssociations 现行 + 裸扩展名旧版）。
+        // 只删自己注册的东西；历史挂点一并清。
         Log("uninstall-go: deleting registry");
+        TryDelete(rf(@"Software\Classes\LitematicaViewer.Projection"));
+        TryDelete(rf(@"Software\Classes\.litematic"));
         TryDelete(rf($@"Software\Classes\SystemFileAssociations\.litematic\shellex\{PreviewIid}"));
         TryDelete(rf(@"Software\Classes\SystemFileAssociations\.litematic\shellex"));
         TryDelete(rf(@"Software\Classes\SystemFileAssociations\.litematic"));
         TryDelete(rf($@"Software\Classes\.litematic\shellex\{PreviewIid}"));
         TryDelete(rf(@"Software\Classes\.litematic\shellex"));
-        TryDelete(rf(@"Software\Classes\.litematic"));
         TryDelete(rf($@"Software\Classes\CLSID\{Clsid}"));
         TryDelete(rf($@"Software\Classes\AppID\{Clsid}"));
         TryDelete(rf($@"Software\Microsoft\Windows\CurrentVersion\Uninstall\{UninstallKeyName}"));
