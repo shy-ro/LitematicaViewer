@@ -153,13 +153,21 @@ internal static class FallbackModels
     // 64x64 实体贴图的 uv 换算：1 uv 单位（0..16 的面坐标）= 贴图 4px。
     private const float EntitySheetUnitsPerPixel = 4f;
 
-    // 64x64 实体贴图上的箱子。几何与 uv 区域按原版 ChestModel 抄：盖 texOffs(0,0)
-    // 14x5、身 texOffs(0,19) 14x10，展开图里 up/down 同排在 y0..14（盖）与
-    // y19..33（身），侧面横条在 y14..19 / y33..43。uv 单位 = 贴图 4px。
-    // 正面取 facing 属性（原版锁舌在模型 +Z，即 canonical 正面朝南）；
-    // type=left/right 是双箱半体：各 15 宽、外侧缩 1px，对接成 30px 连体。
-    // 贴图继续用整张（_left/_right 半张的条带布局不同，左半张缺 0..14 段，
-    // 直接搬会采进透明区被 cutout 吃出洞；整张的条带四面齐全）。
+    // 展开图区域之间紧挨着完全不同的内容（盖顶旁边就是暗色盖底/透明区），
+    // uv 压在区域边界上线性采样会混进 50% 邻居：双箱接缝整列发暗、邻透明区
+    // 的边被 cutout 吃出细洞。所有区域四边内缩半像素，采 texel 中心。
+    private const float RegionInsetPx = 0.5f;
+
+    // 64x64 实体贴图上的箱子。展开图区域逐像素比对过（normal/_left/_right 三张
+    // 互相印证）：第一方块是暗的内部（盖底/箱内地板），第二方块才是亮的顶面，
+    // 条带面序是 [西][南=正面][东][北]——半张图里 left 缺西段、right 缺东段，
+    // 正是各自的接缝面留白，由此反推出条带里东西的归属。原版反编译确认
+    // ChestType.LEFT 的搭档在 facing 顺时针方向，canonical（正面朝南）下
+    // left 是东侧半块、接缝在西缘。
+    // 双箱贴 _left/_right 半张展开图（15 宽盒的标准 unwrap），两个半张拼起来
+    // 才是连续的大盖面；贴整张会让每个半块都带完整边框，看着像两个单箱。
+    // 半张缺失（ender 等只有整张的）退回整张：盒宽仍 15、按 w=14 采样，轻微
+    // 拉伸好过采进透明区。
     private static ResolvedBlockModel Chest(string modelId, string spriteBase,
         ImmutableDictionary<string, string> properties)
     {
@@ -170,49 +178,84 @@ internal static class FallbackModels
         var isLeft = type == "left";
         var isRight = type == "right";
         var wide = isLeft || isRight;
+        var useHalves = wide && SpriteHasHalves(spriteBase);
+        var sprite = useHalves ? spriteBase + (isLeft ? "_left" : "_right") : spriteBase;
 
-        // canonical：正面朝南（+Z）。南=正面条带，北=背面，东=半箱外侧端面
-        // （canonical 里 chest 朝南时其左手边是东），西=接缝侧。
-        (FaceName face, float x0, float y0, float x1, float y1)[] lidFaces =
-        [
-            (FaceName.Up, 14, 0, 28, 14),
-            (FaceName.Down, 28, 0, 42, 14),
-            (FaceName.South, 42, 14, 56, 19),
-            (FaceName.North, 14, 14, 28, 19),
-            (FaceName.East, 0, 14, 14, 19),
-            (FaceName.West, 28, 14, 42, 19),
-        ];
-        (FaceName face, float x0, float y0, float x1, float y1)[] bodyFaces =
-        [
-            (FaceName.Up, 14, 19, 28, 33),
-            (FaceName.Down, 28, 19, 42, 33),
-            (FaceName.South, 42, 33, 56, 43),
-            (FaceName.North, 14, 33, 28, 43),
-            (FaceName.East, 0, 33, 14, 43),
-            (FaceName.West, 28, 33, 42, 43),
-        ];
-
-        // canonical 盒：进深 z 1..15（正面在 z=15）；宽度 single 1..15，
-        // 半箱 15 宽——left 在东（+X）侧、外缘缩 1px（x 0..15），right 镜像（x 1..16）。
+        // canonical 盒：进深 z 1..15（正面在 z=15）；single 宽 1..15；半箱 15 宽，
+        // left 对接缝（西缘）齐平、外缘缩 1px（x 0..15），right 镜像（x 1..16）。
         var x0 = isLeft ? 0 : 1;
         var x1 = isRight ? 16 : 15;
 
+        (FaceName face, float px0, float py0, float px1, float py1)[] lidRegions;
+        (FaceName face, float px0, float py0, float px1, float py1)[] bodyRegions;
+        if (useHalves)
+        {
+            lidRegions =
+            [
+                (FaceName.Up, 29, 0, 44, 14),
+                (FaceName.Down, 14, 0, 29, 14),
+                (FaceName.South, 14, 14, 29, 19),
+                (FaceName.North, 43, 14, 58, 19),
+                (FaceName.East, 29, 14, 43, 19),
+                (FaceName.West, 0, 14, 14, 19),
+            ];
+            bodyRegions =
+            [
+                (FaceName.Up, 29, 19, 44, 33),
+                (FaceName.Down, 14, 19, 29, 33),
+                (FaceName.South, 14, 33, 29, 43),
+                (FaceName.North, 43, 33, 58, 43),
+                (FaceName.East, 29, 33, 43, 43),
+                (FaceName.West, 0, 33, 14, 43),
+            ];
+        }
+        else
+        {
+            lidRegions =
+            [
+                (FaceName.Up, 28, 0, 42, 14),
+                (FaceName.Down, 14, 0, 28, 14),
+                (FaceName.South, 14, 14, 28, 19),
+                (FaceName.North, 42, 14, 56, 19),
+                (FaceName.East, 28, 14, 42, 19),
+                (FaceName.West, 0, 14, 14, 19),
+            ];
+            bodyRegions =
+            [
+                (FaceName.Up, 28, 19, 42, 33),
+                (FaceName.Down, 14, 19, 28, 33),
+                (FaceName.South, 14, 33, 28, 43),
+                (FaceName.North, 42, 33, 56, 43),
+                (FaceName.East, 28, 33, 42, 43),
+                (FaceName.West, 0, 33, 14, 43),
+            ];
+        }
+
         List<ModelElement> elements =
         [
-            RotatedPart(new Vector3(x0, 9, 1), new Vector3(x1, 14, 15), lidFaces, spriteBase, facing),
-            RotatedPart(new Vector3(x0, 0, 1), new Vector3(x1, 9, 15), bodyFaces, spriteBase, facing),
+            RotatedPart(new Vector3(x0, 9, 1), new Vector3(x1, 14, 15), lidRegions, sprite, facing),
+            RotatedPart(new Vector3(x0, 0, 1), new Vector3(x1, 9, 15), bodyRegions, sprite, facing),
         ];
 
         if (!wide)
         {
-            // 锁舌：贴图左上 2x4，canonical 挂在南面（z 15..16）居中。
+            // 锁舌盒（2x4x1，texOffs(0,0)）的标准 unwrap 区域，正面（南）是唯一
+            // 2px 宽的 w 段，锁舌像素就画在那里。
             List<ElementFace> latchFaces = [];
             foreach (var face in new[]
                          { FaceName.Down, FaceName.Up, FaceName.North, FaceName.South, FaceName.West, FaceName.East })
             {
-                var uv = face == FaceName.South
-                    ? new Vector4(0, 0, 2 / EntitySheetUnitsPerPixel, 4 / EntitySheetUnitsPerPixel)
-                    : new Vector4(0, 0, 0.5f, 1f);
+                var uv = face switch
+                {
+                    FaceName.South => new Vector4(0.25f, 0.25f, 0.75f, 1.25f),
+                    FaceName.North => new Vector4(1f, 0.25f, 1.25f, 1.25f),
+                    FaceName.West => new Vector4(0f, 0.25f, 0.25f, 1.25f),
+                    FaceName.East => new Vector4(0.75f, 0.25f, 1f, 1.25f),
+                    FaceName.Down => new Vector4(0.25f, 0f, 0.75f, 0.25f),
+                    _ => new Vector4(0.75f, 0f, 1.25f, 0.25f),
+                };
+                var inset = RegionInsetPx / EntitySheetUnitsPerPixel;
+                uv = new Vector4(uv.X + inset, uv.Y + inset, uv.Z - inset, uv.W - inset);
                 latchFaces.Add(new ElementFace(MapFace(face, facing), uv, spriteBase, null, -1, 0));
             }
 
@@ -223,11 +266,11 @@ internal static class FallbackModels
         return new ResolvedBlockModel(modelId, elements);
     }
 
-    // 1.20.1 就有左右半张的箱子贴图族；其余（铜箱等新客）保守用整张。
+    // 1.20.1 里只有 normal/trapped 两族有 _left/_right 半张；ender 没有半张
+    // （末影箱本就不能组双箱）。
     private static bool SpriteHasHalves(string spriteBase) =>
         spriteBase.Contains("normal", StringComparison.Ordinal) ||
-        spriteBase.Contains("trapped", StringComparison.Ordinal) ||
-        spriteBase.Contains("ender", StringComparison.Ordinal);
+        spriteBase.Contains("trapped", StringComparison.Ordinal);
 
     // canonical（正面朝南）→ 实际面名：绕 Y 把 +Z 转到 facing 方向。
     // Up/Down 不随水平旋转；六面必须显式全覆盖，兜底会把顶/底面也拧到南面
@@ -278,13 +321,32 @@ internal static class FallbackModels
         List<ElementFace> faces = [];
         foreach (var (face, x0, y0, x1, y1) in regions)
         {
-            var uv = new Vector4(x0 / EntitySheetUnitsPerPixel, y0 / EntitySheetUnitsPerPixel,
-                x1 / EntitySheetUnitsPerPixel, y1 / EntitySheetUnitsPerPixel);
-            faces.Add(new ElementFace(MapFace(face, facing), uv, sprite, null, -1, 0));
+            var uv = new Vector4((x0 + RegionInsetPx) / EntitySheetUnitsPerPixel,
+                (y0 + RegionInsetPx) / EntitySheetUnitsPerPixel,
+                (x1 - RegionInsetPx) / EntitySheetUnitsPerPixel,
+                (y1 - RegionInsetPx) / EntitySheetUnitsPerPixel);
+            // 顶/底面要补一个随朝向的 uv 旋转：水平旋转是刚体，贴图该跟着盒子转，
+            // 但网格层给顶/底面定 uv 轴用的是世界轴，预旋转几何后区域朝向对不上
+            // ——顶面贴图被转置+镜像，双箱接缝正好压上外缘深色边框列，看着像
+            // 中间有条黑缝。侧面（r=观察系右推得）恰好自洽，不用动。
+            faces.Add(new ElementFace(MapFace(face, facing), uv, sprite, null, -1, TopUvRotation(face, facing)));
         }
 
         var a = RotateXz(from, facing);
         var b = RotateXz(to, facing);
         return new ModelElement(Vector3.Min(a, b), Vector3.Max(a, b), null, faces);
     }
+
+    // 逐朝向展开 R⁻¹(世界uv轴) 与区域轴（Up: tu=+X/tv=+Z；Down: tu=+X/tv=-Z）
+    // 的对应关系得到的角点轮转量，语义与网格层 face rotation 一致
+    // （90°=uvA←uvD）。
+    private static int TopUvRotation(FaceName canonical, string facing) => (canonical, facing) switch
+    {
+        (FaceName.Up, "east") => 270,
+        (FaceName.Up, "west") => 90,
+        (FaceName.Down, "east") => 90,
+        (FaceName.Down, "west") => 270,
+        (_, "north") => 180,
+        _ => 0,
+    };
 }
