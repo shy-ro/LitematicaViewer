@@ -54,8 +54,19 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
     private System.Numerics.Vector3 _centre;
     private float _radius, _baseY;
 
-    private Scene? _pendingScene;
-    private string? _pendingError;
+    // 后台加载结果的交棒槽（Interlocked 只能换引用类型，包一层）。
+    // Generation 用来丢弃迟到的结果：结果在路上时用户又换了文件，
+    // 旧场景绝不能装进新画面。
+    private sealed class LoadResult
+    {
+        public Scene? Scene;
+        public string? Error;
+        public long Generation;
+    }
+
+    private LoadResult? _pendingResult;
+    private string? _loadedPath;   // 已经在装或装完的文件（重入判定）
+    private long _loadGeneration;
     private bool _ready;
     private string _status = "加载中…";
 
@@ -71,6 +82,9 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
     {
         _path = filePath;
         Exports.Log($"Initialize path={filePath} mode=0x{grfMode:X}");
+        // 宿主切换文件时复用同一实例（不 Unload 不重建窗口）：路径变了就当场重装，
+        // 等后面的 Show/DoPreview 再动就晚了——它们看到窗口活着什么都不做。
+        EnsureCurrentFileLoaded();
         return 0; // S_OK
     }
 
@@ -114,6 +128,7 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
             }
 
             SetTimer(_hwnd, 1, 16, 0);
+            EnsureCurrentFileLoaded();
             ShowWindow(_hwnd, 5); // SW_SHOW
         }
         catch (Exception ex)
@@ -166,8 +181,26 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
     public int DoPreview()
     {
         Exports.Log($"DoPreview path={_path}");
-        // 实际加载推迟到 Show（那里才确定窗口活着），这里只标记启动过。
+        // 有的宿主调用序里 DoPreview 才是「换文件」的信号（Initialize 早在建窗前
+        // 来过了）：这里再兜一次重入判定，两条路谁后到都能触发重装。
+        EnsureCurrentFileLoaded();
         return 0;
+    }
+
+    // 窗口活着且路径变了（或首次要装）→ 后台重装。幂等：同一路径重复调用是空操作。
+    private void EnsureCurrentFileLoaded()
+    {
+        if (_hwnd == 0 || _path is null)
+        {
+            return; // 窗口没建：Show 的首次路径负责
+        }
+
+        if (string.Equals(_path, _loadedPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return; // 已经在装或装完
+        }
+
+        StartLoad();
     }
 
     public int Unload()
@@ -312,6 +345,9 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
                 _turntable?.Drag(x - _lastX, y - _lastY);
                 _lastX = x;
                 _lastY = y;
+                // Drag 只转相机不画：拖动中 Tick 恒返回 false（不积分），不置脏
+                // 的话整个拖动过程渲染循环一帧不出，画面只靠系统零星 PAINT 蹦着走。
+                _needsRedraw = true;
                 return 0;
             }
 
@@ -466,9 +502,18 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
 
         // prevhost 每次切换文件都是冷启动，全量建网格要几秒：
         // 窗口先画「加载中」，后台线程建完用消息交棒。
+        _loadedPath = path;
+        _ready = false;
+        _status = "加载中…";
+        var generation = ++_loadGeneration;
+
+        // 旧场景先卸掉：切换文件时画面立刻回到「加载中」，不是上一台模型悬着。
+        _meshRenderer?.Load(null, null, null, 0, 0);
+        _needsRedraw = true;
+
         Task.Run(() =>
         {
-            Exports.Log("load task started");
+            Exports.Log($"load task started gen={generation}");
             Scene? scene = null;
             string? error = null;
             try
@@ -480,14 +525,18 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
                 error = ex.Message;
             }
 
-            Exports.Log($"load task done scene={(scene is null ? "null" : "ok")} error={error ?? "-"}");
+            Exports.Log($"load task done gen={generation} scene={(scene is null ? "null" : "ok")} error={error ?? "-"}");
             if (_hwnd == 0)
             {
                 return; // 窗格已被关掉，结果作废
             }
 
-            Interlocked.Exchange(ref _pendingScene, scene);
-            Volatile.Write(ref _pendingError, error);
+            Volatile.Write(ref _pendingResult, new LoadResult
+            {
+                Scene = scene,
+                Error = error,
+                Generation = generation,
+            });
             PostMessageW(_hwnd, WmAppLoaded, 0, 0);
         });
     }
@@ -495,18 +544,32 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
     private void OnLoaded()
     {
         Exports.Log("OnLoaded enter");
-        var scene = Interlocked.Exchange(ref _pendingScene, null);
-        var error = Volatile.Read(ref _pendingError);
-        if (error is not null)
+        var result = Interlocked.Exchange(ref _pendingResult, null);
+        if (result is null)
         {
-            _status = $"载入失败：{error}";
+            return;
         }
-        else if (scene is null || scene.Vertices.Length == 0)
+
+        if (result.Generation != _loadGeneration)
+        {
+            // 迟到的结果：结果在路上时用户又换了文件，新加载自己会来交棒。
+            Exports.Log($"OnLoaded stale gen={result.Generation} current={_loadGeneration} discarded");
+            return;
+        }
+
+        if (result.Error is not null)
+        {
+            _status = $"载入失败：{result.Error}";
+            _loadedPath = null; // 失败不占路径：再选一次同一文件给重试机会
+        }
+        else if (result.Scene is null || result.Scene.Vertices.Length == 0)
         {
             _status = "空场景";
+            _loadedPath = null;
         }
         else
         {
+            var scene = result.Scene;
             _centre = scene.Centre;
             _radius = scene.Radius;
             _baseY = scene.BaseY;
