@@ -1,7 +1,9 @@
+using System.Numerics;
 using System.Diagnostics;
 using Avalonia;
 using Avalonia.Input;
 using Matrix4x4 = System.Numerics.Matrix4x4;
+using Vector = Avalonia.Vector;
 using Vector3 = System.Numerics.Vector3;
 using Vector4 = System.Numerics.Vector4;
 

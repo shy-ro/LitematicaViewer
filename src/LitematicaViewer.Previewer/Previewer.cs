@@ -5,6 +5,7 @@ using Avalonia.Controls;
 using Avalonia.OpenGL;
 using Avalonia.OpenGL.Controls;
 using Avalonia.Rendering;
+using LitematicaViewer.Previewer.Diagnostics;
 using LitematicaViewer.Previewer.Gpu;
 using Vector = Avalonia.Vector;
 

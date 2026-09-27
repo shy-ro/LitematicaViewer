@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Numerics;
 namespace LitematicaViewer.Previewer.Sample;
 
 // 展台的自转与惯性。全是标量算术，所以是静态纯函数：可以单元式地验，也不必碰 GL、窗口、事件。

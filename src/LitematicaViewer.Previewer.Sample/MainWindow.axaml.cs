@@ -1,8 +1,12 @@
 using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Numerics;
+using System.Text;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Media;
+using Avalonia.Threading;
+using Avalonia.VisualTree;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Input;
 using Avalonia.Interactivity;
