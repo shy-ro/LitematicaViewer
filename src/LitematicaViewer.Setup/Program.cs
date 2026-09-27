@@ -111,6 +111,12 @@ internal static class Program
             ("ThreadingModel", "Apartment"));
         // 不再自建 AppID 键：DllSurrogate 配置用系统共享的那份（HKLM），结构对齐微软自家 handler。
 
+        // 预览 handler 注册三步曲的第三步：把 CLSID 登记进系统 handler 清单。
+        // 预览宿主只考虑清单里的 handler——没有这一条，shellex 挂哪都不被询问
+        // （本机 12 个能工作的 handler 全在 HKLM 这份清单里，实测缺失时零激活）。
+        SetValues(@"Software\Microsoft\Windows\CurrentVersion\PreviewHandlers",
+            (Clsid, "Litematica Preview Handler"));
+
         // 系统卸载入口（设置→应用）。
         SetValues(rf($@"Software\Microsoft\Windows\CurrentVersion\Uninstall\{UninstallKeyName}"),
             ("DisplayName", "Litematica Preview Handler"),
@@ -162,6 +168,7 @@ internal static class Program
         TryDelete(rf(@"Software\Classes\.litematic\shellex"));
         TryDelete(rf($@"Software\Classes\CLSID\{Clsid}"));
         TryDelete(rf($@"Software\Classes\AppID\{Clsid}"));
+        TryDeleteValue(@"Software\Microsoft\Windows\CurrentVersion\PreviewHandlers", Clsid);
         TryDelete(rf($@"Software\Microsoft\Windows\CurrentVersion\Uninstall\{UninstallKeyName}"));
         Log("uninstall-go: registry done, deleting files");
 
@@ -230,6 +237,20 @@ internal static class Program
         catch (Exception)
         {
             // 键不存在 = 目标状态，不报错
+        }
+    }
+
+    // PreviewHandlers 是系统共享键（HKLM 12 个自家 handler 也在里面），只能删自己的值。
+    private static void TryDeleteValue(string path, string name)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(path, writable: true);
+            key?.DeleteValue(name, throwOnMissingValue: false);
+        }
+        catch (Exception)
+        {
+            // 同上：不存在 = 目标状态
         }
     }
 
