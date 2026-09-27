@@ -1,0 +1,27 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:pv="clr-namespace:LitematicaViewer.Previewer;assembly=LitematicaViewer.Previewer"
+        x:Class="LitematicaViewer.SamplePreviewer.MainWindow"
+        Title="Litematica Previewer"
+        Width="1280"
+        Height="800">
+  <!-- 没有侧边栏：这个宿主只做展台一件事，所有「设置」都不存在，
+       交互就是展台的原生输入（按住左键拖、滚轮推拉、左右键换 region）。 -->
+  <Grid>
+    <pv:Previewer x:Name="Viewport" />
+
+    <!-- 左上角一条状态：文件名 + 当前 region 序号。只读，不承载任何输入。 -->
+    <Border VerticalAlignment="Top"
+            HorizontalAlignment="Left"
+            Margin="12"
+            CornerRadius="4"
+            Background="#CC202020">
+      <TextBlock x:Name="StatusText"
+                 Margin="8,5"
+                 FontFamily="Consolas"
+                 FontSize="12"
+                 Foreground="#FFE0E0E0"
+                 Text="（拖入 .litematic 或用命令行传路径）" />
+    </Border>
+  </Grid>
+</Window>

@@ -5,5 +5,6 @@
     <Project Path="src/LitematicaViewer.Meshing/LitematicaViewer.Meshing.csproj"/>
     <Project Path="src/LitematicaViewer.Previewer.Sample/LitematicaViewer.Previewer.Sample.csproj"/>
     <Project Path="src/LitematicaViewer.Previewer/LitematicaViewer.Previewer.csproj"/>
+    <Project Path="src/LitematicaViewer.SamplePreviewer/LitematicaViewer.SamplePreviewer.csproj"/>
   </Folder>
 </Solution>
