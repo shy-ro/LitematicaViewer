@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishAot>true</PublishAot>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <!-- 本机 vcvarsall 探测被安全策略拦（reg.exe 黑名单），SDK 库目录要显式喂给 link。 -->
+  <ItemGroup>
+    <AdditionalNativeLibraryDirectories Include="C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x64" />
+    <AdditionalNativeLibraryDirectories Include="C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\ucrt\x64" />
+  </ItemGroup>
+
+  <!-- 安装器把预览 handler 的 AOT dll 当资源嵌进自己，交付形态是单个 setup exe。
+       打包两步走：先 dotnet publish ShellPreview 到 dist/ShellPreview，再 publish 本工程——
+       不能在 Exec 里嵌套 publish：同图构建会并发抢公共引用（Core）的 obj，pdb 锁死。 -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\dist\ShellPreview\LitematicaViewer.ShellPreview.dll" LogicalName="LitematicaViewer.ShellPreview.dll" />
+  </ItemGroup>
+
+</Project>
