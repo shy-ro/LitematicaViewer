@@ -9,6 +9,10 @@ internal static class Program
 {
     private const string Clsid = "{8E5B1A47-3F2E-4C6D-9A1B-7C2D5E8F0A31}";
     private const string PreviewIid = "{8895b1c6-b41f-4c1c-a562-0d564250836f}";
+    // 系统共享的「Preview Handler Surrogate Host」AppID（微软自家 handler 全指向它，
+    // DllSurrogate=prevhost.exe 在 HKLM 已定义）。自建 AppID 会让代理激活在加载 dll
+    // 之前就死掉——三个挂点全灭且取证日志零记录的根因。
+    private const string SurrogateAppId = "{6D2B5079-2F0B-48DD-AB7F-97CEC514D30B}";
     private const string PayloadName = "LitematicaViewer.ShellPreview.dll";
     private const string UninstallKeyName = "LitematicaViewerPreview";
     private const string Version = "1.0.0";
@@ -100,12 +104,12 @@ internal static class Program
         SetValues(rf($@"Software\Classes\SystemFileAssociations\.litematic\shellex\{PreviewIid}"), ("", Clsid));
         SetValues(rf($@"Software\Classes\CLSID\{Clsid}"),
             ("", "Litematica Preview Handler"),
-            ("AppID", Clsid)); // 必须是 CLSID 键下的「值」，COM 代理激活读它，写成子键静默失效
+            ("AppID", SurrogateAppId),
+            ("DisplayName", "Litematica Preview Handler"));
         SetValues(rf($@"Software\Classes\CLSID\{Clsid}\InprocServer32"),
             ("", dllPath),
             ("ThreadingModel", "Apartment"));
-        SetValues(rf($@"Software\Classes\AppID\{Clsid}"),
-            ("DllSurrogate", "prevhost.exe"));
+        // 不再自建 AppID 键：DllSurrogate 配置用系统共享的那份（HKLM），结构对齐微软自家 handler。
 
         // 系统卸载入口（设置→应用）。
         SetValues(rf($@"Software\Microsoft\Windows\CurrentVersion\Uninstall\{UninstallKeyName}"),
