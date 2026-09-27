@@ -7,8 +7,22 @@ using LitematicaViewer.Meshing;
 
 namespace LitematicaViewer.ShellPreview;
 
-// 把 .litematic 变成可光栅化的 Scene。链路与 Sample/PreviewBlocks 同一条：
-// packs 栈 → resolver → CollectSprites → 图集 → BuildRegion。
+// 场景快照：合并网格 + 图集 mip 链 + 展台取景数据。后台线程整块构建，
+// 通过消息交给 STA 线程装进 GPU 渲染器，之后只读（R6）。
+// Centre/Radius/BaseY 的语义与 Sample 的 ShowcaseTarget 一致：
+// 半径是水平半对角线（光环躺在水平面上），BaseY 是包围盒最低点。
+internal sealed record Scene(
+    float[] Vertices,
+    int[] Indices,
+    byte[][] AtlasLevels,
+    int AtlasWidth,
+    int AtlasHeight,
+    Vector3 Centre,
+    float Radius,
+    float BaseY);
+
+// 把 .litematic 变成 GPU 渲染器的装填数据。链路与 Sample 的 DocumentSource 同一条：
+// packs 栈 → resolver → CollectSprites → 图集 → BuildRegion → 合并网格。
 internal static class SceneLoader
 {
     public static Scene Load(string litematicPath)
@@ -41,32 +55,74 @@ internal static class SceneLoader
         BlockMeshBuilder builder = new(resolver, atlas);
 
         List<MeshData> meshes = [];
-        Vector3I wholeMin = new(int.MaxValue, int.MaxValue, int.MaxValue);
-        Vector3I wholeMax = new(int.MinValue, int.MinValue, int.MinValue);
         foreach (var region in document.Regions)
         {
             meshes.Add(builder.BuildRegion(region));
-            wholeMin = Vector3I.ComponentMin(wholeMin, region.Bounds.Min);
-            wholeMax = Vector3I.ComponentMax(wholeMax, region.Bounds.Max);
         }
 
-        // Max 是闭区间端点：那个方块自己占一格，几何边界要到 +1。
-        Vector3 centre = new(
-            (wholeMin.X + wholeMax.X + 1) * 0.5f,
-            (wholeMin.Y + wholeMax.Y + 1) * 0.5f,
-            (wholeMin.Z + wholeMax.Z + 1) * 0.5f);
-        var sx = wholeMax.X - wholeMin.X + 1;
-        var sy = wholeMax.Y - wholeMin.Y + 1;
-        var sz = wholeMax.Z - wholeMin.Z + 1;
-        // 球形半径：取景用整包围盒的对角半径，不然侧面会竖着出画面。
-        var radius = MathF.Max(1f, 0.5f * MathF.Sqrt(sx * sx + sy * sy + sz * sz));
+        var (vertices, indices) = MergeMeshes(meshes);
 
-        return new Scene(meshes, centre, radius, atlas);
+        // 展台取景数据从合并网格的实际顶点算，不从 region bounds 算：
+        // BuildRegion 的输出坐标空间与 region.Bounds 不保证一致（实测机甲文件
+        // 两者错位，光环浮到模型顶上），而网格顶点是渲染用的唯一事实。
+        Vector3 meshMin = new(float.MaxValue, float.MaxValue, float.MaxValue);
+        Vector3 meshMax = new(float.MinValue, float.MinValue, float.MinValue);
+        for (var i = 0; i < vertices.Length; i += 9)
+        {
+            var x = vertices[i];
+            var y = vertices[i + 1];
+            var z = vertices[i + 2];
+            if (x < meshMin.X) meshMin.X = x;
+            if (y < meshMin.Y) meshMin.Y = y;
+            if (z < meshMin.Z) meshMin.Z = z;
+            if (x > meshMax.X) meshMax.X = x;
+            if (y > meshMax.Y) meshMax.Y = y;
+            if (z > meshMax.Z) meshMax.Z = z;
+        }
+
+        Vector3 centre = (meshMin + meshMax) * 0.5f;
+        var hx = (meshMax.X - meshMin.X) * 0.5f;
+        var hz = (meshMax.Z - meshMin.Z) * 0.5f;
+        // 水平半对角线：展台取景与光环都由它定大小（语义对齐 Sample 的 ShowcaseTarget）。
+        var radius = MathF.Max(1f, MathF.Sqrt(hx * hx + hz * hz));
+
+        Exports.Log($"scene merged vertices={vertices.Length / 9} indices={indices.Length} " +
+                    $"atlas={atlas.Width}x{atlas.Height} levels={atlas.Levels.Length}");
+        Exports.Log($"bbox min=({meshMin.X:F1},{meshMin.Y:F1},{meshMin.Z:F1}) " +
+                    $"max=({meshMax.X:F1},{meshMax.Y:F1},{meshMax.Z:F1}) " +
+                    $"centre=({centre.X:F1},{centre.Y:F1},{centre.Z:F1}) radius={radius:F1} baseY={meshMin.Y:F1}");
+
+        return new Scene(vertices, indices, atlas.Levels, atlas.Width, atlas.Height,
+            centre, radius, meshMin.Y);
     }
 
-    // packs/ 在仓库根，dll 在 dist/ShellPreview 之类的地方：从 dll 自身目录往上
-    // 最多七层，谁先命中用谁。不能用 AppContext.BaseDirectory——那是宿主进程
-    // exe 的目录（prevhost/python/...），COM dll 里只有模块路径是可靠的。
+    // 多个 region 的网格拼成一份：顶点直接接起来，索引补上各自的基础顶点号。
+    private static (float[] Vertices, int[] Indices) MergeMeshes(List<MeshData> parts)
+    {
+        var vertexFloats = parts.Sum(p => p.Vertices.Length);
+        var indexCount = parts.Sum(p => p.Indices.Length);
+        var vertices = new float[vertexFloats];
+        var indices = new int[indexCount];
+
+        var vertexCursor = 0;
+        var indexCursor = 0;
+        var baseVertex = 0;
+        foreach (var part in parts)
+        {
+            Array.Copy(part.Vertices, 0, vertices, vertexCursor, part.Vertices.Length);
+            for (var i = 0; i < part.Indices.Length; i++) indices[indexCursor + i] = part.Indices[i] + baseVertex;
+
+            vertexCursor += part.Vertices.Length;
+            indexCursor += part.Indices.Length;
+            baseVertex += part.VertexCount;
+        }
+
+        return (vertices, indices);
+    }
+
+    // packs/ 在安装目录（installer 解包到 <dll 目录>\packs\），仓库里开发时在根：
+    // 从 dll 自身目录往上最多七层，谁先命中用谁。不能用 AppContext.BaseDirectory——
+    // 那是宿主进程 exe 的目录（prevhost/python/...），COM dll 里只有模块路径是可靠的。
     private static string? FindPacksDirectory()
     {
         if (!GetSelfModulePath(out var dllPath))

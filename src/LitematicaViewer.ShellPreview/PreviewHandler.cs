@@ -1,13 +1,20 @@
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.Marshalling;
-using LitematicaViewer.Meshing;
+using Avalonia.OpenGL;
+using LitematicaViewer.Previewer;
+using LitematicaViewer.Previewer.Gpu;
 
 namespace LitematicaViewer.ShellPreview;
-// 预览处理器本体：一个塞进预览窗格的子窗口 + 软件光栅化循环。
-// 交互 = 按住左键拖动旋转，松手后带惯性衰减；静止时零 CPU。
-// 渲染在 STA 线程同步做（timer 里驱动、一次一帧防堆积）；重活的
-// 加载/建网格在后台线程，完成后用消息交棒。
+
+// 预览处理器本体：一个塞进预览窗格的子窗口 + GPU 渲染循环。
+// 渲染零件（GlMeshRenderer/GlPedestalRenderer/SupersampleTarget）与展台相机
+// （CameraModel + Turntable）都是从 Sample 抄的同一套，GL 上下文由 EglHost 在
+// 子窗口上用 ANGLE 建立——与预览器同为 GLES 3.0，着色器零改动。
+// 交互 = 左键拖动绕模型公转（带惯性，静置后缓慢自转）、滚轮沿视线推拉。
+// 渲染在 STA 线程同步做（timer 里驱动）；重活的加载/建网格在后台线程，
+// 完成后用消息交棒。
 [GeneratedComClass]
 internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitializeWithFile
 {
@@ -16,10 +23,14 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
     private const uint WmLButtonDown = 0x0201;
     private const uint WmLButtonUp = 0x0202;
     private const uint WmMouseMove = 0x0200;
+    private const uint WmMouseWheel = 0x020A;
     private const uint WmSize = 0x0005;
     private const uint WmDestroy = 0x0002;
     private const uint WmPaint = 0x000F;
     private const uint WmEraseBkgnd = 0x0014;
+
+    // 背景蓝与预览器同一个颜色：浅色模型在白底上糊成一片，纯黑与「没画出来」分不开。
+    private static readonly Vector3 ClearColor = new(0.12f, 0.30f, 0.55f);
 
     private const string ClassName = "LitematicaPreviewPane";
     private static bool _classRegistered;
@@ -30,24 +41,29 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
     private nint _hwnd;
     private RECT _rect;
     private int _width = 32, _height = 32;
-    private byte[] _bgra = new byte[32 * 32 * 4];
-    private BITMAPINFO _bmi;
 
-    // 后台构建的场景经 Interlocked 交棒，STA 线程取走后只读。
+    // GL 侧资产（R1：各自持有，Unload 统一释放；只在 STA 线程碰）。
+    private EglHost? _egl;
+    private GlMeshRenderer? _meshRenderer;
+    private GlPedestalRenderer? _pedestal;
+    private SupersampleTarget? _ssaa;
+    private Turntable? _turntable;
+    private bool _glReady;
+
+    // 展台光环的落位（来自场景包围盒，装填时一并给）。
+    private System.Numerics.Vector3 _centre;
+    private float _radius, _baseY;
+
     private Scene? _pendingScene;
     private string? _pendingError;
-    private Scene? _scene;
     private bool _ready;
     private string _status = "加载中…";
 
-    private bool _dirty = true;
+    private bool _needsRedraw = true;
     private bool _rendering;
     private bool _firstFrameLogged;
+    private readonly Stopwatch _clock = Stopwatch.StartNew();
     private long _lastFrameTick;
-
-    private float _yaw = MathF.PI * 0.25f;
-    private float _pitch = 0.58f;
-    private float _yawVel, _pitchVel;
     private bool _dragging;
     private int _lastX, _lastY;
 
@@ -88,14 +104,25 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
 
     public int Show()
     {
-        if (_hwnd == 0)
+        try
         {
-            CreateChildWindow();
-            StartLoad();
-            SetTimer(_hwnd, 1, 33, 0);
+            if (_hwnd == 0)
+            {
+                CreateChildWindow();
+                InitGl();
+                StartLoad();
+            }
+
+            SetTimer(_hwnd, 1, 16, 0);
+            ShowWindow(_hwnd, 5); // SW_SHOW
+        }
+        catch (Exception ex)
+        {
+            // COM 边界上没人接异常：不拦的话宿主只看到一个 HRESULT，根因全丢。
+            Exports.Log($"Show failed {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+            _status = $"初始化失败：{ex.Message}";
         }
 
-        ShowWindow(_hwnd, 5); // SW_SHOW
         return 0;
     }
 
@@ -104,6 +131,7 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
         if (_hwnd != 0)
         {
             ShowWindow(_hwnd, 0); // SW_HIDE
+            KillTimer(_hwnd, 1);
         }
 
         return 0;
@@ -144,8 +172,27 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
 
     public int Unload()
     {
-        DestroyWindow(_hwnd);
-        _hwnd = 0;
+        // GL 对象先于上下文销毁：Delete* 都需要 context 还是 current 的。
+        if (_glReady)
+        {
+            _meshRenderer?.Dispose();
+            _meshRenderer = null;
+            _pedestal?.Dispose();
+            _pedestal = null;
+            _ssaa?.Dispose();
+            _ssaa = null;
+            _egl?.Dispose();
+            _egl = null;
+            _glReady = false;
+        }
+
+        if (_hwnd != 0)
+        {
+            Handlers.Remove(_hwnd);
+            DestroyWindow(_hwnd);
+            _hwnd = 0;
+        }
+
         return 0;
     }
 
@@ -186,18 +233,40 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
         var h = Math.Max(16, _rect.Bottom - _rect.Top);
         _width = w;
         _height = h;
-        _bgra = new byte[_width * _height * 4];
         _hwnd = CreateWindowExW(
             0, ClassName, null,
             0x40000000 | 0x10000000, // WS_CHILD | WS_VISIBLE
             _rect.Left, _rect.Top, w, h,
             _parentHwnd, 0, hInstance, 0);
         Handlers[_hwnd] = this;
-        _bmi = new BITMAPINFO();
-        _bmi.Header.Size = (uint)sizeof(BITMAPINFOHEADER);
-        _bmi.Header.Planes = 1;
-        _bmi.Header.BitCount = 32;
-        _bmi.Header.Compression = 0; // BI_RGB
+    }
+
+    // GL 上下文与渲染零件只建一次（R5）：EGL surface 挂在子窗口上，
+    // 窗口被销毁就整个 Unload，不存在「丢了重建」的场景（prevhost 短命）。
+    private void InitGl()
+    {
+        _egl = new EglHost();
+        if (!_egl.Init(_hwnd))
+        {
+            _status = "OpenGL 初始化失败";
+            _egl = null;
+            return;
+        }
+
+        var gl = _egl.Gl!;
+        gl.ClearColor(ClearColor.X, ClearColor.Y, ClearColor.Z, 1f);
+        gl.Enable(GlConsts.GL_DEPTH_TEST);
+
+        _meshRenderer = GlMeshRenderer.Create(gl);
+        _pedestal = GlPedestalRenderer.Create(gl);
+        _ssaa = SupersampleTarget.Create(gl);
+
+#if DEBUG
+        CameraState.VerifyConvention();
+#endif
+
+        _glReady = true;
+        Exports.Log($"gl init ok ssaa={_ssaa is not null} size={_width}x{_height}");
     }
 
     [UnmanagedCallersOnly]
@@ -215,25 +284,22 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
             case WmSize:
                 _width = Math.Max(1, (int)(short)lParam);
                 _height = Math.Max(1, (int)(long)lParam >> 16);
-                _bgra = new byte[_width * _height * 4];
-                _dirty = true;
-                // timer 可能已因静止被杀：不复活的话，缩放后的窗格永远停在黑 buffer。
-                SetTimer(_hwnd, 1, 33, 0);
-                Exports.Log($"size {_width}x{_height}");
+                _needsRedraw = true;
+                // timer 可能已因 Hide 被杀：复活，别让缩放后的窗格停在旧画面。
+                SetTimer(_hwnd, 1, 16, 0);
                 return 0;
 
             case WmEraseBkgnd:
-                return 1; // 自己填帧，别让 GDI 白刷一遍闪屏
+                return 1; // GL 自己满幅画，别让 GDI 白刷一遍闪屏
 
             case WmPaint:
                 OnPaint();
-                Exports.Log($"paint blit {_width}x{_height} ready={_ready}");
                 return 0;
 
             case WmLButtonDown:
+                SetFocus(_hwnd);
                 _dragging = true;
-                _yawVel = 0;
-                _pitchVel = 0;
+                _turntable?.BeginDrag();
                 _lastX = (int)(short)lParam;
                 _lastY = (int)(long)lParam >> 16;
                 SetCapture(_hwnd);
@@ -243,20 +309,22 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
             {
                 var x = (int)(short)lParam;
                 var y = (int)(long)lParam >> 16;
-                var dx = x - _lastX;
-                var dy = y - _lastY;
+                _turntable?.Drag(x - _lastX, y - _lastY);
                 _lastX = x;
                 _lastY = y;
-                ApplyLookDelta(dx, dy);
-                // 惯性速度取移动的指数滑动平均：单帧突变不炸，松手能顺滑接上。
-                _yawVel = 0.7f * _yawVel + 0.3f * dx * 0.01f;
-                _pitchVel = 0.7f * _pitchVel + 0.3f * dy * 0.01f;
                 return 0;
             }
 
             case WmLButtonUp:
                 _dragging = false;
+                _turntable?.EndDrag();
                 ReleaseCapture();
+                return 0;
+
+            case WmMouseWheel:
+                // 一档 = 120：滚一档沿视线推近一档（正 delta = 推近，与 Sample 一致）。
+                _turntable?.Zoom((short)((long)wParam >> 16) / 120f);
+                _needsRedraw = true;
                 return 0;
 
             case WmTimer when wParam == 1:
@@ -276,76 +344,85 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
         return DefWindowProcW(_hwnd, msg, wParam, lParam);
     }
 
-    private void ApplyLookDelta(int dx, int dy)
-    {
-        _yaw += dx * 0.01f;
-        _pitch = Math.Clamp(_pitch + dy * 0.01f, -1.55f, 1.55f);
-        _dirty = true;
-    }
-
     private void Tick()
     {
-        // 惯性：松手后按速度滑行，衰减到阈值以下就停——静止时 timer 空转
-        // 也要停掉，预览窗格不能白吃 CPU。
-        if (!_dragging)
-        {
-            _yaw += _yawVel;
-            _pitch = Math.Clamp(_pitch + _pitchVel, -1.55f, 1.55f);
-            _yawVel *= 0.9f;
-            _pitchVel *= 0.9f;
-            if (MathF.Abs(_yawVel) > 1e-4f || MathF.Abs(_pitchVel) > 1e-4f)
-            {
-                _dirty = true;
-            }
-        }
+        var now = _clock.ElapsedMilliseconds;
+        var dt = Math.Min((now - _lastFrameTick) / 1000.0, 0.25);
+        _lastFrameTick = now;
 
-        if (_dirty && !_rendering && _ready)
+        var moved = _turntable is { } turntable && turntable.Tick(dt);
+        if (_ready && _glReady && !_rendering && (moved || _needsRedraw))
         {
-            var scene = _scene;
-            if (scene is not null && scene.Meshes.Count > 0)
+            _needsRedraw = false;
+            RenderFrame();
+        }
+    }
+
+    private void RenderFrame()
+    {
+        var gl = _egl!.Gl!;
+        _rendering = true;
+        try
+        {
+            var renderWidth = _width;
+            var renderHeight = _height;
+            if (_ssaa is { } ssaa)
             {
-                _rendering = true;
+                renderWidth = _width * SupersampleTarget.Scale;
+                renderHeight = _height * SupersampleTarget.Scale;
+                ssaa.EnsureSize(renderWidth, renderHeight);
+                ssaa.BindForRender();
+            }
+            else
+            {
+                gl.BindFramebuffer(GlConsts.GL_FRAMEBUFFER, 0);
+            }
+
+            gl.Viewport(0, 0, renderWidth, renderHeight);
+            gl.Clear(GlConsts.GL_COLOR_BUFFER_BIT | GlConsts.GL_DEPTH_BUFFER_BIT);
+
+            if (_meshRenderer is { HasMesh: true } mesh)
+            {
+                mesh.Render(gl, _turntable!.Camera, renderWidth, renderHeight);
+            }
+
+            _pedestal?.Render(_turntable!.Camera, renderWidth, renderHeight,
+                _centre, _radius, _baseY);
+
+            _ssaa?.ResolveTo(0, _width, _height);
+            gl.Viewport(0, 0, _width, _height);
+
+            if (!_firstFrameLogged)
+            {
+                _firstFrameLogged = true;
+                // 帧真值落盘（RGBA 原始字节），供脚本转 PNG 目视——截图会被窗口遮挡污染。
+                // 必须在 Swap 之前读：交换后后缓冲的内容未定义（EGL 无 BUFFER_PRESERVED）。
                 try
                 {
-                    Raster.Render(scene, _bgra, _width, _height, _yaw, _pitch);
-                }
-                finally
-                {
-                    _rendering = false;
-                }
-
-                _lastFrameTick = Environment.TickCount64;
-                // 取证：首帧统计非零像素占比与采样色，确认不是黑帧/空帧。
-                if (!_firstFrameLogged)
-                {
-                    _firstFrameLogged = true;
-                    int nonzero = 0;
-                    for (var i = 3; i < _bgra.Length; i += 4)
-                        if (_bgra[i] != 0) nonzero++;
-                    Exports.Log($"first frame nonzero={nonzero}/{_bgra.Length / 4} " +
-                                $"c0={_bgra[0]},{_bgra[1]},{_bgra[2]} c1={_bgra[16]},{_bgra[17]},{_bgra[18]}");
-                    // 帧真值落盘（BGRA 原始字节），供脚本转 PNG 目视——截图会被窗口遮挡污染。
-                    try
+                    var pixels = GlRaw.ReadPixels(gl, 0, 0, _width, _height);
+                    if (pixels is not null)
                     {
                         File.WriteAllBytes(
-                            Path.Combine(Path.GetTempPath(), "shellpreview_frame.raw"), _bgra);
-                        Exports.Log($"frame dumped {_width}x{_height}");
+                            Path.Combine(Path.GetTempPath(), "shellpreview_frame.raw"), pixels);
+                        Exports.Log($"frame dumped {_width}x{_height} mesh={_meshRenderer?.HasMesh} " +
+                                    $"glErr=0x{GlRaw.GetError(gl):X}");
+                        var cam = _turntable!.Camera;
+                        Exports.Log($"pedestal centre=({_centre.X:F1},{_centre.Y:F1},{_centre.Z:F1}) " +
+                                    $"radius={_radius:F1} baseY={_baseY:F1} cam pos=({cam.Position.X:F1},{cam.Position.Y:F1},{cam.Position.Z:F1}) " +
+                                    $"yaw={cam.Yaw:F1} pitch={cam.Pitch:F1} near={cam.Near:F2} far={cam.Far:F0}");
                     }
-                    catch (Exception ex)
-                    {
-                        Exports.Log($"frame dump failed {ex.Message}");
-                    }
+                }
+                catch (Exception ex)
+                {
+                    Exports.Log($"frame dump failed {ex.Message}");
                 }
             }
 
-            _dirty = false;
-            InvalidateRect(_hwnd, 0, 0);
+            _egl.Swap();
         }
-
-        if (!_dirty && !_dragging && !_rendering &&
-            MathF.Abs(_yawVel) <= 1e-4f && MathF.Abs(_pitchVel) <= 1e-4f)
+        finally
         {
-            KillTimer(_hwnd, 1);
+            _rendering = false;
         }
     }
 
@@ -353,19 +430,12 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
     {
         var ps = default(PAINTSTRUCT);
         var hdc = BeginPaint(_hwnd, ref ps);
-        if (_ready && _bgra.Length > 0)
+        if (!_ready || !_glReady)
         {
-            _bmi.Header.Width = _width;
-            _bmi.Header.Height = -_height; // top-down
-            SetDIBitsToDevice(
-                hdc, 0, 0, (uint)_width, (uint)_height, 0, 0, 0, (uint)_height,
-                _bgra, ref _bmi, 0);
-        }
-        else
-        {
+            // GL 帧还没得画：深灰底 + 状态文字。字母数字必须可读，字号用系统默认。
             var rect = default(RECT);
             GetClientRect(_hwnd, out rect);
-            var brush = CreateSolidBrush(0x00202020); // 深灰背景（COLORREF 是 0x00BBGGRR）
+            var brush = CreateSolidBrush(0x00202020); // COLORREF 是 0x00BBGGRR
             FillRect(hdc, ref rect, brush);
             DeleteObject(brush);
             var font = GetStockObject(12); // DEFAULT_GUI_FONT
@@ -373,6 +443,11 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
             SetTextColor(hdc, 0x00C8C8C8);
             SetBkMode(hdc, 1); // TRANSPARENT
             TextOutW(hdc, 12, 12, _status, _status.Length);
+        }
+        else if (!_rendering)
+        {
+            // GL 内容由交换链保持，DWM 会自己合成；这里补一帧是防宿主硬性失效的。
+            RenderFrame();
         }
 
         EndPaint(_hwnd, ref ps);
@@ -405,7 +480,7 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
                 error = ex.Message;
             }
 
-            Exports.Log($"load task done scene={(scene is null ? "null" : scene.Meshes.Count.ToString())} error={error ?? "-"}");
+            Exports.Log($"load task done scene={(scene is null ? "null" : "ok")} error={error ?? "-"}");
             if (_hwnd == 0)
             {
                 return; // 窗格已被关掉，结果作废
@@ -420,20 +495,26 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
     private void OnLoaded()
     {
         Exports.Log("OnLoaded enter");
-        _scene = Interlocked.Exchange(ref _pendingScene, null);
+        var scene = Interlocked.Exchange(ref _pendingScene, null);
         var error = Volatile.Read(ref _pendingError);
         if (error is not null)
         {
             _status = $"载入失败：{error}";
         }
-        else if (_scene is null || _scene.Meshes.Count == 0)
+        else if (scene is null || scene.Vertices.Length == 0)
         {
             _status = "空场景";
         }
         else
         {
+            _centre = scene.Centre;
+            _radius = scene.Radius;
+            _baseY = scene.BaseY;
+            _meshRenderer!.Load(scene.Vertices, scene.Indices,
+                scene.AtlasLevels, scene.AtlasWidth, scene.AtlasHeight);
+            _turntable = new Turntable(scene);
             _ready = true;
-            _dirty = true;
+            _needsRedraw = true;
         }
 
         InvalidateRect(_hwnd, 0, 0);
@@ -544,12 +625,6 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
 
     [DllImport("gdi32.dll")]
     private static extern int DeleteObject(nint obj);
-
-    [DllImport("gdi32.dll")]
-    private static extern int SetDIBitsToDevice(
-        nint hdc, int xDest, int yDest, uint width, uint height,
-        int xSrc, int ySrc, uint startScan, uint scanLines,
-        byte[] bits, ref BITMAPINFO bmi, uint colorUse);
 
     [DllImport("kernel32.dll")]
     private static extern int GetModuleHandleExW(uint flags, nint address, out nint module);

@@ -76,8 +76,9 @@ internal static class Program
     private static void Install(bool quiet)
     {
         var payload = ReadResource("LitematicaViewer.ShellPreview.dll");
+        var angle = ReadResource("LitematicaViewer.av_libglesv2.dll");
         var jar = ReadResource("LitematicaViewer.vanilla.jar");
-        if (payload is null || jar is null)
+        if (payload is null || jar is null || angle is null)
         {
             Box(0x10, "安装包里缺少 payload（Debug 构建的安装器不带资源，请用 Release 版）。");
             return;
@@ -92,6 +93,8 @@ internal static class Program
         Directory.CreateDirectory(InstallDir);
         var dllPath = Path.Combine(InstallDir, PayloadName);
         File.WriteAllBytes(dllPath, payload);
+        // ANGLE 单文件库必须和 handler dll 同目录：EglHost 从模块目录显式加载它。
+        File.WriteAllBytes(Path.Combine(InstallDir, "av_libglesv2.dll"), angle);
         // 资源包装到 <安装目录>\packs\——SceneLoader 从 dll 位置向上找 packs，第 0 层命中。
         Directory.CreateDirectory(Path.Combine(InstallDir, "packs"));
         File.WriteAllBytes(Path.Combine(InstallDir, "packs", "vanilla-1.20.1.jar"), jar);
@@ -129,7 +132,7 @@ internal static class Program
             ("UninstallString", $"\"{exePath}\" /uninstall"),
             ("NoModify", 1),
             ("NoRepair", 1),
-            ("EstimatedSize", (payload.Length + jar.Length + 4 * 1024 * 1024) / 1024)); // KB，含 AOT 运行时粗估
+            ("EstimatedSize", (payload.Length + angle.Length + jar.Length + 4 * 1024 * 1024) / 1024)); // KB，含 AOT 运行时粗估
 
         if (!quiet && Box(0x40, "安装完成。立即重启资源管理器让预览生效？（会关闭已打开的文件夹窗口）")
             == 6 /*IDYES*/)

@@ -23,6 +23,7 @@
        场景加载必然失败——窗格永远停在错误状态文字。 -->
   <ItemGroup>
     <EmbeddedResource Include="..\..\dist\ShellPreview\LitematicaViewer.ShellPreview.dll" LogicalName="LitematicaViewer.ShellPreview.dll" />
+    <EmbeddedResource Include="..\..\dist\ShellPreview\av_libglesv2.dll" LogicalName="LitematicaViewer.av_libglesv2.dll" />
     <EmbeddedResource Include="..\..\packs\vanilla-1.20.1.jar" LogicalName="LitematicaViewer.vanilla.jar" />
   </ItemGroup>
 

@@ -19,6 +19,34 @@
     <ProjectReference Include="..\LitematicaViewer.Meshing\LitematicaViewer.Meshing.csproj" />
   </ItemGroup>
 
+  <!-- GlInterface/GlConsts 在 Avalonia 包里；渲染零件（GlMeshRenderer/GlPedestalRenderer/
+       Gpu\*）以 Compile Include 链接编译进本程序集（与 SamplePreviewer 同一套路，
+       internal 类同程序集互访），所以这里必须引用 Avalonia 本体。
+       av_libglesv2.dll 是 Avalonia 12 的单文件 ANGLE（egl+gles 同一 dll），
+       运行时由 EglHost 从模块目录显式加载。 -->
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.3" />
+    <PackageReference Include="Avalonia.Angle.Windows.Natives" Version="2.1.27548.20260419" />
+  </ItemGroup>
+
+  <!-- 展台渲染与相机零件直接链接源文件：类都是 internal 的，项目引用会把
+       Previewer 的内部设计暴露成公共面；链接编译与本工程的类同程序集。 -->
+  <ItemGroup>
+    <Compile Include="..\LitematicaViewer.Previewer\CameraState.cs" Link="Shared\CameraState.cs" />
+    <Compile Include="..\LitematicaViewer.Previewer\GlMeshRenderer.cs" Link="Shared\GlMeshRenderer.cs" />
+    <Compile Include="..\LitematicaViewer.Previewer\GlPedestalRenderer.cs" Link="Shared\GlPedestalRenderer.cs" />
+    <Compile Include="..\LitematicaViewer.Previewer\Gpu\GlMesh.cs" Link="Shared\Gpu\GlMesh.cs" />
+    <Compile Include="..\LitematicaViewer.Previewer\Gpu\GlRaw.cs" Link="Shared\Gpu\GlRaw.cs" />
+    <Compile Include="..\LitematicaViewer.Previewer\Gpu\GlShader.cs" Link="Shared\Gpu\GlShader.cs" />
+    <Compile Include="..\LitematicaViewer.Previewer\Gpu\GlTexture.cs" Link="Shared\Gpu\GlTexture.cs" />
+    <Compile Include="..\LitematicaViewer.Previewer\Gpu\SupersampleTarget.cs" Link="Shared\Gpu\SupersampleTarget.cs" />
+    <Compile Include="..\LitematicaViewer.Previewer\Debug\DebugPedestal.cs" Link="Shared\DebugPedestal.cs" />
+    <Compile Include="..\LitematicaViewer.Previewer.Sample\Controllers\CameraModel.cs" Link="Shared\Controllers\CameraModel.cs" />
+    <Compile Include="..\LitematicaViewer.Previewer.Sample\Controllers\CameraModel.Navigation.cs" Link="Shared\Controllers\CameraModel.Navigation.cs" />
+    <Compile Include="..\LitematicaViewer.Previewer.Sample\Controllers\ShowcaseTarget.cs" Link="Shared\Controllers\ShowcaseTarget.cs" />
+    <Compile Include="..\LitematicaViewer.Previewer.Sample\Controllers\TurntableSpin.cs" Link="Shared\Controllers\TurntableSpin.cs" />
+  </ItemGroup>
+
   <!-- vcvarsall 靠 reg.exe 查 Windows SDK 的 LIB 目录，而本机安全策略把 reg.exe
        拉黑了，检测出的 LIB 只有 MSVC 段——链接时 LNK1181 找不到 advapi32.lib。
        SDK 的两段库目录在这里显式补上，不依赖注册表探测。 -->
