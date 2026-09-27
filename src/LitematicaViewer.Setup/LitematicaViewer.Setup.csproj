@@ -18,9 +18,12 @@
 
   <!-- 安装器把预览 handler 的 AOT dll 当资源嵌进自己，交付形态是单个 setup exe。
        打包两步走：先 dotnet publish ShellPreview 到 dist/ShellPreview，再 publish 本工程——
-       不能在 Exec 里嵌套 publish：同图构建会并发抢公共引用（Core）的 obj，pdb 锁死。 -->
+       不能在 Exec 里嵌套 publish：同图构建会并发抢公共引用（Core）的 obj，pdb 锁死。
+       原版 jar 一并嵌入：装机位置 (%LocalAppData%) 附近不存在 packs/，不带上资源包
+       场景加载必然失败——窗格永远停在错误状态文字。 -->
   <ItemGroup>
     <EmbeddedResource Include="..\..\dist\ShellPreview\LitematicaViewer.ShellPreview.dll" LogicalName="LitematicaViewer.ShellPreview.dll" />
+    <EmbeddedResource Include="..\..\packs\vanilla-1.20.1.jar" LogicalName="LitematicaViewer.vanilla.jar" />
   </ItemGroup>
 
 </Project>

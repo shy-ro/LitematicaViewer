@@ -75,10 +75,11 @@ internal static class Program
 
     private static void Install(bool quiet)
     {
-        var payload = ReadPayload();
-        if (payload is null)
+        var payload = ReadResource("LitematicaViewer.ShellPreview.dll");
+        var jar = ReadResource("LitematicaViewer.vanilla.jar");
+        if (payload is null || jar is null)
         {
-            Box(0x10, "安装包里没有预览 handler 的 dll（Debug 构建的安装器不带 payload，请用 Release 版）。");
+            Box(0x10, "安装包里缺少 payload（Debug 构建的安装器不带资源，请用 Release 版）。");
             return;
         }
 
@@ -91,6 +92,9 @@ internal static class Program
         Directory.CreateDirectory(InstallDir);
         var dllPath = Path.Combine(InstallDir, PayloadName);
         File.WriteAllBytes(dllPath, payload);
+        // 资源包装到 <安装目录>\packs\——SceneLoader 从 dll 位置向上找 packs，第 0 层命中。
+        Directory.CreateDirectory(Path.Combine(InstallDir, "packs"));
+        File.WriteAllBytes(Path.Combine(InstallDir, "packs", "vanilla-1.20.1.jar"), jar);
         var exePath = Path.Combine(InstallDir, "LitematicaViewer.Setup.exe");
         File.Copy(Environment.ProcessPath!, exePath, overwrite: true);
 
@@ -125,7 +129,7 @@ internal static class Program
             ("UninstallString", $"\"{exePath}\" /uninstall"),
             ("NoModify", 1),
             ("NoRepair", 1),
-            ("EstimatedSize", (payload.Length + 4 * 1024 * 1024) / 1024)); // KB，含 AOT 运行时粗估
+            ("EstimatedSize", (payload.Length + jar.Length + 4 * 1024 * 1024) / 1024)); // KB，含 AOT 运行时粗估
 
         if (!quiet && Box(0x40, "安装完成。立即重启资源管理器让预览生效？（会关闭已打开的文件夹窗口）")
             == 6 /*IDYES*/)
@@ -134,10 +138,10 @@ internal static class Program
         }
     }
 
-    private static byte[]? ReadPayload()
+    private static byte[]? ReadResource(string logicalName)
     {
         using var stream = typeof(Program).Assembly
-            .GetManifestResourceStream("LitematicaViewer.ShellPreview.dll");
+            .GetManifestResourceStream(logicalName);
         if (stream is null)
         {
             return null;

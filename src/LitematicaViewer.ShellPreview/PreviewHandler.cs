@@ -522,7 +522,9 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
     [DllImport("user32.dll")]
     private static extern int FillRect(nint hdc, ref RECT rect, nint brush);
 
-    [DllImport("gdi32.dll")]
+    // CharSet.Unicode 必须显式写：默认按 ANSI 封送，TextOutW 把 ANSI 字节当 UTF-16
+    // 读出来就是一排假汉字（状态文字全变乱码的那个 bug）。
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
     private static extern int TextOutW(nint hdc, int x, int y, string text, int length);
 
     [DllImport("gdi32.dll")]
