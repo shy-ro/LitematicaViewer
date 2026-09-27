@@ -90,9 +90,11 @@ internal static class Program
         var exePath = Path.Combine(InstallDir, "LitematicaViewer.Setup.exe");
         File.Copy(Environment.ProcessPath!, exePath, overwrite: true);
 
-        // 预览 handler 的最小注册面：扩展名 shellex + CLSID + AppID。
-        // 故意不写 .litematic 的默认 ProgID / shell\open——不做双击关联。
-        SetValues(rf($@"Software\Classes\.litematic\shellex\{PreviewIid}"), ("", Clsid));
+        // 预览 handler 的最小注册面：SystemFileAssociations shellex + CLSID + AppID。
+        // shellex 必须挂 SystemFileAssociations\.ext（文档定义的按扩展名位置）——
+        // 裸 HKCR\.ext\shellex 不在现代查找链里，且没有 ProgID 时扩展名不构成文件类。
+        // 故意不写默认 ProgID / shell\open——不做双击关联。
+        SetValues(rf($@"Software\Classes\SystemFileAssociations\.litematic\shellex\{PreviewIid}"), ("", Clsid));
         SetValues(rf($@"Software\Classes\CLSID\{Clsid}"),
             ("", "Litematica Preview Handler"),
             ("AppID", Clsid)); // 必须是 CLSID 键下的「值」，COM 代理激活读它，写成子键静默失效
@@ -142,8 +144,11 @@ internal static class Program
             return;
         }
 
-        // 只删自己注册的东西；.litematic 留给用户可能的其它关联，删空壳父键靠 try。
+        // 只删自己注册的东西；两个历史挂点都清（SystemFileAssociations 现行 + 裸扩展名旧版）。
         Log("uninstall-go: deleting registry");
+        TryDelete(rf($@"Software\Classes\SystemFileAssociations\.litematic\shellex\{PreviewIid}"));
+        TryDelete(rf(@"Software\Classes\SystemFileAssociations\.litematic\shellex"));
+        TryDelete(rf(@"Software\Classes\SystemFileAssociations\.litematic"));
         TryDelete(rf($@"Software\Classes\.litematic\shellex\{PreviewIid}"));
         TryDelete(rf(@"Software\Classes\.litematic\shellex"));
         TryDelete(rf(@"Software\Classes\.litematic"));
