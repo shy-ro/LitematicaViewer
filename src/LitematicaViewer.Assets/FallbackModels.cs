@@ -85,10 +85,11 @@ internal static class FallbackModels
 
         if (id.Contains("shulker", StringComparison.Ordinal))
         {
-            // entity/shulker/shulker.png 与 shulker_{color}.png；方块 id 是
-            // shulker_box 或 {color}_shulker_box，剥掉后缀就是颜色段。
-            var color = id == "shulker_box" ? "" : id.Replace("_shulker_box", "", StringComparison.Ordinal);
-            return color.Length == 0 ? "minecraft:entity/shulker/shulker" : $"minecraft:entity/shulker/shulker_{color}";
+            // 1.20+ 每种颜色的潜影盒都有一张同名 block 贴图（particle 用），
+            // block/shulker_box.png、block/white_shulker_box.png……直接按 id 取。
+            // 别用 entity/shulker/shulker.png：那是 64x64 实体展开图，左上 16x16
+            // 是透明区，占位盒 uv 0..16 正好采进去，cutout 把面全 discard 成碎片框。
+            return $"minecraft:block/{id}";
         }
 
         if (id.Contains("chest", StringComparison.Ordinal))

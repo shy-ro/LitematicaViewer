@@ -344,9 +344,15 @@ public sealed class BlockStateResolver
                         sprite = "";
                     }
 
+                    // face 不写 uv 时不是全贴图：MC 按元素盒在面上的投影生成
+                    // （BlockElement.uvsByFace，侧面 v 还要按 16-y 镜像）。cake 系列
+                    // 的所有 face 都不写 uv，元素又是 [1,0,1]→[15,8,15] 不满格——
+                    // 默认 0..16 会让侧面上半采到贴图的透明段被 cutout 丢光、
+                    // 顶面整体错位放大。cake_side.png 的白霜就烙在 v 8..11，
+                    // 贴图本身按「投影取下半」设计，公式与外观互相印证。
                     var uv = faceElement.TryGetProperty("uv", out var uvElement)
                         ? ReadVector4(uvElement)
-                        : new Vector4(0, 0, 16, 16);
+                        : ProjectedUv(face, from, to);
 
                     var cullface = faceElement.TryGetProperty("cullface", out var cullElement)
                         ? cullElement.GetString()
@@ -367,6 +373,24 @@ public sealed class BlockStateResolver
         }
 
         return result;
+    }
+
+    // 照抄 BlockElement.uvsByFace（纹素坐标 0..16）：从面外侧看，纹理左上
+    // 对齐面的左上——north/east/down 的 u/v 因此带 16-x 镜像。侧面 v 取
+    // 16-to.y..16-from.y 是「元素在方块里的绝对高度段对应贴图同段」的语义，
+    // 不是把贴图缩放进面：蛋糕元素高 0..8，贴图下半段才有内容。
+    private static Vector4 ProjectedUv(FaceName face, Vector3 from, Vector3 to)
+    {
+        return face switch
+        {
+            FaceName.Down => new Vector4(from.X, 16 - to.Z, to.X, 16 - from.Z),
+            FaceName.Up => new Vector4(from.X, from.Z, to.X, to.Z),
+            FaceName.North => new Vector4(16 - to.X, 16 - to.Y, 16 - from.X, 16 - from.Y),
+            FaceName.South => new Vector4(from.X, 16 - to.Y, to.X, 16 - from.Y),
+            FaceName.West => new Vector4(from.Z, 16 - to.Y, to.Z, 16 - from.Y),
+            FaceName.East => new Vector4(16 - to.Z, 16 - to.Y, 16 - from.Z, 16 - from.Y),
+            _ => new Vector4(0, 0, 16, 16)
+        };
     }
 
     private static bool TryParseFaceName(string name, out FaceName face)
