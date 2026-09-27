@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- prevhost.exe 以 InprocServer32 加载原生 COM dll：只有 NativeAOT 产物能当
+         进程内服务器（托管 dll 需要 CLR 注入宿主，微软自己都不推荐）。 -->
+    <PublishAot>true</PublishAot>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\LitematicaViewer.Core\LitematicaViewer.Core.csproj" />
+    <ProjectReference Include="..\LitematicaViewer.Assets\LitematicaViewer.Assets.csproj" />
+    <ProjectReference Include="..\LitematicaViewer.Meshing\LitematicaViewer.Meshing.csproj" />
+  </ItemGroup>
+
+  <!-- vcvarsall 靠 reg.exe 查 Windows SDK 的 LIB 目录，而本机安全策略把 reg.exe
+       拉黑了，检测出的 LIB 只有 MSVC 段——链接时 LNK1181 找不到 advapi32.lib。
+       SDK 的两段库目录在这里显式补上，不依赖注册表探测。 -->
+  <ItemGroup>
+    <AdditionalNativeLibraryDirectories Include="C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x64" />
+    <AdditionalNativeLibraryDirectories Include="C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\ucrt\x64" />
+  </ItemGroup>
+
+</Project>

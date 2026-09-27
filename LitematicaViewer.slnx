@@ -6,5 +6,6 @@
     <Project Path="src/LitematicaViewer.Previewer.Sample/LitematicaViewer.Previewer.Sample.csproj"/>
     <Project Path="src/LitematicaViewer.Previewer/LitematicaViewer.Previewer.csproj"/>
     <Project Path="src/LitematicaViewer.SamplePreviewer/LitematicaViewer.SamplePreviewer.csproj"/>
+    <Project Path="src/LitematicaViewer.ShellPreview/LitematicaViewer.ShellPreview.csproj"/>
   </Folder>
 </Solution>
