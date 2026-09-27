@@ -13,9 +13,16 @@ internal static class SceneLoader
 {
     public static Scene Load(string litematicPath)
     {
-        var packsDirectory = FindPacksDirectory()
-            ?? throw new DirectoryNotFoundException(
+        Exports.Log($"packs search: self={SelfModulePathForLog()}");
+        var packsDirectory = FindPacksDirectory();
+        if (packsDirectory is null)
+        {
+            Exports.Log("packs search: MISS after 7 levels up");
+            throw new DirectoryNotFoundException(
                 "找不到 packs/ 资源包目录（把原版 client.jar 与材质包放进去，与预览器同一套目录约定）");
+        }
+
+        Exports.Log($"packs search: HIT {packsDirectory}");
 
         var result = LitematicLoader.TryLoadFile(litematicPath);
         if (!result.Success || result.Document is null)
@@ -63,17 +70,34 @@ internal static class SceneLoader
     private static string? FindPacksDirectory()
     {
         if (!GetSelfModulePath(out var dllPath))
+        {
+            Exports.Log("packs search: self module path lookup failed");
             return null;
+        }
 
         DirectoryInfo? dir = new(Path.GetDirectoryName(Path.GetFullPath(dllPath))!);
         for (var i = 0; i < 7 && dir is not null; i++, dir = dir.Parent)
         {
             var candidate = Path.Combine(dir.FullName, "packs");
-            if (Directory.Exists(candidate))
+            var hit = Directory.Exists(candidate);
+            Exports.Log($"packs search: lv{i} {candidate} -> {(hit ? "HIT" : "no")}");
+            if (hit)
                 return candidate;
         }
 
         return null;
+    }
+
+    // 供取证日志用：模块自身路径；拿不到就标注失败原因。
+    internal static string SelfModulePathForLog() =>
+        GetSelfModulePath(out var p) ? p : "<module lookup failed>";
+
+    // 模块安装目录（取证日志的可靠落点：装到哪就写哪，不依赖宿主进程环境）。
+    internal static string SelfModuleDirectory()
+    {
+        if (!GetSelfModulePath(out var p))
+            return Path.GetTempPath();
+        return Path.GetDirectoryName(p) ?? Path.GetTempPath();
     }
 
     // 用本程序集内的函数地址反查 dll 模块，再取模块文件路径。

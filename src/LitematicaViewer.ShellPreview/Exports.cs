@@ -37,15 +37,21 @@ internal static unsafe partial class Exports
         return hr;
     }
 
-    // COM 链路问题的取证口：写固定文件，宿主进程（python/prevhost）的
-    // stdout 摸不到这里。定位完 QI 问题后可整体移除。
+    // COM 链路问题的取证口。prevhost 由 DCOM 启动器拉起，环境变量可能不是交互用户的
+    // （TEMP 解析到别处且写不进去，全部异常被吞 → 日志静默消失），所以双路写：
+    // 模块安装目录（我们自己装的，必可写）+ TEMP，谁成功写谁。
     internal static void Log(string message)
+    {
+        var line = $"{DateTime.Now:HH:mm:ss.fff} {message}\n";
+        WriteTry(Path.Combine(SceneLoader.SelfModuleDirectory(), "shellpreview.log"), line);
+        WriteTry(Path.Combine(Path.GetTempPath(), "shellpreview.log"), line);
+    }
+
+    private static void WriteTry(string path, string line)
     {
         try
         {
-            File.AppendAllText(
-                Path.Combine(Path.GetTempPath(), "shellpreview.log"),
-                $"{DateTime.Now:HH:mm:ss.fff} {message}\n");
+            File.AppendAllText(path, line);
         }
         catch
         {

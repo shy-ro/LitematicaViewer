@@ -54,6 +54,7 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
     public int Initialize(string filePath, uint grfMode)
     {
         _path = filePath;
+        Exports.Log($"Initialize path={filePath} mode=0x{grfMode:X}");
         return 0; // S_OK
     }
 
@@ -136,6 +137,7 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
 
     public int DoPreview()
     {
+        Exports.Log($"DoPreview path={_path}");
         // 实际加载推迟到 Show（那里才确定窗口活着），这里只标记启动过。
         return 0;
     }
