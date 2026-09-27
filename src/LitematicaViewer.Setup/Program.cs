@@ -36,6 +36,7 @@ internal static class Program
 
     private static int Main(string[] args)
     {
+        Log($"main start args=[{string.Join(", ", args)}]");
         try
         {
             if (args.Length >= 1 && args[0] == "/uninstall-go")
@@ -66,6 +67,8 @@ internal static class Program
         }
         catch (Exception ex)
         {
+            // COM/脚本边界没人看弹窗细节：先落日志再弹，静默装的时候日志是唯一线索。
+            Log($"FATAL {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
             Box(0x10 /*MB_ICONERROR*/, "失败：" + ex.Message);
             return 1;
         }
@@ -75,9 +78,18 @@ internal static class Program
 
     private static void Install(bool quiet)
     {
+        Log($"install start quiet={quiet}");
         var payload = ReadResource("LitematicaViewer.ShellPreview.dll");
         var angle = ReadResource("LitematicaViewer.av_libglesv2.dll");
         var jar = ReadResource("LitematicaViewer.vanilla.jar");
+        Log($"install: resources payload={payload?.Length.ToString() ?? "null"} " +
+            $"angle={angle?.Length.ToString() ?? "null"} jar={jar?.Length.ToString() ?? "null"}");
+        if (payload is null)
+        {
+            // 嵌入资源大小写敏感、名字一个字符都不能差：列出来才知道嵌没嵌、嵌的叫什么。
+            Log("install: manifest resources=[" +
+                string.Join(", ", typeof(Program).Assembly.GetManifestResourceNames()) + "]");
+        }
         if (payload is null || jar is null || angle is null)
         {
             Box(0x10, "安装包里缺少 payload（Debug 构建的安装器不带资源，请用 Release 版）。");
@@ -89,6 +101,11 @@ internal static class Program
         {
             return;
         }
+
+        // 覆盖前先杀代理宿主：prevhost 映射着旧 dll，不杀则 WriteAllBytes 直接 IOException
+        // （部署脚本静默装 rc 1 的根因）。prevhost 是共享 surrogate，误杀别的预览会按需重生。
+        KillPrevhost();
+        Log("install: prevhost cleared, writing files");
 
         Directory.CreateDirectory(InstallDir);
         var dllPath = Path.Combine(InstallDir, PayloadName);
@@ -123,6 +140,7 @@ internal static class Program
         // （本机 12 个能工作的 handler 全在 HKLM 这份清单里，实测缺失时零激活）。
         SetValues(@"Software\Microsoft\Windows\CurrentVersion\PreviewHandlers",
             (Clsid, "Litematica Preview Handler"));
+        Log("install: registry done");
 
         // 系统卸载入口（设置→应用）。
         SetValues(rf($@"Software\Microsoft\Windows\CurrentVersion\Uninstall\{UninstallKeyName}"),
@@ -134,17 +152,33 @@ internal static class Program
             ("NoRepair", 1),
             ("EstimatedSize", (payload.Length + angle.Length + jar.Length + 4 * 1024 * 1024) / 1024)); // KB，含 AOT 运行时粗估
 
-        if (!quiet && Box(0x40, "安装完成。立即重启资源管理器让预览生效？（会关闭已打开的文件夹窗口）")
-            == 6 /*IDYES*/)
+        // 装完必重启 Explorer：预览宿主对新注册表与 dll 的感知只有重启才可靠，
+        // 不重启的现象就是「装完了窗格没反应/资源管理器假死」，问都不用问。
+        RestartExplorer();
+
+        if (!quiet)
         {
-            RestartExplorer();
+            Box(0x40, "安装完成，资源管理器已重启。");
         }
     }
 
     private static byte[]? ReadResource(string logicalName)
     {
-        using var stream = typeof(Program).Assembly
-            .GetManifestResourceStream(logicalName);
+        var assembly = typeof(Program).Assembly;
+        var stream = assembly.GetManifestResourceStream(logicalName);
+        if (stream is null)
+        {
+            // 兜底：嵌入名被 MSBuild 加 RootNamespace 前缀时（csproj 换嵌入方式的坑），
+            // 按后缀找唯一命中，别让 payload 静默变 null 装出个空壳。
+            var match = assembly.GetManifestResourceNames()
+                .FirstOrDefault(n => n.EndsWith(logicalName, StringComparison.Ordinal));
+            if (match is not null)
+            {
+                Log($"resource '{logicalName}' found as '{match}' (prefixed)");
+                stream = assembly.GetManifestResourceStream(match);
+            }
+        }
+
         if (stream is null)
         {
             return null;
@@ -166,6 +200,10 @@ internal static class Program
 
         // 只删自己注册的东西；历史挂点一并清。
         Log("uninstall-go: deleting registry");
+
+        // prevhost 映射着装好的 dll，不先杀则目录永远删不干净（部署脚本里
+        // 「DIR STILL THERE」的根因）。
+        KillPrevhost();
         TryDelete(rf(@"Software\Classes\LitematicaViewer.Projection"));
         TryDelete(rf(@"Software\Classes\.litematic"));
         TryDelete(rf($@"Software\Classes\SystemFileAssociations\.litematic\shellex\{PreviewIid}"));
@@ -209,15 +247,12 @@ internal static class Program
             CreateNoWindow = true,
         });
 
-        if (quiet)
-        {
-            return;
-        }
+        // 卸载完同样必重启 Explorer：清掉壳里残留的 handler 激活状态。
+        RestartExplorer();
 
-        Box(0x40, "卸载完成。");
-        if (Box(0x40, "立即重启资源管理器清理残留的预览状态？") == 6)
+        if (!quiet)
         {
-            RestartExplorer();
+            Box(0x40, "卸载完成，资源管理器已重启。");
         }
     }
 
@@ -263,13 +298,69 @@ internal static class Program
 
     private static void RestartExplorer()
     {
-        var sys = Environment.GetFolderPath(Environment.SpecialFolder.System);
-        Process.Start(new ProcessStartInfo(Path.Combine(sys, "taskkill.exe"), "/f /im explorer.exe")
+        // 每步自吞异常：重启只是收尾体验，失败不该把装好的安装判成 rc 1。
+        // 但每步都落日志，远端排查时能看见卡在哪。
+        try
         {
-            CreateNoWindow = true,
-        });
-        Thread.Sleep(800);
-        Process.Start(new ProcessStartInfo(Path.Combine(sys, "explorer.exe")));
+            var sys = Environment.GetFolderPath(Environment.SpecialFolder.System);
+            Log($"restart-explorer: sys={sys}");
+            Process.Start(new ProcessStartInfo(Path.Combine(sys, "taskkill.exe"), "/f /im explorer.exe")
+            {
+                CreateNoWindow = true,
+            });
+            // 等旧壳真退干净再起新的：立刻 Start 会出现新旧两份 shell 抢任务栏。
+            for (var i = 0; i < 30 && Process.GetProcessesByName("explorer").Length > 0; i++)
+            {
+                Thread.Sleep(100);
+            }
+
+            Log("restart-explorer: launching new shell");
+            // explorer.exe 在 C:\Windows 下，不在 System32——跟 taskkill 同目录取
+            // 会拿不到文件（「装完 Explorer 没起来要手动重启」的原始根因）。
+            // 必须 CreateProcess（UseShellExecute=false）：ShellExecute 路径在无壳
+            // 状态下静默不启动（返回成功但进程没出现，实测）。
+            var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            Process.Start(new ProcessStartInfo(Path.Combine(windows, "explorer.exe"))
+            {
+                UseShellExecute = false,
+            });
+            Log($"restart-explorer: done from {windows}");
+        }
+        catch (Exception ex)
+        {
+            Log($"restart-explorer FAILED {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // 杀掉共享预览代理宿主并等它退净：它映射着我们装的 dll，
+    // 不等退净，覆盖写/删目录都会撞 IOException。
+    private static void KillPrevhost()
+    {
+        Log("kill-prevhost: enter");
+        try
+        {
+            var sys = Environment.GetFolderPath(Environment.SpecialFolder.System);
+            Log($"kill-prevhost: sys={sys}");
+            Process.Start(new ProcessStartInfo(Path.Combine(sys, "taskkill.exe"), "/f /im prevhost.exe")
+            {
+                CreateNoWindow = true,
+            });
+            Log("kill-prevhost: taskkill spawned");
+        }
+        catch (Exception ex)
+        {
+            Log($"kill-prevhost FAILED {ex.GetType().Name}: {ex.Message}");
+            return;
+        }
+
+        var left = 0;
+        for (var i = 0; i < 30; i++)
+        {
+            left = Process.GetProcessesByName("prevhost").Length;
+            if (left == 0) break;
+            Thread.Sleep(100);
+        }
+        Log($"kill-prevhost: done left={left}");
     }
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
