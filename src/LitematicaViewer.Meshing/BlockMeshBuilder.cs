@@ -276,6 +276,23 @@ public sealed class BlockMeshBuilder
         var uvC = MapUv(face.Uv.Z, face.Uv.W, rect);
         var uvD = MapUv(face.Uv.X, face.Uv.W, rect);
 
+        // 面级 uv rotation：MC 把贴图在面上顺时针转（观察面时）。活塞模板四个侧面
+        // 全靠它把 piston_side 顶部的木带包到平台前缘；不转的话橙带躺倒顶边，
+        // 看起来就像活塞头纹理长到了别的面上。角点整体轮转（uvA 原是贴图左上）：
+        // 顺转 90° 后面的左上角采样自贴图左下，180° 来自右下，270° 来自右上。
+        switch (((face.UvRotationDegrees % 360) + 360) % 360)
+        {
+            case 90:
+                (uvA, uvB, uvC, uvD) = (uvD, uvA, uvB, uvC);
+                break;
+            case 180:
+                (uvA, uvB, uvC, uvD) = (uvC, uvD, uvA, uvB);
+                break;
+            case 270:
+                (uvA, uvB, uvC, uvD) = (uvB, uvC, uvD, uvA);
+                break;
+        }
+
         Vector3? cullface = face.Cullface is string dir && TryDirection(dir, out var cull) ? cull : null;
 
         // variant 的 x/y 旋转同样转 cullface：横放的原木（axis=x 的 variant 带 x=90），
