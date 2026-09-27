@@ -27,3 +27,12 @@ audit_probe.txt
 _report.txt
 
 dist/
+
+# 会话产物：测试 litematic、截帧/诊断图与日志（tools 脚本可重新生成，不进仓库）
+/*.png
+/*.pgm
+/*.litematic
+/*.log
+/*.txt
+packs_1201/
+packs_hold/
