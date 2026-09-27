@@ -91,7 +91,7 @@ public sealed class BlockStateResolver
             // 不会匹配两个键，多收是我们解析器的错，交给断言盯着。
             if (!Matches(entry.Name, properties)) continue;
 
-            AddEntry(entry.Value, blockName, output);
+            AddEntry(entry.Value, blockName, properties, output);
             return;
         }
 
@@ -104,20 +104,21 @@ public sealed class BlockStateResolver
             if (!MatchesLenient(entry.Name, properties)) continue;
 
             Debug.WriteLine($"[ASSETS][resolve] 精确匹配全灭，按通配兜底 key={entry.Name} block={blockName}");
-            AddEntry(entry.Value, blockName, output);
+            AddEntry(entry.Value, blockName, properties, output);
             return;
         }
     }
 
-    private void AddEntry(JsonElement variant, string blockName, List<ResolvedVariant> output)
+    private void AddEntry(JsonElement variant, string blockName,
+        ImmutableDictionary<string, string> properties, List<ResolvedVariant> output)
     {
         switch (variant.ValueKind)
         {
             case JsonValueKind.Object:
-                AddVariant(variant, blockName, output);
+                AddVariant(variant, blockName, properties, output);
                 break;
             case JsonValueKind.Array:
-                foreach (var item in variant.EnumerateArray()) AddVariant(item, blockName, output);
+                foreach (var item in variant.EnumerateArray()) AddVariant(item, blockName, properties, output);
                 break;
             default:
                 Debug.WriteLine($"[ASSETS][resolve] variants 值类型异常 kind={variant.ValueKind}");
@@ -135,15 +136,16 @@ public sealed class BlockStateResolver
             if (part.TryGetProperty("apply", out var apply))
             {
                 if (apply.ValueKind == JsonValueKind.Object)
-                    AddVariant(apply, blockName, output);
+                    AddVariant(apply, blockName, properties, output);
                 else if (apply.ValueKind == JsonValueKind.Array)
                     foreach (var item in apply.EnumerateArray())
-                        AddVariant(item, blockName, output);
+                        AddVariant(item, blockName, properties, output);
             }
         }
     }
 
-    private void AddVariant(JsonElement variant, string blockName, List<ResolvedVariant> output)
+    private void AddVariant(JsonElement variant, string blockName,
+        ImmutableDictionary<string, string> properties, List<ResolvedVariant> output)
     {
         if (!variant.TryGetProperty("model", out var modelElement))
         {
@@ -158,7 +160,7 @@ public sealed class BlockStateResolver
 
         // builtin/entity（方块实体渲染的方块）与流体模型的 elements 是空的，
         // 原样返回就是「整块消失」；按方块名换一个占位几何再出去。
-        if (FallbackModels.TryGet(blockName, modelId, model, out var fallback)) model = fallback;
+        if (FallbackModels.TryGet(blockName, modelId, model, properties, out var fallback)) model = fallback;
 
         output.Add(new ResolvedVariant(modelId, model, x, y));
     }
