@@ -13,7 +13,8 @@ src/
   LitematicaViewer.SamplePreviewer 交互式预览器（Avalonia 桌面程序）
   LitematicaViewer.ShellPreview    Windows 预览窗格 COM handler（AOT dll）
   LitematicaViewer.Setup           安装器（把 ShellPreview dll 嵌进单文件 exe）
-tools/                             辅助脚本（生成测试文件、出安装包）
+build_installer.py                 一键出安装包（`python build_installer.py`，产物 dist/LitematicaViewer.Setup.exe）
+tools/                             辅助脚本（生成测试 litematic、覆盖审计等，均在本机跑）
 dist/                              产物与部署脚本（deploy_setup.py）
 ```
 
@@ -42,9 +43,13 @@ src/LitematicaViewer.SamplePreviewer/bin/Debug/net10.0/LitematicaViewer.SamplePr
 ### 3. 安装包（一键脚本）
 
 ```
-python tools/build_installer.py
+python build_installer.py
 产物：dist/LitematicaViewer.Setup.exe
 ```
+
+前置：dotnet SDK（global.json 钉 10.0.401）、NativeAOT 需要的 MSVC + Windows SDK
+（csproj 里写死了 Windows Kits 10.0.26100.0 的 um/ucrt 库路径）、`packs/vanilla-1.20.1.jar`
+（Setup 会把它嵌进去，缺了装出来是没资源的空壳）。脚本本身无参数，跑完打印产物大小。
 
 脚本做两步：先 publish ShellPreview 到 dist/ShellPreview（AOT 原生 dll + av_libglesv2.dll），
 再 publish Setup（把这些文件连同 packs/vanilla-1.20.1.jar 一起嵌进单文件安装器）。
