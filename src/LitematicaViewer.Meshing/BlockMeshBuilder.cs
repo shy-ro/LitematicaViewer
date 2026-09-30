@@ -419,7 +419,7 @@ public sealed partial class BlockMeshBuilder
         return true;
     }
 
-    // tint 槽号：0 不染 / 1 草绿 / 2 叶绿 / 3 水蓝，着色器里的固定色板按同一套编号。
+    // tint 槽号：0 不染 / 1 草绿 / 2 叶绿 / 3 水蓝 / 4..19 红石 power 0..15，着色器里的固定色板按同一套编号。
     // MC 原版按方块 id 查 colormap 注册表，tintindex 只是槽位号；这里用同一思路把
     // 「哪个方块染什么色」定在网格侧。按 plains 群系的固定色走（litematica 本体
     // 默认也是固定色），不做群系插值。
@@ -428,6 +428,28 @@ public sealed partial class BlockMeshBuilder
         var block = stateId;
         var bracket = stateId.IndexOf('[');
         if (bracket >= 0) block = stateId[..bracket];
+
+        // 红石线模型的 line/overlay 面使用 tintindex=0；原版由 power 查红石
+        // 颜色表染色。材质包通常提供灰度线贴图，槽位为 0 会让它保持白色。
+        if (block is "minecraft:redstone_wire" or "redstone_wire")
+        {
+            var power = 0;
+            if (bracket >= 0)
+            {
+                var properties = stateId[(bracket + 1)..].TrimEnd(']');
+                foreach (var property in properties.Split(',', StringSplitOptions.TrimEntries))
+                {
+                    var pair = property.Split('=', 2);
+                    if (pair.Length == 2 && pair[0] == "power" && int.TryParse(pair[1], out var parsed))
+                    {
+                        power = Math.Clamp(parsed, 0, 15);
+                        break;
+                    }
+                }
+            }
+
+            return 4f + power;
+        }
 
         // seagrass 含 "grass"，必须先于草绿判；kelp、bubble_column 是水色同理。
         if (block.Contains("water", StringComparison.Ordinal)

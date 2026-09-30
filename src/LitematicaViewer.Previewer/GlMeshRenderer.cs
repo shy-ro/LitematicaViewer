@@ -83,7 +83,7 @@ internal sealed class GlMeshRenderer : IDisposable
                                                     // 插值出 0.5~1 的中间 alpha，整片掉进不写深度的半透明 pass：
                                                     // 细杆几何大部分像素贴边，整根变虚影、透出背后的几何。
                                                     // 槽 3+ 是水系（水/气泡柱/海草/海带），整块走半透明。
-                                                    bool translucent = vTint > 2.5;
+                                                    bool translucent = vTint > 2.5 && vTint < 3.5;
                                                     if (uOpaquePass > 0.5 && translucent)
                                                     {
                                                         discard;
@@ -94,8 +94,8 @@ internal sealed class GlMeshRenderer : IDisposable
                                                         discard;
                                                     }
 
-                                                    // 固定色板，槽号由网格侧按方块 id 归类写进顶点（0 不染 / 1 草 / 2 叶 / 3 水）。
-                                                    // 颜色取 plains 群系：草 #91BD59、叶 #77AB2F、水 #3F76E4。
+                                                    // 固定色板，槽号由网格侧按方块 id 归类写进顶点（0 不染 / 1 草 / 2 叶 / 3 水 / 4..19 红石 power）。
+                                                    // 颜色取 plains 群系：草 #91BD59、叶 #77AB2F、水 #3F76E4；红石随 power 由暗红到亮红。
                                                     // 树叶/草的贴图本身是灰度图，不染就是用户看到的灰白。
                                                     vec3 tint = vec3(1.0);
                                                     if (vTint > 0.5 && vTint < 1.5)
@@ -108,7 +108,15 @@ internal sealed class GlMeshRenderer : IDisposable
                                                     }
                                                     else if (vTint > 2.5)
                                                     {
-                                                        tint = vec3(0.247, 0.463, 0.894);
+                                                        if (vTint < 3.5)
+                                                        {
+                                                            tint = vec3(0.247, 0.463, 0.894);
+                                                        }
+                                                        else
+                                                        {
+                                                            float power = clamp(vTint - 4.0, 0.0, 15.0) / 15.0;
+                                                            tint = mix(vec3(0.30, 0.0, 0.0), vec3(1.0, 0.04, 0.01), power);
+                                                        }
                                                     }
 
                                                     // 不透明 pass 输出 alpha 1.0：cutout 层在 vanilla 里不做混合，边缘
