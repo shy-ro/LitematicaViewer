@@ -424,38 +424,87 @@ internal static class PreviewBlocks
         return key.Replace(':', '_');
     }
 
-    // region 模式入口：不关心完整方块判据，只要像素。
+    // 8 个包围盒角在屏幕两轴上的最大投影半展宽。两轴共用一个缩放（保形），所以取两者的大值，
+    // 横向与纵向都不会溢出。半径必须按屏幕展宽算，不能拿世界空间半径（对角半径 0.87、
+    // 或干脆写 0.5）——等距投影下单位立方体的纵向展宽是 0.79，写 0.5 必然切掉顶/底面。
+    private static float FitRadius(Vector3 min, Vector3 max, Vector3 centre, Vector3 right, Vector3 up)
+    {
+        var radius = 0f;
+        for (var corner = 0; corner < 8; corner++)
+        {
+            Vector3 c = new(
+                (corner & 1) == 0 ? min.X : max.X,
+                (corner & 2) == 0 ? min.Y : max.Y,
+                (corner & 4) == 0 ? min.Z : max.Z);
+            var rel = c - centre;
+            radius = MathF.Max(radius,
+                MathF.Max(MathF.Abs(Vector3.Dot(rel, right)), MathF.Abs(Vector3.Dot(rel, up))));
+        }
+
+        return radius;
+    }
+
+    // region 模式入口：按传入的 region 包围盒取景，不做自适应。
     private static byte[] RenderRegionToBuffer(MeshData mesh, TextureAtlas atlas, int side, Vector3 centre,
         float radius)
     {
-        return RenderGeneral(mesh, atlas, side, centre, radius, false).Rgb;
+        return RenderGeneral(mesh, atlas, side, centre, radius, false, false).Rgb;
     }
 
+    // 单方块入口：取景由网格自身的包围盒推得（autoFit）。
+    // 曾经写死 centre=(0.5,0.5,0.5)、radius=0.5，等于假定「球半径 0.5」——但等距投影下
+    // 单位立方体的屏纵向半展宽是 0.79（横向 0.71），顶面/底面本就溢出格子被切；高度
+    // 1.5 的栅栏、2 的门、1/16 的地毯更惨。自适应后每个方块都完整装进格子。
     private static (byte[] Rgb, bool IsFullCube, int HolePixels) RenderToBuffer(MeshData mesh, TextureAtlas atlas,
         int side)
     {
-        return RenderGeneral(mesh, atlas, side, new Vector3(0.5f, 0.5f, 0.5f), 0.5f, true);
+        return RenderGeneral(mesh, atlas, side, default, 0f, true, true);
     }
 
-    // 通用软件光栅化：等距视角（yaw 45°、pitch≈33.7°），正交投影，centre/radius 决定取景。
+    // 通用软件光栅化：等距视角（yaw 45°、pitch≈33.7°），正交投影。
+    // autoFit=true 时 centre/radius 由网格包围盒推得（单方块用）；false 时按传入值取景（region 用）。
     // keepFullCubeInfo 只在单方块模式下有意义，region 模式恒 false。
     private static (byte[] Rgb, bool IsFullCube, int HolePixels) RenderGeneral(
-        MeshData mesh, TextureAtlas atlas, int side, Vector3 centre, float radius, bool keepFullCubeInfo)
+        MeshData mesh, TextureAtlas atlas, int side, Vector3 centre, float radius, bool autoFit,
+        bool keepFullCubeInfo)
     {
         var rgb = new byte[side * side * 3];
         var zbuf = new float[side * side];
         Array.Fill(zbuf, float.NegativeInfinity);
 
+        var vertexCount = mesh.Vertices.Length / MeshData.FloatsPerVertex;
+        if (vertexCount == 0) return (rgb, false, 0);
+
         // right = up × eyeDir（lookAt 的 x 轴）；up 由两者叉积闭合。
         var right = Vector3.Normalize(Vector3.Cross(new Vector3(0, 1, 0), EyeDir));
         var up = Vector3.Cross(EyeDir, right);
+
+        if (autoFit)
+        {
+            Vector3 min = new(float.MaxValue), max = new(float.MinValue);
+            for (var i = 0; i < vertexCount; i++)
+            {
+                Vector3 p = new(
+                    mesh.Vertices[i * MeshData.FloatsPerVertex + MeshData.PositionOffset],
+                    mesh.Vertices[i * MeshData.FloatsPerVertex + MeshData.PositionOffset + 1],
+                    mesh.Vertices[i * MeshData.FloatsPerVertex + MeshData.PositionOffset + 2]);
+                min = Vector3.Min(min, p);
+                max = Vector3.Max(max, p);
+            }
+
+            centre = (min + max) * 0.5f;
+            // 尺度下限锚在单位立方体的实际投影展宽上：≤1 格的方块彼此保持同尺（矮的看起来
+            // 就是矮的、小的就是小的），只有更高的方块（栅栏 1.5、门 2）才为装下而整体缩小。
+            // 没有这个下限，火把/按钮会被放大到和方块一样大，失去尺寸参照。
+            radius = MathF.Max(
+                FitRadius(Vector3.Zero, Vector3.One, new Vector3(0.5f), right, up),
+                FitRadius(min, max, centre, right, up));
+        }
+
         // 边距按比例留（5%）：montage 的 96px 格和单图的 192px 共用同一个取景逻辑。
-        var scale = side / 2f * 0.9f / radius;
+        var scale = side / 2f * 0.9f / MathF.Max(radius, 1e-3f);
 
-        var vertexCount = mesh.Vertices.Length / MeshData.FloatsPerVertex;
-        var screen = vertexCount > 0 ? stackalloc Vector3[vertexCount] : default;
-        if (vertexCount == 0) return (rgb, false, 0);
-
+        Span<Vector3> screen = stackalloc Vector3[vertexCount];
         for (var i = 0; i < vertexCount; i++)
         {
             Vector3 p = new(
