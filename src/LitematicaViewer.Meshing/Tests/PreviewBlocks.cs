@@ -190,12 +190,28 @@ internal static class PreviewBlocks
         Trace.AutoFlush = true;
 
         using PackStack packs = new();
+        List<string> packNames = [];
         foreach (var path in packPaths)
         {
+            // 路径不存在时 OpenZip 会抛 FileNotFoundException，Release 下用户只看到进程退出，
+            // 没有上下文。这里点名道姓再退，比栈回溯好认。
+            if (!File.Exists(path) && !Directory.Exists(path))
+            {
+                Console.Error.WriteLine($"[MESH] 资源包不存在: {path}");
+                return 2;
+            }
+
             var pack = Directory.Exists(path) ? ResourcePack.OpenFolder(path) : ResourcePack.OpenZip(path);
             packs.Add(pack);
+            packNames.Add(pack.Name);
             Debug.WriteLine($"[MESH][preview] 装包 {pack.Name}");
         }
+
+        // 下面这组 Console.Out 是给命令行用户的：Debug.WriteLine 在 Release 下被整个移除，
+        // 光靠它跑 montage 时终端一片空白，会被当成「没跑」。Console 只打关键节点，不打细节。
+        Console.Out.WriteLine(packNames.Count == 0
+            ? "[MESH] 未装资源包（图集会全空）"
+            : $"[MESH] 装包 {packNames.Count} 个（栈底→栈顶）: {string.Join(" | ", packNames)}");
 
         BlockStateResolver resolver = new(packs);
 
@@ -209,6 +225,9 @@ internal static class PreviewBlocks
                 s.Props.Contains(m.Filter, StringComparison.Ordinal)).ToList();
 
         Debug.WriteLine($"[MESH][preview] 状态总数 {states.Count}");
+        Console.Out.WriteLine(montage is { Filter.Length: > 0 } fm
+            ? $"[MESH] 状态 {states.Count}（已按过滤 \"{fm.Filter}\" 筛过）"
+            : $"[MESH] 状态 {states.Count}");
 
         // 2) 第一遍 resolve：收集 sprite，顺带定下要出图的格子。默认按「模型+旋转」去重——
         //    台阶 128 个状态的画面只有 8 种，铺 128 张只会淹掉真正异常的那张。
@@ -261,10 +280,15 @@ internal static class PreviewBlocks
         Debug.WriteLine(
             $"[MESH][preview] 出图格 {renderKeys.Count}（去重 {(dedup ? "开" : "关")}）" +
             $" sprites={sprites.Count} 解析失败={resolveFailures.Count}");
+        Console.Out.WriteLine(
+            $"[MESH] 出图格 {renderKeys.Count}（去重 {(dedup ? "开" : "关")}） sprite {sprites.Count} 解析失败 {resolveFailures.Count}"
+            + (montage is { Limit: not int.MaxValue } lm ? $"，本图上限 {lm.Limit}" : string.Empty));
 
         var atlas = TextureAtlas.Build(packs, sprites);
         Debug.WriteLine(
             $"[MESH][preview] 图集 {atlas.Width}x{atlas.Height} 缺图={atlas.MissingCount}");
+        Console.Out.WriteLine(
+            $"[MESH] 图集 {atlas.Width}x{atlas.Height}（sprite {atlas.Rects.Count}）缺图 {atlas.MissingCount}");
 
         // 图集装了哪些 sprite、缺了哪些：排查「方块整块发白/品红」时先看这里，
         // 比翻图集 PNG 快。落盘到输出目录，两种模式都写。
@@ -333,6 +357,8 @@ internal static class PreviewBlocks
             }
 
             written++;
+            if (written % 1000 == 0)
+                Console.Out.WriteLine($"[MESH]   …渲染 {written}/{renderKeys.Count}");
 
             if (mesh.Indices.Length == 0) emptyMeshes.Add(key);
 
@@ -341,9 +367,12 @@ internal static class PreviewBlocks
 
         if (tiles is not null && montage is not null)
         {
-            WriteMontage(montage.OutPath, tiles, cell, montageKeys, montage.Names, montage.Gap);
+            var (mw, mh) = WriteMontage(montage.OutPath, tiles, cell, montageKeys, montage.Names, montage.Gap);
             var indexPath = Path.ChangeExtension(montage.OutPath, ".txt");
             File.WriteAllLines(indexPath, montageIndex);
+            Console.Out.WriteLine(
+                $"[MESH] 拼图 {tiles.Count} 格 → {mw}x{mh}: {Path.GetFullPath(montage.OutPath)}");
+            Console.Out.WriteLine($"[MESH] 索引: {Path.GetFullPath(indexPath)}");
         }
 
         // 4) 汇总报告：人查 PNG，程序查两类铁律故障。
@@ -374,6 +403,10 @@ internal static class PreviewBlocks
         Debug.WriteLine(
             $"[MESH][preview] 完成 输出={written} 零面={emptyMeshes.Count} " +
             $"透洞完整方块={hollowCubes.Count} 报告={report}");
+        Console.Out.WriteLine(
+            $"[MESH] 完成：出图 {written} 格，零面 {emptyMeshes.Count}，透洞完整方块 {hollowCubes.Count}"
+            + $"，解析失败 {resolveFailures.Count}");
+        Console.Out.WriteLine($"[MESH] 报告: {Path.GetFullPath(report)}");
         return 0;
     }
 
@@ -794,8 +827,10 @@ internal static class PreviewBlocks
     // 背景与格子同色、格间距默认 0：格子之间没有缝也没有边框，方块之间靠自身的留白分开。
     // --names 时每格左侧让出一条标签列（状态键有自己的地盘，不压方块、也不截断）；
     // 标签列同时把相邻两格的方块隔开，所以没有间距也不会挤在一起。
-    private static void WriteMontage(string path, List<byte[]> tiles, int cell, List<string>? keys = null,
-        bool names = false, int gap = 0)
+    // 返回整图尺寸：RunCore 要把它打进 stdout（Release 下 Debug.WriteLine 全被裁掉，
+    // 用户跑命令行时没有这条就完全看不到反馈，看起来像「没跑」）。
+    private static (int Width, int Height) WriteMontage(string path, List<byte[]> tiles, int cell,
+        List<string>? keys = null, bool names = false, int gap = 0)
     {
         var labelled = names && keys is not null;
         var labelW = labelled ? Math.Max(48, cell * 5 / 8) : 0;
@@ -875,6 +910,7 @@ internal static class PreviewBlocks
 
         WriteChunk(file, "IDAT", idat);
         WriteChunk(file, "IEND", []);
+        return (width, height);
     }
 
     // 状态键标注：系统字体（GDI 默认 UI 字体 Segoe UI）、纯黄字、无底条。放在每格左侧的

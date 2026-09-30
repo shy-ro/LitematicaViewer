@@ -19,6 +19,18 @@ public static class MeshSmoke
 
     public static int Main(string[] args)
     {
+        // 中文 Windows 的 Console 默认走 OEM 代码页 936（GBK），而 Git Bash / Windows Terminal
+        // 按 UTF-8 解码，中文提示会全变乱码。统一成 UTF-8。重定向到文件时这行会抛
+        // IOException（句柄不是控制台），所以吞掉——那种场景下一律是 UTF-8 字节，也正确。
+        try
+        {
+            Console.OutputEncoding = System.Text.Encoding.UTF8;
+            Console.InputEncoding = System.Text.Encoding.UTF8;
+        }
+        catch (IOException)
+        {
+        }
+
         // --resolve <blockId> <资源包...>：打印一个状态串的解析结果（命中哪些模型、
         // 每个模型的盒子与面数），排查 variant/when 匹配问题用。
         if (args.Length >= 3 && args[0] == "--resolve")
