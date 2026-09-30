@@ -523,6 +523,9 @@ internal sealed unsafe partial class PreviewHandler : IPreviewHandler, IInitiali
             catch (Exception ex)
             {
                 error = ex.Message;
+                // 状态行只放 Message（窗格窄），但日志要留全栈——载入失败
+                // 十有八九是某一层的越界/空引用，只有类型没有栈就得靠人肉二分。
+                Exports.Log($"load task failed gen={generation}\n{ex}");
             }
 
             Exports.Log($"load task done gen={generation} scene={(scene is null ? "null" : "ok")} error={error ?? "-"}");

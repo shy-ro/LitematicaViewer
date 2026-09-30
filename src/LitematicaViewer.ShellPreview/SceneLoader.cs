@@ -66,13 +66,16 @@ internal static class SceneLoader
         // 展台取景数据从合并网格的实际顶点算，不从 region bounds 算：
         // BuildRegion 的输出坐标空间与 region.Bounds 不保证一致（实测机甲文件
         // 两者错位，光环浮到模型顶上），而网格顶点是渲染用的唯一事实。
+        // 步长必须取 MeshData.FloatsPerVertex（10），不能写死——顶点布局加过
+        // ao 之后从 9 变 10，写死 9 会在末尾多走一步，读越界直接抛
+        // IndexOutOfRangeException（黄色轿车.litematic 就是这样载入失败的）。
         Vector3 meshMin = new(float.MaxValue, float.MaxValue, float.MaxValue);
         Vector3 meshMax = new(float.MinValue, float.MinValue, float.MinValue);
-        for (var i = 0; i < vertices.Length; i += 9)
+        for (var i = 0; i < vertices.Length; i += MeshData.FloatsPerVertex)
         {
-            var x = vertices[i];
-            var y = vertices[i + 1];
-            var z = vertices[i + 2];
+            var x = vertices[i + MeshData.PositionOffset];
+            var y = vertices[i + MeshData.PositionOffset + 1];
+            var z = vertices[i + MeshData.PositionOffset + 2];
             if (x < meshMin.X) meshMin.X = x;
             if (y < meshMin.Y) meshMin.Y = y;
             if (z < meshMin.Z) meshMin.Z = z;
@@ -87,7 +90,7 @@ internal static class SceneLoader
         // 水平半对角线：展台取景与光环都由它定大小（语义对齐 Sample 的 ShowcaseTarget）。
         var radius = MathF.Max(1f, MathF.Sqrt(hx * hx + hz * hz));
 
-        Exports.Log($"scene merged vertices={vertices.Length / 9} indices={indices.Length} " +
+        Exports.Log($"scene merged vertices={vertices.Length / MeshData.FloatsPerVertex} indices={indices.Length} " +
                     $"atlas={atlas.Width}x{atlas.Height} levels={atlas.Levels.Length}");
         Exports.Log($"bbox min=({meshMin.X:F1},{meshMin.Y:F1},{meshMin.Z:F1}) " +
                     $"max=({meshMax.X:F1},{meshMax.Y:F1},{meshMax.Z:F1}) " +
