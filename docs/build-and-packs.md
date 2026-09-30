@@ -91,6 +91,73 @@ LitematicaViewer.Setup.exe /uninstall （卸载，从「设置-应用」进来�
 加材质包的步骤（两种形态一样）：把包文件/文件夹丢进对应 packs/，重开预览（安装版换文件或重选即可，
 不用重装；Sample 重启程序）。
 
+## 命令行工具（开发 / 排查用）
+
+两个冒烟 exe 自带子命令，产物一律落 `test_temp/`（见上文约定），用完即弃。
+
+### Meshing.exe（`src/LitematicaViewer.Meshing/bin/<配置>/net10.0/`）
+
+不带开关直接跑 = 默认回归：
+
+```
+LitematicaViewer.Meshing.exe <资源包...> <.litematic...>
+```
+
+按扩展名分流（`.litematic` 归待查文件，其余当资源包），跑一组硬编码不变量检查
+（CheckSingleBlock / CheckFaceCulling / CheckAmbientOcclusion / CheckLogAxisRotation /
+CheckFluidRules），再对每个 .litematic 跑量级+耗时检查，结束打印 `checks=N`。
+必须传资源包，否则图集空、断言全崩。
+
+| 子命令 | 用法 | 说明 |
+|---|---|---|
+| `--resolve` | `--resolve <状态串> <资源包...>` | 打印状态串命中的 variant / model id / 旋转角 / box 数面数 / 各 box 的 from-to。 |
+| `--preview` | `--preview <outDir> <资源包...>` | 逐状态出三面等距散图（192×192，文件名 = 状态键），另落 `_atlas_L*.png`、`_sprites.txt`、`_report.txt`。 |
+| `--montage` | `--montage <out.png> [开关...] <资源包...>` | 同一条 Render 链路拼网格大图，快速人检某类方块（开关见下表）。 |
+| `--probe` | `--probe <.litematic> <资源包...>` | 逐坐标打印非空气状态串，给「渲染器和第三方解码器逐坐标对账」当硬证据。 |
+| `--regionrender` | `--regionrender <out.png> <.litematic> [--size N] <资源包...>` | 真实 region 软件光栅化，与 GPU 截帧对照（level0 NEAREST、无 mipmap、无混合）。边长默认 768，下限 128；多 region 时第 2 个起落 `_r1`、`_r2`… |
+| `--dumpverts` | `--dumpverts <.litematic> <资源包...>` | 打印头几个面的顶点原始数据（pos/normal/uv/tint），查面退化。 |
+| `--uvhist` | `--uvhist <.litematic> <资源包...>` | 逐面取 uv 中心，统计落在各 sprite rect 内的面数，查 uv 映射错位。 |
+
+资源包参数一律 jar/zip/文件夹，顺序 = 从栈底到栈顶，后面压前面的。
+
+`--montage` 的开关**不分先后、全部可省**：
+
+| 开关 | 取值 | 默认 | 说明 |
+|---|---|---|---|
+| `--names` | 无 | 关 | 每格左侧让出标签列写状态键（系统字体、纯黄字、按列宽断行不截断，全名另在 `.txt` 索引里）。 |
+| `--nonames` | 无 | — | 显式关闭，容错成对写法。 |
+| `--nodup` | 无 | 关 | 关掉「模型 + 旋转」去重，每个解得出画面的状态各占一格，索引无缺口（格数约翻倍）。 |
+| `--gap` | N | 0 | 格间距像素，钳 0..64。格子底色与整图同色（40,40,40），0 即无缝无边框。 |
+| `--filter` | S | 空 | 对状态键做 `OrdinalContains` 过滤（`iron` 只看铁系），默认不过滤。 |
+| `--cell` | N | 128 | 每格像素边长，下限 32。取景按包围盒自适应，改它只改清晰度。 |
+| `--chunk` | N | 0 | 每块格数：>0 时每满 N 格落盘一张再继续（第 1 张原名，之后 `_2`、`_3`…），0 = 不分块铺一张。 |
+
+产物：`out.png`、同名 `.txt`（索引「序号: 状态键」，序号跨块全局连续）、输出目录下
+`_report.txt` 与 `_sprites.txt`。（`--preview` 与 `--montage` 共用同一目录，会互相覆盖
+`_report.txt`、`_sprites.txt`。）
+
+例：全量出一份、每 2000 格一块、带标签、不去重：
+
+```
+LitematicaViewer.Meshing.exe --montage test_temp/montage/full.png --names --nodup --cell 128 --chunk 2000 packs_hold/vanilla-26.3.jar
+```
+
+旧的位置写法 `[过滤子串] [格边长] [每块格数]` 仍兼容（`--regionrender` 的 `[边长]` 同理），
+但过滤位必须拿空串占位，而 PowerShell 会把 `""` 整个吞掉、参数整体左移一格（`128` 顶到过滤位），
+所以一律改用上面的具名开关。
+
+### Assets.exe（PackSmoke）
+
+```
+LitematicaViewer.Assets.exe <资源包...>                    # 默认回归
+LitematicaViewer.Assets.exe --scan <原版包> [覆盖包...]     # 全量扫 blockstate 体检
+```
+
+### 不在 Meshing.exe 的开关
+
+- `--shot <png>` / `--shot-dist <系数>`：Previewer.Sample 与 SamplePreviewer 的 GL 帧读回落盘。
+- `--selftest <秒>`：只在 Previewer.Sample，自动开窗跑交互剧本后关窗。
+
 ## 已知边界
 
 - piston_head 等方块若写 litematic 时没带全属性（如缺 type），会按「通配兜底」取第一个命中的

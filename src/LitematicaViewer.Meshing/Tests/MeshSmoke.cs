@@ -62,8 +62,9 @@ public static class MeshSmoke
         // --preview <outDir> <资源包...>：逐方块状态出三面视图 PNG（见 PreviewBlocks）。
         if (args.Length >= 2 && args[0] == "--preview") return PreviewBlocks.Run(args[1], [.. args.Skip(2)]);
 
-        // --montage <out.png> [过滤] [格边长] [上限] <资源包...>：同一条 Render 链路
-        // 拼成网格大图，快速人检某类方块（见 PreviewBlocks.RunMontage）。
+        // --montage <out.png> [开关...] <资源包...>：同一条 Render 链路拼成网格大图，
+        // 快速人检某类方块。开关（--names/--nodup/--gap N/--filter S/--cell N/--chunk N）
+        // 不分先后，见 PreviewBlocks.RunMontage。
         if (args.Length >= 2 && args[0] == "--montage") return PreviewBlocks.RunMontage(args);
 
         // --probe <litematic> <资源包...>：按网格层的读序打印角上 5x5x5 的状态串，
@@ -98,7 +99,7 @@ public static class MeshSmoke
             return 0;
         }
 
-        // --regionrender <out.png> <litematic> [边长] <资源包...>：真实 region 的软件光栅化，
+        // --regionrender <out.png> <litematic> [--size N] <资源包...>：真实 region 的软件光栅化，
         // 与 GPU 截帧对照用（见 PreviewBlocks.RunRegionRender）。
         if (args.Length >= 3 && args[0] == "--regionrender") return PreviewBlocks.RunRegionRender(args);
 

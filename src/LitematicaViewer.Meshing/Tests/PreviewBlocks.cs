@@ -56,18 +56,43 @@ internal static class PreviewBlocks
     // 装包与 atlas 构建，只是渲染对象从「单方块」换成「整个文档的每个 region」。
     public static int RunRegionRender(string[] args)
     {
-        // args：--regionrender <out.png> <litematic> [边长] <资源包...>
+        // args：--regionrender <out.png> <litematic> [--size N] <资源包...>。--size 不分先后，
+        // 旧的 [边长] 位置写法仍认（放在 litematic 之后、资源包之前）。
         var outPath = args[1];
         var litematicPath = args[2];
-        var scan = 3;
         var side = 768;
-        if (scan < args.Length && int.TryParse(args[scan], out var parsedSide))
+        var hasSide = false;
+        var packPaths = new List<string>();
+        for (var i = 3; i < args.Length; i++)
         {
-            side = Math.Max(128, parsedSide);
-            scan++;
+            if (args[i] == "--size")
+            {
+                if (i + 1 >= args.Length || !int.TryParse(args[i + 1], out var namedSide))
+                {
+                    Console.Error.WriteLine("[MESH] --size 需要整数参数");
+                    return 2;
+                }
+
+                side = Math.Max(128, namedSide);
+                hasSide = true;
+                i++;
+            }
+            else if (args[i].StartsWith("--", StringComparison.Ordinal))
+            {
+                Console.Error.WriteLine($"[MESH] 未知开关: {args[i]}（可用: --size N）");
+                return 2;
+            }
+            else
+            {
+                packPaths.Add(args[i]);
+            }
         }
 
-        List<string> packPaths = [.. args.Skip(scan)];
+        if (!hasSide && packPaths.Count > 0 && int.TryParse(packPaths[0], out var posSide))
+        {
+            side = Math.Max(128, posSide);
+            packPaths.RemoveAt(0);
+        }
         using PackStack packs = new();
         foreach (var path in packPaths)
             packs.Add(Directory.Exists(path) ? ResourcePack.OpenFolder(path) : ResourcePack.OpenZip(path));
@@ -133,12 +158,17 @@ internal static class PreviewBlocks
     // 而是按行序铺进一张 PNG。用途：快速人检「哪类方块不对劲」——翻几千张散图不现实，
     // 一张 montage 扫一眼就能圈出异常区，再回 --preview 拿单张细看。
     //
-    // args：--montage <out.png> [--names] [--gap N] [过滤子串] [每格边长] [每块格数] <资源包...>
-    // 过滤子串对状态键做 OrdinalContains（"iron" 只看铁系）。格边长默认 128，下限 32；
-    // 格间距 --gap 默认 0（格子同底色，本来也看不出缝）。--names 在每格左侧的标签列里
-    // 画状态键（系统字体、纯黄字、无底条、按列宽断行不截断，全名另在 .txt 索引里）。
-    // 每块格数 >0 时分块出多张图（第 1 张原名，之后 _2、_3…），0（默认）＝不分块铺一张。
-    // 开关先行剥离再走位置参数，否则会被当成过滤子串吃掉。每张图同行写一个 .txt 索引。
+    // args：--montage <out.png> [开关...] <资源包...>。开关不分先后，全部可省：
+    //   --names        每格左侧让出标签列写状态键（系统字体、纯黄字、按列宽断行不截断，全名另在 .txt 索引里）
+    //   --nonames      显式关（默认即关），容错成对写法
+    //   --nodup        关掉「模型+旋转」去重，每个解得出画面的状态各占一格
+    //   --gap N        格间距像素，默认 0（格子同底色，本来也看不出缝），钳 0..64
+    //   --filter S     对状态键做 OrdinalContains 过滤（"iron" 只看铁系），默认不过滤
+    //   --cell N       每格像素边长，默认 128，下限 32
+    //   --chunk N      每块格数，>0 时满一块就落盘一张再继续（第 1 张原名，之后 _2、_3…），0（默认）＝不分块
+    // 旧的位置写法 [过滤子串] [格边长] [每块格数] 仍认，但那套里过滤位必须拿空串占位，
+    // 而 PowerShell 会把 "" 整个吞掉、参数整体左移一格（128 顶到过滤位），所以一律改用具名开关。
+    // 每张图同行写一个 .txt 索引。
     public static int RunMontage(string[] args)
     {
         // args[1] 是输出路径，已在 MeshSmoke.Main 分流处保证存在。
@@ -146,42 +176,83 @@ internal static class PreviewBlocks
         var names = false;
         var gap = 0;
         var noDup = false;
-        var rest = new List<string>();
-        for (var i = 2; i < args.Length; i++)
-        {
-            if (args[i] == "--names") names = true;
-            else if (args[i] == "--nonames") { /* 默认即关，容错成对 */ }
-            else if (args[i] == "--nodup") noDup = true;
-            else if (args[i] == "--gap" && i + 1 < args.Length && int.TryParse(args[++i], out var parsedGap))
-                gap = Math.Clamp(parsedGap, 0, 64);
-            else rest.Add(args[i]);
-        }
-
         var filter = string.Empty;
         var cell = 128;
         var chunkSize = 0;
-        // 固定顺序：[过滤子串] [格边长] [每块格数]，都可选，遇到第一个资源包路径即停。
-        // （资源包路径若与数字同名会被吃掉——真实包名没有纯数字的，值得为省解析器不设转义。）
-        var scan = 0;
-        if (scan < rest.Count && !File.Exists(rest[scan]) && !Directory.Exists(rest[scan])) filter = rest[scan++];
-
-        if (scan < rest.Count && int.TryParse(rest[scan], out var parsedCell))
+        var named = false; // 用过 --filter/--cell/--chunk 任一就不认位置写法（--names/--nodup/--gap
+                           // 本来就不占位置，不该因此废掉旧命令）。混写时位置串会落到资源包位报错，比静默错位好认。
+        var rest = new List<string>();
+        for (var i = 2; i < args.Length; i++)
         {
-            cell = Math.Max(32, parsedCell);
-            scan++;
+            var arg = args[i];
+            if (arg == "--names") { names = true; continue; }
+            if (arg == "--nonames") { names = false; continue; }
+            if (arg == "--nodup") { noDup = true; continue; }
+
+            if (arg.StartsWith("--", StringComparison.Ordinal))
+            {
+                if (i + 1 >= args.Length)
+                {
+                    Console.Error.WriteLine($"[MESH] 开关 {arg} 缺参数值");
+                    return 2;
+                }
+
+                var value = args[++i];
+                switch (arg)
+                {
+                    case "--gap" when int.TryParse(value, out var g):
+                        gap = Math.Clamp(g, 0, 64);
+                        break;
+                    case "--filter":
+                        filter = value;
+                        named = true;
+                        break;
+                    case "--cell" when int.TryParse(value, out var parsedCell):
+                        cell = Math.Max(32, parsedCell);
+                        named = true;
+                        break;
+                    case "--chunk" when int.TryParse(value, out var parsedChunk):
+                        chunkSize = parsedChunk <= 0 ? 0 : parsedChunk;
+                        named = true;
+                        break;
+                    default:
+                        Console.Error.WriteLine($"[MESH] 未知开关或参数非法: {arg} {value}");
+                        Console.Error.WriteLine(
+                            "[MESH] 可用开关: --names --nonames --nodup --gap N --filter S --cell N --chunk N");
+                        return 2;
+                }
+
+                continue;
+            }
+
+            rest.Add(arg);
         }
 
-        // 每块格数：0（或负）＝不分块，全部铺一张。>0 时满一块就落盘一张再继续。
-        if (scan < rest.Count && int.TryParse(rest[scan], out var parsedChunk))
+        if (!named)
         {
-            chunkSize = parsedChunk <= 0 ? 0 : parsedChunk;
-            scan++;
+            // 兼容旧的位置写法：[过滤子串] [格边长] [每块格数]，都可选，遇到第一个资源包路径即停。
+            // （资源包路径若与数字同名会被吃掉——真实包名没有纯数字的，值得为省解析器不设转义。）
+            var scan = 0;
+            if (scan < rest.Count && !File.Exists(rest[scan]) && !Directory.Exists(rest[scan])) filter = rest[scan++];
+
+            if (scan < rest.Count && int.TryParse(rest[scan], out var posCell))
+            {
+                cell = Math.Max(32, posCell);
+                scan++;
+            }
+
+            // 每块格数：0（或负）＝不分块，全部铺一张。>0 时满一块就落盘一张再继续。
+            if (scan < rest.Count && int.TryParse(rest[scan], out var posChunk))
+            {
+                chunkSize = posChunk <= 0 ? 0 : posChunk;
+                scan++;
+            }
+
+            rest = [.. rest.Skip(scan)];
         }
 
-        List<string> packPaths = [.. rest.Skip(scan)];
         var montageDir = Path.GetDirectoryName(Path.GetFullPath(outPath)) ?? ".";
-        return RunCore(montageDir, new MontageOptions(outPath, filter, cell, chunkSize, names, gap, noDup),
-            [.. packPaths]);
+        return RunCore(montageDir, new MontageOptions(outPath, filter, cell, chunkSize, names, gap, noDup), [.. rest]);
     }
 
     private static int RunCore(string outDir, MontageOptions? montage, string[] packPaths)
