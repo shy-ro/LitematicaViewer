@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using LitematicaViewer.Assets;
 using LitematicaViewer.Assets.Model;
@@ -126,21 +127,24 @@ internal static class PreviewBlocks
     // 而是按行序铺进一张 PNG。用途：快速人检「哪类方块不对劲」——翻几千张散图不现实，
     // 一张 montage 扫一眼就能圈出异常区，再回 --preview 拿单张细看。
     //
-    // args：--montage <out.png> [--names] [过滤子串] [每格边长] [上限张数] <资源包...>
-    // 过滤子串对状态键做 OrdinalContains（"iron" 只看铁系）。格边长默认 96，下限 32。
-    // --names 在每格右上角画状态键（3x5 像素字体，放不下截断，全名在 .txt 索引里）。
-    // 开关先行剥离再走位置参数，否则会被当成过滤子串吃掉。
-    // 同行写一个 .txt 索引（序号 → 状态键）：对账靠它。
+    // args：--montage <out.png> [--names] [--gap N] [过滤子串] [每格边长] [上限张数] <资源包...>
+    // 过滤子串对状态键做 OrdinalContains（"iron" 只看铁系）。格边长默认 96，下限 32；
+    // 格间距 --gap 默认 6。--names 在每格左上角画状态键（系统字体、纯黄字、无底条、
+    // 换行不截断，全名另在 .txt 索引里）。开关先行剥离再走位置参数，否则会被当成
+    // 过滤子串吃掉。同行写一个 .txt 索引（序号 → 状态键）：对账靠它。
     public static int RunMontage(string[] args)
     {
         // args[1] 是输出路径，已在 MeshSmoke.Main 分流处保证存在。
         var outPath = args[1];
         var names = false;
+        var gap = 6;
         var rest = new List<string>();
         for (var i = 2; i < args.Length; i++)
         {
             if (args[i] == "--names") names = true;
             else if (args[i] == "--nonames") { /* 默认即关，容错成对 */ }
+            else if (args[i] == "--gap" && i + 1 < args.Length && int.TryParse(args[++i], out var parsedGap))
+                gap = Math.Clamp(parsedGap, 0, 64);
             else rest.Add(args[i]);
         }
 
@@ -166,7 +170,7 @@ internal static class PreviewBlocks
 
         List<string> packPaths = [.. rest.Skip(scan)];
         var montageDir = Path.GetDirectoryName(Path.GetFullPath(outPath)) ?? ".";
-        return RunCore(montageDir, new MontageOptions(outPath, filter, cell, limit, names), [.. packPaths]);
+        return RunCore(montageDir, new MontageOptions(outPath, filter, cell, limit, names, gap), [.. packPaths]);
     }
 
     private static int RunCore(string outDir, MontageOptions? montage, string[] packPaths)
@@ -313,7 +317,7 @@ internal static class PreviewBlocks
 
         if (tiles is not null && montage is not null)
         {
-            WriteMontage(montage.OutPath, tiles, cell, montageKeys, montage.Names);
+            WriteMontage(montage.OutPath, tiles, cell, montageKeys, montage.Names, montage.Gap);
             var indexPath = Path.ChangeExtension(montage.OutPath, ".txt");
             File.WriteAllLines(indexPath, montageIndex);
         }
@@ -707,11 +711,10 @@ internal static class PreviewBlocks
     // 把若干已渲染的方格拼成一张网格大图。列数按「总数开方向上取整」，
     // 接近正方最好扫视；1px 深灰缝分开相邻格子。
     private static void WriteMontage(string path, List<byte[]> tiles, int cell, List<string>? keys = null,
-        bool names = false)
+        bool names = false, int gap = 6)
     {
         var columns = Math.Max(1, (int)MathF.Ceiling(MathF.Sqrt(tiles.Count)));
         var rows = Math.Max(1, (int)MathF.Ceiling(tiles.Count / (float)columns));
-        var gap = 1;
         var width = columns * cell + (columns + 1) * gap;
         var height = rows * cell + (rows + 1) * gap;
         var rgb = new byte[width * height * 3];
@@ -743,163 +746,14 @@ internal static class PreviewBlocks
         WritePng(path, width, height, rgb);
     }
 
-    // 状态键右上角标注：深灰底条 + 白字，右对齐。字号取「换行后总高塞得进格子」
-    // 的最大整数倍；按 [ ] , : 断行优先，超行宽的段硬切——完整键总是能显示完，
-    // 不截断。逐字对账仍以同名 .txt 索引为准。
+    // 状态键标注：系统字体（GDI 默认 UI 字体 Segoe UI）、纯黄字、无底条，贴每格
+    // 左上角。字号随格子放大，按 [ ] , : 断行且不截断（超长段按实测像素宽硬切）。
     private static void DrawLabel(byte[] rgb, int imageWidth, int originX, int originY, int cell, string key)
     {
         // minecraft: 在 montage 语境是噪音，截掉省宽度。
         var text = key.StartsWith("minecraft:", StringComparison.Ordinal) ? key["minecraft:".Length..] : key;
-
-        // 字号从大到小试，第一个塞得进格子的胜出。cell 96 → 2 倍起步，192 → 4 倍。
-        for (var scale = Math.Max(1, cell / 48); ; scale--)
-        {
-            var lines = WrapKey(text, Math.Max(1, (cell - 3) / (4 * scale)));
-            var lineH = 6 * scale;
-            var boxH = lines.Count * lineH + 2;
-            if (boxH > cell - 4 && scale > 1) continue;
-
-            var advance = 4 * scale;
-            var boxW = lines.Max(l => l.Length) * advance + 2;
-
-            for (var y = 0; y < boxH; y++)
-                for (var x = 0; x < boxW; x++)
-                    SetPx(rgb, imageWidth, originX + cell - 1 - x, originY + 1 + y, 24, 24, 24);
-
-            for (var li = 0; li < lines.Count; li++)
-            {
-                var line = lines[li];
-                for (var i = 0; i < line.Length; i++)
-                {
-                    if (!Glyphs.TryGetValue(line[i], out var bits)) continue;
-                    for (var row = 0; row < 5; row++)
-                    for (var col = 0; col < 3; col++)
-                    {
-                        if ((bits & (1 << (row * 3 + (2 - col)))) == 0) continue;
-                        for (var sy = 0; sy < scale; sy++)
-                        for (var sx = 0; sx < scale; sx++)
-                            SetPx(rgb, imageWidth,
-                                originX + cell - 1 - (line.Length * advance - scale) + i * advance + col * scale + sx,
-                                originY + 2 + li * lineH + row * scale + sy, 255, 255, 255);
-                    }
-                }
-            }
-
-            break;
-        }
+        GdiText.DrawInto(rgb, imageWidth, originX + 1, originY + 1, cell - 2, cell - 2, text);
     }
-
-    // 贪心换行：在 [ ] , : 后断行优先（属性段天然成组），段内超行宽硬切。
-    private static List<string> WrapKey(string text, int maxChars)
-    {
-        var tokens = new List<string>();
-        var current = "";
-        foreach (var ch in text)
-        {
-            current += ch;
-            if (ch is ',' or '[' or ']' or ':')
-            {
-                tokens.Add(current);
-                current = "";
-            }
-        }
-
-        if (current.Length > 0) tokens.Add(current);
-
-        List<string> lines = [];
-        var line = "";
-        foreach (var token in tokens)
-        {
-            // 段本身超行宽：收掉当前行后按行宽硬切，余段进常规贪心。
-            var rest = token;
-            if (rest.Length > maxChars && line.Length > 0)
-            {
-                lines.Add(line);
-                line = "";
-            }
-
-            while (rest.Length > maxChars)
-            {
-                lines.Add(rest[..maxChars]);
-                rest = rest[maxChars..];
-            }
-
-            if (line.Length + rest.Length > maxChars && line.Length > 0)
-            {
-                lines.Add(line);
-                line = rest;
-            }
-            else
-            {
-                line += rest;
-            }
-        }
-
-        if (line.Length > 0) lines.Add(line);
-        return lines;
-    }
-
-    private static void SetPx(byte[] rgb, int imageWidth, int x, int y, byte r, byte g, byte b)
-    {
-        if (x < 0 || y < 0) return;
-        var i = (y * imageWidth + x) * 3;
-        if (i + 2 >= rgb.Length) return;
-        rgb[i] = r;
-        rgb[i + 1] = g;
-        rgb[i + 2] = b;
-    }
-
-    // 3x5 字体，每 glyph 15 位（行 0 在高位、每行 3 位左起）。只编状态键会出现的
-    // 字符；m/w 这类 3px 画不全的取近似形——可辨认即可，逐字对账用 .txt。
-    private static readonly Dictionary<char, int> Glyphs = new()
-    {
-        ['a'] = 0b010_101_111_101_101,
-        ['b'] = 0b110_101_110_101_110,
-        ['c'] = 0b011_100_100_100_011,
-        ['d'] = 0b110_101_101_101_110,
-        ['e'] = 0b111_100_110_100_111,
-        ['f'] = 0b111_100_110_100_100,
-        ['g'] = 0b011_100_101_101_011,
-        ['h'] = 0b101_101_111_101_101,
-        ['i'] = 0b111_010_010_010_111,
-        ['j'] = 0b001_001_001_101_010,
-        ['k'] = 0b101_101_110_101_101,
-        ['l'] = 0b100_100_100_100_111,
-        ['m'] = 0b101_111_111_101_101,
-        ['n'] = 0b110_101_101_101_101,
-        ['o'] = 0b010_101_101_101_010,
-        ['p'] = 0b110_101_110_100_100,
-        ['q'] = 0b011_101_101_110_001,
-        ['r'] = 0b110_101_110_110_101,
-        ['s'] = 0b011_100_010_001_110,
-        ['t'] = 0b111_010_010_010_010,
-        ['u'] = 0b101_101_101_101_111,
-        ['v'] = 0b101_101_101_101_010,
-        ['w'] = 0b101_101_111_111_101,
-        ['x'] = 0b101_101_010_101_101,
-        ['y'] = 0b101_101_010_010_010,
-        ['z'] = 0b111_001_010_100_111,
-        ['0'] = 0b111_101_101_101_111,
-        ['1'] = 0b010_110_010_010_111,
-        ['2'] = 0b111_001_111_100_111,
-        ['3'] = 0b111_001_111_001_111,
-        ['4'] = 0b101_101_111_001_001,
-        ['5'] = 0b111_100_111_001_111,
-        ['6'] = 0b111_100_111_101_111,
-        ['7'] = 0b111_001_001_010_010,
-        ['8'] = 0b111_101_111_101_111,
-        ['9'] = 0b111_101_111_001_111,
-        [':'] = 0b000_010_000_010_000,
-        ['_'] = 0b000_000_000_000_111,
-        ['['] = 0b011_010_010_010_011,
-        [']'] = 0b110_010_010_010_110,
-        ['='] = 0b000_111_000_111_000,
-        [','] = 0b000_000_000_010_100,
-        ['.'] = 0b000_000_000_000_010,
-        ['/'] = 0b001_001_010_100_100,
-        ['-'] = 0b000_000_111_000_000,
-        ['|'] = 0b010_010_010_010_010,
-    };
 
     private static void WritePng(string path, int width, int height, byte[] rgb)
     {
@@ -985,7 +839,208 @@ internal static class PreviewBlocks
         return table;
     }
 
-    // Names：每格右上角画状态键。像素字体是 3x5 逐 glyph 手码的 15 位整数
-    // （高位在前，每行 3 位），只覆盖状态键会出现的字符；没编码的字符跳格。
-    private sealed record MontageOptions(string OutPath, string Filter, int Cell, int Limit, bool Names);
+    private static void SetPx(byte[] rgb, int imageWidth, int x, int y, byte r, byte g, byte b)
+    {
+        if (x < 0 || y < 0) return;
+        var i = (y * imageWidth + x) * 3;
+        if (i + 2 >= rgb.Length) return;
+        rgb[i] = r;
+        rgb[i + 1] = g;
+        rgb[i + 2] = b;
+    }
+
+    // GDI 文本绘制。不用 System.Drawing：Meshing 被 ShellPreview 以 NativeAOT 引用，
+    // 托管 GDI+ 对 AOT/裁剪不友好，而目标只有 Windows，P/Invoke 更轻更可控。
+    // 渲染到 32bpp DIB、以品红为透明键——字体必须关抗锯齿（NONANTIALIASED），
+    // 否则字边混出的品红-黄过渡色会在方块上留一道粉边。
+    private static class GdiText
+    {
+        private const string Gdi = "gdi32.dll";
+        private const string User = "user32.dll";
+
+        private const int BkTransparent = 1;
+        private const uint TextYellow = 0x0000FFFF; // COLORREF 0x00BBGGRR
+        private const byte KeyB = 255;
+        private const byte KeyG = 0;
+        private const byte KeyR = 255;
+        private const uint NonAntialiased = 3;
+
+        private static readonly IntPtr Dc = CreateCompatibleDC(IntPtr.Zero);
+        private static IntPtr _font;
+        private static int _fontPx;
+
+        // 每种磅值只建一次字体；旧对象不回收——整轮最多十来个尺寸，进程随即退出。
+        private static void SelectFont(int px)
+        {
+            if (_fontPx == px && _font != IntPtr.Zero) return;
+            _font = CreateFontW(-px, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, NonAntialiased, 0, "Segoe UI");
+            SelectObject(Dc, _font);
+            _fontPx = px;
+        }
+
+        private static int Measure(string text) =>
+            text.Length == 0 ? 0 : (GetTextExtentPoint32W(Dc, text, text.Length, out var size) ? size.Width : 0);
+
+        // 断行：优先在 [ ] , : 后断（属性段天然成组），段内超宽按实测宽度硬切。
+        private static List<string> Wrap(string text, int maxWidth)
+        {
+            List<string> tokens = [];
+            var current = "";
+            foreach (var ch in text)
+            {
+                current += ch;
+                if (ch is ',' or '[' or ']' or ':')
+                {
+                    tokens.Add(current);
+                    current = "";
+                }
+            }
+
+            if (current.Length > 0) tokens.Add(current);
+
+            List<string> lines = [];
+            var line = "";
+            foreach (var token in tokens)
+            {
+                var rest = token;
+                if (Measure(rest) > maxWidth && line.Length > 0)
+                {
+                    lines.Add(line);
+                    line = "";
+                }
+
+                while (rest.Length > 1 && Measure(rest) > maxWidth)
+                {
+                    var cut = rest.Length - 1;
+                    while (cut > 1 && Measure(rest[..cut]) > maxWidth) cut--;
+                    lines.Add(rest[..cut]);
+                    rest = rest[cut..];
+                }
+
+                if (line.Length > 0 && Measure(line + rest) > maxWidth)
+                {
+                    lines.Add(line);
+                    line = rest;
+                }
+                else
+                {
+                    line += rest;
+                }
+            }
+
+            if (line.Length > 0) lines.Add(line);
+            return lines;
+        }
+
+        // 文本按格宽自动取舍字号（格越大字越大），渲染后按透明键叠进目标 RGB 缓冲。
+        public static void DrawInto(byte[] rgb, int imageWidth, int x0, int y0, int maxWidth, int maxHeight,
+            string text)
+        {
+            if (maxWidth < 8 || maxHeight < 8) return;
+
+            var fontPx = Math.Clamp(maxHeight / 5, 11, 48);
+            List<string> lines;
+            int boxW;
+            int boxH;
+            while (true)
+            {
+                SelectFont(fontPx);
+                lines = Wrap(text, maxWidth);
+                boxH = lines.Count * (fontPx + 2);
+                boxW = Math.Min(maxWidth, lines.Max(Measure));
+                if (boxH <= maxHeight || fontPx <= 11) break;
+                fontPx -= 2;
+            }
+
+            var info = new BitmapInfo
+            {
+                Header = new BitmapInfoHeader
+                {
+                    Size = (uint)Marshal.SizeOf<BitmapInfoHeader>(),
+                    Width = boxW,
+                    Height = -boxH, // 负高 = 自上而下，省一次翻转
+                    Planes = 1,
+                    BitCount = 32,
+                },
+            };
+
+            var dib = CreateDIBSection(Dc, ref info, 0, out var bits, IntPtr.Zero, 0);
+            if (dib == IntPtr.Zero) return;
+
+            var previous = SelectObject(Dc, dib);
+            var stride = boxW * 4;
+            var buffer = new byte[stride * boxH];
+            for (var i = 0; i < buffer.Length; i += 4)
+            {
+                buffer[i + 0] = KeyB;
+                buffer[i + 1] = KeyG;
+                buffer[i + 2] = KeyR;
+            }
+
+            Marshal.Copy(buffer, 0, bits, buffer.Length);
+            SetBkMode(Dc, BkTransparent);
+            SetTextColor(Dc, TextYellow);
+            for (var i = 0; i < lines.Count; i++)
+                TextOutW(Dc, 0, i * (fontPx + 2), lines[i], lines[i].Length);
+
+            Marshal.Copy(bits, buffer, 0, buffer.Length);
+            SelectObject(Dc, previous);
+            DeleteObject(dib);
+
+            for (var y = 0; y < boxH; y++)
+            for (var x = 0; x < boxW; x++)
+            {
+                var i = y * stride + x * 4;
+                if (buffer[i] == KeyB && buffer[i + 1] == KeyG && buffer[i + 2] == KeyR) continue;
+                SetPx(rgb, imageWidth, x0 + x, y0 + y, buffer[i + 2], buffer[i + 1], buffer[i]);
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BitmapInfoHeader
+        {
+            public uint Size;
+            public int Width;
+            public int Height;
+            public ushort Planes;
+            public ushort BitCount;
+            public uint Compression;
+            public uint SizeImage;
+            public int XPelsPerMeter;
+            public int YPelsPerMeter;
+            public uint ClrUsed;
+            public uint ClrImportant;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BitmapInfo
+        {
+            public BitmapInfoHeader Header;
+            public uint Colors;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TextSize
+        {
+            public int Width;
+            public int Height;
+        }
+
+        [DllImport(Gdi)] private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+        [DllImport(Gdi)] private static extern IntPtr CreateDIBSection(IntPtr hdc, ref BitmapInfo info,
+            uint usage, out IntPtr bits, IntPtr section, uint offset);
+        [DllImport(Gdi)] private static extern IntPtr CreateFontW(int height, int width, int escapement,
+            int orientation, int weight, uint italic, uint underline, uint strikeOut, uint charSet,
+            uint outPrecision, uint clipPrecision, uint quality, uint pitchAndFamily, string face);
+        [DllImport(Gdi)] private static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+        [DllImport(Gdi)] private static extern bool DeleteObject(IntPtr obj);
+        [DllImport(Gdi)] private static extern uint SetTextColor(IntPtr hdc, uint color);
+        [DllImport(Gdi)] private static extern int SetBkMode(IntPtr hdc, int mode);
+        [DllImport(Gdi, CharSet = CharSet.Unicode)] private static extern bool TextOutW(IntPtr hdc, int x, int y,
+            string text, int length);
+        [DllImport(Gdi, CharSet = CharSet.Unicode)] private static extern bool GetTextExtentPoint32W(IntPtr hdc,
+            string text, int length, out TextSize size);
+    }
+
+    private sealed record MontageOptions(string OutPath, string Filter, int Cell, int Limit, bool Names, int Gap);
 }
