@@ -655,7 +655,10 @@ internal static class PreviewBlocks
         // 边距按比例留（5%）：montage 的 96px 格和单图的 192px 共用同一个取景逻辑。
         var scale = side / 2f * 0.9f / MathF.Max(radius, 1e-3f);
 
-        Span<Vector3> screen = stackalloc Vector3[vertexCount];
+        // 这里不能 stackalloc：顶点数随网格规模走，单方块入口只有几十个（栈上无所谓），
+        // 但 --regionrender 走的是同一个函数、顶点上到几十万——12 字节一个直接撑爆默认
+        // 1MB 栈（bars16.litematic 就是死在这里的 Stack overflow）。一律堆分配。
+        var screen = new Vector3[vertexCount];
         for (var i = 0; i < vertexCount; i++)
         {
             Vector3 p = new(
