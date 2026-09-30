@@ -28,11 +28,7 @@ _report.txt
 
 dist/
 
-# 会话产物：测试 litematic、截帧/诊断图与日志（tools 脚本可重新生成，不进仓库）
-/*.png
-/*.pgm
-/*.litematic
-/*.log
-/*.txt
+# 会话产物：测试 litematic、截帧/诊断图与日志，全部集中在这里（tools 脚本可重新生成，不进仓库）
+test_temp/
 packs_1201/
 packs_hold/

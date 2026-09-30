@@ -33,6 +33,8 @@ src/LitematicaViewer.SamplePreviewer/bin/Debug/net10.0/LitematicaViewer.SamplePr
 可选参数：`--shot 输出.png` 载入后自动截帧落盘；`--shot-dist 系数` 取景距离倍数。
 资源包从 exe 目录向上最多七层找 `packs/`，仓库根就是命中位置，开发时不用配置。
 
+约定：所有测试产物（截帧、诊断图、montage、rects 落盘、测试 litematic、日志）一律写进仓库根的 `test_temp/`（已 gitignore）——tools 脚本已按此定向，手工跑 `--shot`/`--montage` 等也请把输出路径指到 `test_temp/` 下，别散在仓库根。
+
 ### 2. 预览窗格 COM handler（资源管理器里选中 .litematic 出预览）
 
 不需要单独构建，出安装包时一并编好（AOT x64 原生 dll）。
