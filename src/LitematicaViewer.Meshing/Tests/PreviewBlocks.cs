@@ -144,11 +144,13 @@ internal static class PreviewBlocks
         var outPath = args[1];
         var names = false;
         var gap = 0;
+        var noDup = false;
         var rest = new List<string>();
         for (var i = 2; i < args.Length; i++)
         {
             if (args[i] == "--names") names = true;
             else if (args[i] == "--nonames") { /* 默认即关，容错成对 */ }
+            else if (args[i] == "--nodup") noDup = true;
             else if (args[i] == "--gap" && i + 1 < args.Length && int.TryParse(args[++i], out var parsedGap))
                 gap = Math.Clamp(parsedGap, 0, 64);
             else rest.Add(args[i]);
@@ -177,7 +179,7 @@ internal static class PreviewBlocks
 
         List<string> packPaths = [.. rest.Skip(scan)];
         var montageDir = Path.GetDirectoryName(Path.GetFullPath(outPath)) ?? ".";
-        return RunCore(montageDir, new MontageOptions(outPath, filter, cell, limit, names, gap), [.. packPaths]);
+        return RunCore(montageDir, new MontageOptions(outPath, filter, cell, limit, names, gap, noDup), [.. packPaths]);
     }
 
     private static int RunCore(string outDir, MontageOptions? montage, string[] packPaths)
@@ -208,9 +210,14 @@ internal static class PreviewBlocks
 
         Debug.WriteLine($"[MESH][preview] 状态总数 {states.Count}");
 
-        // 2) 第一遍 resolve：收集 sprite；按「模型+旋转」去重——
+        // 2) 第一遍 resolve：收集 sprite，顺带定下要出图的格子。默认按「模型+旋转」去重——
         //    台阶 128 个状态的画面只有 8 种，铺 128 张只会淹掉真正异常的那张。
+        //    montage 的 --nodup 关掉去重：每个解得出画面的状态各占一格，索引因此没有缺口
+        //    （代价是格子数翻倍——26.3 是 6885 → 9179）。去重丢掉的是「同画面的重复」和
+        //    「被别的方块先占了签名的那一行」，像素不丢，但查「某方块在哪一格」会查不到。
+        var dedup = montage is null || !montage.NoDup;
         Dictionary<string, string> unique = new(StringComparer.Ordinal);
+        List<string> renderKeys = [];
         HashSet<string> sprites = new(StringComparer.Ordinal);
         List<string> resolveFailures = [];
         foreach (var (id, props) in states)
@@ -233,11 +240,15 @@ internal static class PreviewBlocks
                 continue;
             }
 
-            var signature = string.Join(
-                ';',
-                resolved.Variants.Select(v => $"{v.ModelId}@{v.XDegrees},{v.YDegrees}"));
-            if (!unique.TryAdd(signature, key)) continue;
+            if (dedup)
+            {
+                var signature = string.Join(
+                    ';',
+                    resolved.Variants.Select(v => $"{v.ModelId}@{v.XDegrees},{v.YDegrees}"));
+                if (!unique.TryAdd(signature, key)) continue;
+            }
 
+            renderKeys.Add(key);
 
             var spriteEnumerable = from variant in resolved.Variants
                 from element in variant.Model.Elements
@@ -248,11 +259,17 @@ internal static class PreviewBlocks
         }
 
         Debug.WriteLine(
-            $"[MESH][preview] 唯一画面 {unique.Count} sprites={sprites.Count} 解析失败={resolveFailures.Count}");
+            $"[MESH][preview] 出图格 {renderKeys.Count}（去重 {(dedup ? "开" : "关")}）" +
+            $" sprites={sprites.Count} 解析失败={resolveFailures.Count}");
 
         var atlas = TextureAtlas.Build(packs, sprites);
         Debug.WriteLine(
             $"[MESH][preview] 图集 {atlas.Width}x{atlas.Height} 缺图={atlas.MissingCount}");
+
+        // 图集装了哪些 sprite、缺了哪些：排查「方块整块发白/品红」时先看这里，
+        // 比翻图集 PNG 快。落盘到输出目录，两种模式都写。
+        File.WriteAllLines(Path.Combine(outDir, "_sprites.txt"),
+            sprites.OrderBy(s => s, StringComparer.Ordinal));
 
         // 每层 mip 直接落盘（RGBA 丢 alpha 通道）：深层 mip 的跨 sprite 串色
         // 在整图视角下一眼就能认出来，是排查「远处方块换色」的第一现场。
@@ -290,7 +307,7 @@ internal static class PreviewBlocks
         List<string> montageKeys = [];
         List<byte[]>? tiles = montage is null ? null : [];
         var cell = montage?.Cell ?? Side;
-        foreach (var key in unique.Values.OrderBy(k => k, StringComparer.Ordinal))
+        foreach (var key in renderKeys.OrderBy(k => k, StringComparer.Ordinal))
         {
             var state = ParseStateKey(key);
             var mesh = builder.BuildRegion(MakeSingleBlockRegion(state));
@@ -333,7 +350,8 @@ internal static class PreviewBlocks
         var report = Path.Combine(outDir, "_report.txt");
         using (StreamWriter writer = new(report))
         {
-            writer.WriteLine($"状态总数 {states.Count} / 唯一画面 {unique.Count} / 输出 {written}");
+            writer.WriteLine($"状态总数 {states.Count} / 出图格 {renderKeys.Count}（去重 {(dedup ? "开" : "关")}）" +
+                $" / sprite {sprites.Count} / 输出 {written}");
             writer.WriteLine(
                 $"图集 {atlas.Width}x{atlas.Height} 缺图 {atlas.MissingCount}: {string.Join(", ", atlas.MissingSprites)}");
             writer.WriteLine();
@@ -787,34 +805,76 @@ internal static class PreviewBlocks
         var rows = Math.Max(1, (int)MathF.Ceiling(tiles.Count / (float)columns));
         var width = columns * tileW + (columns + 1) * gap;
         var height = rows * cell + (rows + 1) * gap;
-        var rgb = new byte[width * height * 3];
-        for (var i = 0; i < width * height; i++)
-        {
-            rgb[i * 3 + 0] = BackgroundR;
-            rgb[i * 3 + 1] = BackgroundG;
-            rgb[i * 3 + 2] = BackgroundB;
-        }
 
-        for (var tile = 0; tile < tiles.Count; tile++)
+        // 逐格行（band）写出，不落整图缓冲：--nodup 全量是 9179 格 = 20176x12288，
+        // 整图 rgb 745MB + PNG 的 raw 再来 745MB，2G 起步；格子本身已经在 tiles 里，
+        // 再存一份整图纯属浪费。一格行只有 width*cell*3 ≈ 7.7MB，压完就丢。
+        using var file = File.Create(path);
+        file.Write([137, 80, 78, 71, 13, 10, 26, 10]);
+
+        var ihdr = new byte[13];
+        Be32(ihdr, 0, (uint)width);
+        Be32(ihdr, 4, (uint)height);
+        ihdr[8] = 8; // 位深
+        ihdr[9] = 2; // 真彩色
+        WriteChunk(file, "IHDR", ihdr);
+
+        byte[] idat;
+        using (MemoryStream compressed = new())
         {
-            var tx = tile % columns;
-            var ty = tile / columns;
-            var tileX = gap + tx * (tileW + gap);
-            var tileY = gap + ty * (cell + gap);
-            var originX = tileX + labelW;
-            var pixels = tiles[tile];
-            for (var y = 0; y < cell; y++)
+            using (ZLibStream zlib = new(compressed, CompressionLevel.Fastest))
             {
-                var source = y * cell * 3;
-                var target = ((tileY + y) * width + originX) * 3;
-                Buffer.BlockCopy(pixels, source, rgb, target, cell * 3);
+                var row = new byte[1 + width * 3];
+                var gapRow = new byte[1 + width * 3];
+                for (var p = 0; p < width; p++)
+                {
+                    gapRow[1 + p * 3 + 0] = BackgroundR;
+                    gapRow[1 + p * 3 + 1] = BackgroundG;
+                    gapRow[1 + p * 3 + 2] = BackgroundB;
+                }
+
+                var band = new byte[width * cell * 3];
+                for (var ty = 0; ty < rows; ty++)
+                {
+                    for (var p = 0; p < width * cell; p++)
+                    {
+                        band[p * 3 + 0] = BackgroundR;
+                        band[p * 3 + 1] = BackgroundG;
+                        band[p * 3 + 2] = BackgroundB;
+                    }
+
+                    var first = ty * columns;
+                    var last = Math.Min(first + columns, tiles.Count);
+                    for (var tile = first; tile < last; tile++)
+                    {
+                        var tileX = gap + (tile - first) * (tileW + gap);
+                        var originX = tileX + labelW;
+                        var pixels = tiles[tile];
+                        for (var y = 0; y < cell; y++)
+                            Buffer.BlockCopy(pixels, y * cell * 3, band, (y * width + originX) * 3, cell * 3);
+
+                        // 标签用 band 局部坐标（band 首行就是该格行的第一行，所以 y0=3 贴着上沿），
+                        // band 宽即整图宽，所以横坐标不用换算。
+                        if (labelled) DrawLabel(band, width, tileX + 3, 3, labelW - 8, cell - 6, keys![tile]);
+                    }
+
+                    for (var g = 0; g < gap; g++) zlib.Write(gapRow); // 行上留白
+                    for (var y = 0; y < cell; y++)
+                    {
+                        row[0] = 0; // filter: None
+                        Buffer.BlockCopy(band, y * width * 3, row, 1, width * 3);
+                        zlib.Write(row);
+                    }
+                }
+
+                for (var g = 0; g < gap; g++) zlib.Write(gapRow); // 行下留白
             }
 
-            if (labelled)
-                DrawLabel(rgb, width, tileX + 3, tileY + 3, labelW - 8, cell - 6, keys![tile]);
+            idat = compressed.ToArray();
         }
 
-        WritePng(path, width, height, rgb);
+        WriteChunk(file, "IDAT", idat);
+        WriteChunk(file, "IEND", []);
     }
 
     // 状态键标注：系统字体（GDI 默认 UI 字体 Segoe UI）、纯黄字、无底条。放在每格左侧的
@@ -1117,5 +1177,6 @@ internal static class PreviewBlocks
             string text, int length, out TextSize size);
     }
 
-    private sealed record MontageOptions(string OutPath, string Filter, int Cell, int Limit, bool Names, int Gap);
+    private sealed record MontageOptions(string OutPath, string Filter, int Cell, int Limit, bool Names, int Gap,
+        bool NoDup);
 }
