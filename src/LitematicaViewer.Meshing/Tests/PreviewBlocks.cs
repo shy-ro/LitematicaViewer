@@ -168,9 +168,10 @@ internal static class PreviewBlocks
             scan++;
         }
 
+        // 上限 0（或负）＝不限，全量铺满。上限只是给「几千张铺一张」省内存的闸门。
         if (scan < rest.Count && int.TryParse(rest[scan], out var parsedLimit))
         {
-            limit = Math.Max(1, parsedLimit);
+            limit = parsedLimit <= 0 ? int.MaxValue : parsedLimit;
             scan++;
         }
 
