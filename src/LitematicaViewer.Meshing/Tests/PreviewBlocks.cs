@@ -126,36 +126,47 @@ internal static class PreviewBlocks
     // 而是按行序铺进一张 PNG。用途：快速人检「哪类方块不对劲」——翻几千张散图不现实，
     // 一张 montage 扫一眼就能圈出异常区，再回 --preview 拿单张细看。
     //
-    // args：--montage <out.png> [过滤子串] [每格边长] [上限张数] <资源包...>
+    // args：--montage <out.png> [--names] [过滤子串] [每格边长] [上限张数] <资源包...>
     // 过滤子串对状态键做 OrdinalContains（"iron" 只看铁系）。格边长默认 96，下限 32。
-    // 同行写一个 .txt 索引（序号 → 状态键）：montage 上没法画字，对账靠它。
+    // --names 在每格右上角画状态键（3x5 像素字体，放不下截断，全名在 .txt 索引里）。
+    // 开关先行剥离再走位置参数，否则会被当成过滤子串吃掉。
+    // 同行写一个 .txt 索引（序号 → 状态键）：对账靠它。
     public static int RunMontage(string[] args)
     {
         // args[1] 是输出路径，已在 MeshSmoke.Main 分流处保证存在。
         var outPath = args[1];
+        var names = false;
+        var rest = new List<string>();
+        for (var i = 2; i < args.Length; i++)
+        {
+            if (args[i] == "--names") names = true;
+            else if (args[i] == "--nonames") { /* 默认即关，容错成对 */ }
+            else rest.Add(args[i]);
+        }
+
         var filter = string.Empty;
         var cell = 96;
         var limit = 512;
         // 固定顺序：[过滤子串] [格边长] [上限]，都可选，遇到第一个资源包路径即停。
         // （资源包路径若与数字同名会被吃掉——真实包名没有纯数字的，值得为省解析器不设转义。）
-        var scan = 2;
-        if (scan < args.Length && !File.Exists(args[scan]) && !Directory.Exists(args[scan])) filter = args[scan++];
+        var scan = 0;
+        if (scan < rest.Count && !File.Exists(rest[scan]) && !Directory.Exists(rest[scan])) filter = rest[scan++];
 
-        if (scan < args.Length && int.TryParse(args[scan], out var parsedCell))
+        if (scan < rest.Count && int.TryParse(rest[scan], out var parsedCell))
         {
             cell = Math.Max(32, parsedCell);
             scan++;
         }
 
-        if (scan < args.Length && int.TryParse(args[scan], out var parsedLimit))
+        if (scan < rest.Count && int.TryParse(rest[scan], out var parsedLimit))
         {
             limit = Math.Max(1, parsedLimit);
             scan++;
         }
 
-        List<string> packPaths = [.. args.Skip(scan)];
+        List<string> packPaths = [.. rest.Skip(scan)];
         var montageDir = Path.GetDirectoryName(Path.GetFullPath(outPath)) ?? ".";
-        return RunCore(montageDir, new MontageOptions(outPath, filter, cell, limit), [.. packPaths]);
+        return RunCore(montageDir, new MontageOptions(outPath, filter, cell, limit, names), [.. packPaths]);
     }
 
     private static int RunCore(string outDir, MontageOptions? montage, string[] packPaths)
@@ -265,6 +276,7 @@ internal static class PreviewBlocks
         List<string> emptyMeshes = [];
         var written = 0;
         List<string> montageIndex = [];
+        List<string> montageKeys = [];
         List<byte[]>? tiles = montage is null ? null : [];
         var cell = montage?.Cell ?? Side;
         foreach (var key in unique.Values.OrderBy(k => k, StringComparer.Ordinal))
@@ -281,6 +293,7 @@ internal static class PreviewBlocks
                 if (tiles.Count < montage!.Limit)
                 {
                     tiles.Add(rgb);
+                    montageKeys.Add(key);
                     montageIndex.Add($"{tiles.Count - 1}: {key}");
                 }
             }
@@ -300,7 +313,7 @@ internal static class PreviewBlocks
 
         if (tiles is not null && montage is not null)
         {
-            WriteMontage(montage.OutPath, tiles, cell);
+            WriteMontage(montage.OutPath, tiles, cell, montageKeys, montage.Names);
             var indexPath = Path.ChangeExtension(montage.OutPath, ".txt");
             File.WriteAllLines(indexPath, montageIndex);
         }
@@ -693,7 +706,8 @@ internal static class PreviewBlocks
 
     // 把若干已渲染的方格拼成一张网格大图。列数按「总数开方向上取整」，
     // 接近正方最好扫视；1px 深灰缝分开相邻格子。
-    private static void WriteMontage(string path, List<byte[]> tiles, int cell)
+    private static void WriteMontage(string path, List<byte[]> tiles, int cell, List<string>? keys = null,
+        bool names = false)
     {
         var columns = Math.Max(1, (int)MathF.Ceiling(MathF.Sqrt(tiles.Count)));
         var rows = Math.Max(1, (int)MathF.Ceiling(tiles.Count / (float)columns));
@@ -721,10 +735,171 @@ internal static class PreviewBlocks
                 var target = ((originY + y) * width + originX) * 3;
                 Buffer.BlockCopy(pixels, source, rgb, target, cell * 3);
             }
+
+            if (names && keys is not null)
+                DrawLabel(rgb, width, originX, originY, cell, keys[tile]);
         }
 
         WritePng(path, width, height, rgb);
     }
+
+    // 状态键右上角标注：深灰底条 + 白字，右对齐。字号取「换行后总高塞得进格子」
+    // 的最大整数倍；按 [ ] , : 断行优先，超行宽的段硬切——完整键总是能显示完，
+    // 不截断。逐字对账仍以同名 .txt 索引为准。
+    private static void DrawLabel(byte[] rgb, int imageWidth, int originX, int originY, int cell, string key)
+    {
+        // minecraft: 在 montage 语境是噪音，截掉省宽度。
+        var text = key.StartsWith("minecraft:", StringComparison.Ordinal) ? key["minecraft:".Length..] : key;
+
+        // 字号从大到小试，第一个塞得进格子的胜出。cell 96 → 2 倍起步，192 → 4 倍。
+        for (var scale = Math.Max(1, cell / 48); ; scale--)
+        {
+            var lines = WrapKey(text, Math.Max(1, (cell - 3) / (4 * scale)));
+            var lineH = 6 * scale;
+            var boxH = lines.Count * lineH + 2;
+            if (boxH > cell - 4 && scale > 1) continue;
+
+            var advance = 4 * scale;
+            var boxW = lines.Max(l => l.Length) * advance + 2;
+
+            for (var y = 0; y < boxH; y++)
+                for (var x = 0; x < boxW; x++)
+                    SetPx(rgb, imageWidth, originX + cell - 1 - x, originY + 1 + y, 24, 24, 24);
+
+            for (var li = 0; li < lines.Count; li++)
+            {
+                var line = lines[li];
+                for (var i = 0; i < line.Length; i++)
+                {
+                    if (!Glyphs.TryGetValue(line[i], out var bits)) continue;
+                    for (var row = 0; row < 5; row++)
+                    for (var col = 0; col < 3; col++)
+                    {
+                        if ((bits & (1 << (row * 3 + (2 - col)))) == 0) continue;
+                        for (var sy = 0; sy < scale; sy++)
+                        for (var sx = 0; sx < scale; sx++)
+                            SetPx(rgb, imageWidth,
+                                originX + cell - 1 - (line.Length * advance - scale) + i * advance + col * scale + sx,
+                                originY + 2 + li * lineH + row * scale + sy, 255, 255, 255);
+                    }
+                }
+            }
+
+            break;
+        }
+    }
+
+    // 贪心换行：在 [ ] , : 后断行优先（属性段天然成组），段内超行宽硬切。
+    private static List<string> WrapKey(string text, int maxChars)
+    {
+        var tokens = new List<string>();
+        var current = "";
+        foreach (var ch in text)
+        {
+            current += ch;
+            if (ch is ',' or '[' or ']' or ':')
+            {
+                tokens.Add(current);
+                current = "";
+            }
+        }
+
+        if (current.Length > 0) tokens.Add(current);
+
+        List<string> lines = [];
+        var line = "";
+        foreach (var token in tokens)
+        {
+            // 段本身超行宽：收掉当前行后按行宽硬切，余段进常规贪心。
+            var rest = token;
+            if (rest.Length > maxChars && line.Length > 0)
+            {
+                lines.Add(line);
+                line = "";
+            }
+
+            while (rest.Length > maxChars)
+            {
+                lines.Add(rest[..maxChars]);
+                rest = rest[maxChars..];
+            }
+
+            if (line.Length + rest.Length > maxChars && line.Length > 0)
+            {
+                lines.Add(line);
+                line = rest;
+            }
+            else
+            {
+                line += rest;
+            }
+        }
+
+        if (line.Length > 0) lines.Add(line);
+        return lines;
+    }
+
+    private static void SetPx(byte[] rgb, int imageWidth, int x, int y, byte r, byte g, byte b)
+    {
+        if (x < 0 || y < 0) return;
+        var i = (y * imageWidth + x) * 3;
+        if (i + 2 >= rgb.Length) return;
+        rgb[i] = r;
+        rgb[i + 1] = g;
+        rgb[i + 2] = b;
+    }
+
+    // 3x5 字体，每 glyph 15 位（行 0 在高位、每行 3 位左起）。只编状态键会出现的
+    // 字符；m/w 这类 3px 画不全的取近似形——可辨认即可，逐字对账用 .txt。
+    private static readonly Dictionary<char, int> Glyphs = new()
+    {
+        ['a'] = 0b010_101_111_101_101,
+        ['b'] = 0b110_101_110_101_110,
+        ['c'] = 0b011_100_100_100_011,
+        ['d'] = 0b110_101_101_101_110,
+        ['e'] = 0b111_100_110_100_111,
+        ['f'] = 0b111_100_110_100_100,
+        ['g'] = 0b011_100_101_101_011,
+        ['h'] = 0b101_101_111_101_101,
+        ['i'] = 0b111_010_010_010_111,
+        ['j'] = 0b001_001_001_101_010,
+        ['k'] = 0b101_101_110_101_101,
+        ['l'] = 0b100_100_100_100_111,
+        ['m'] = 0b101_111_111_101_101,
+        ['n'] = 0b110_101_101_101_101,
+        ['o'] = 0b010_101_101_101_010,
+        ['p'] = 0b110_101_110_100_100,
+        ['q'] = 0b011_101_101_110_001,
+        ['r'] = 0b110_101_110_110_101,
+        ['s'] = 0b011_100_010_001_110,
+        ['t'] = 0b111_010_010_010_010,
+        ['u'] = 0b101_101_101_101_111,
+        ['v'] = 0b101_101_101_101_010,
+        ['w'] = 0b101_101_111_111_101,
+        ['x'] = 0b101_101_010_101_101,
+        ['y'] = 0b101_101_010_010_010,
+        ['z'] = 0b111_001_010_100_111,
+        ['0'] = 0b111_101_101_101_111,
+        ['1'] = 0b010_110_010_010_111,
+        ['2'] = 0b111_001_111_100_111,
+        ['3'] = 0b111_001_111_001_111,
+        ['4'] = 0b101_101_111_001_001,
+        ['5'] = 0b111_100_111_001_111,
+        ['6'] = 0b111_100_111_101_111,
+        ['7'] = 0b111_001_001_010_010,
+        ['8'] = 0b111_101_111_101_111,
+        ['9'] = 0b111_101_111_001_111,
+        [':'] = 0b000_010_000_010_000,
+        ['_'] = 0b000_000_000_000_111,
+        ['['] = 0b011_010_010_010_011,
+        [']'] = 0b110_010_010_010_110,
+        ['='] = 0b000_111_000_111_000,
+        [','] = 0b000_000_000_010_100,
+        ['.'] = 0b000_000_000_000_010,
+        ['/'] = 0b001_001_010_100_100,
+        ['-'] = 0b000_000_111_000_000,
+        ['|'] = 0b010_010_010_010_010,
+    };
 
     private static void WritePng(string path, int width, int height, byte[] rgb)
     {
@@ -810,5 +985,7 @@ internal static class PreviewBlocks
         return table;
     }
 
-    private sealed record MontageOptions(string OutPath, string Filter, int Cell, int Limit);
+    // Names：每格右上角画状态键。像素字体是 3x5 逐 glyph 手码的 15 位整数
+    // （高位在前，每行 3 位），只覆盖状态键会出现的字符；没编码的字符跳格。
+    private sealed record MontageOptions(string OutPath, string Filter, int Cell, int Limit, bool Names);
 }
