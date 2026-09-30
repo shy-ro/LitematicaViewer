@@ -15,4 +15,10 @@ public sealed record RawRegion(
     Vector3I Position,
     Vector3I Size,
     ImmutableArray<BlockStateDefinition> Palette,
-    ImmutableArray<int> BlockIndices);
+    ImmutableArray<int> BlockIndices)
+{
+    public ImmutableDictionary<Vector3I, BlockEntityData> BlockEntities { get; init; } =
+        ImmutableDictionary<Vector3I, BlockEntityData>.Empty;
+
+    public ImmutableArray<EntityData> Entities { get; init; } = [];
+}

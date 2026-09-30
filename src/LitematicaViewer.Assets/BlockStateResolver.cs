@@ -160,7 +160,7 @@ public sealed class BlockStateResolver
 
         // builtin/entity（方块实体渲染的方块）与流体模型的 elements 是空的，
         // 原样返回就是「整块消失」；按方块名换一个占位几何再出去。
-        if (FallbackModels.TryGet(blockName, modelId, model, properties, out var fallback)) model = fallback;
+        if (SpecialBlockModels.TryGet(blockName, modelId, model, properties, out var special)) model = special;
 
         output.Add(new ResolvedVariant(modelId, model, x, y));
     }
@@ -215,7 +215,10 @@ public sealed class BlockStateResolver
 
         foreach (var entry in when.EnumerateObject())
         {
-            if (!properties.TryGetValue(entry.Name, out var value)) return false;
+            var value = properties.TryGetValue(entry.Name, out var present)
+                ? present
+                : DefaultPropertyValue(entry.Name, entry.Value);
+            if (value is null) return false;
 
             var matched = entry.Value.ValueKind == JsonValueKind.Array
                 ? entry.Value.EnumerateArray().Any(v => v.ValueKind == JsonValueKind.String && v.GetString() == value)
@@ -224,6 +227,27 @@ public sealed class BlockStateResolver
         }
 
         return true;
+    }
+
+    // Bare ids occur in hand-authored/converted schematics. Multipart JSON has no explicit
+    // default-state table, but its property vocabulary is regular enough to recover vanilla's
+    // neutral state instead of dropping every conditional part.
+    private static string? DefaultPropertyValue(string name, JsonElement condition)
+    {
+        if (name == "up") return "true";
+        if (name is "north" or "south" or "east" or "west")
+        {
+            var candidates = condition.ValueKind == JsonValueKind.Array
+                ? condition.EnumerateArray().Select(static item => item.GetString()).ToArray()
+                : [condition.GetString()];
+            if (candidates.Contains("false", StringComparer.Ordinal)) return "false";
+            if (candidates.Contains("none", StringComparer.Ordinal)) return "none";
+            if (candidates.Contains("low", StringComparer.Ordinal)) return "low";
+        }
+
+        if (name.StartsWith("has_", StringComparison.Ordinal) || name is "waterlogged" or "powered" or "lit")
+            return "false";
+        return null;
     }
 
     private ModelSource? LoadSource(string modelId)

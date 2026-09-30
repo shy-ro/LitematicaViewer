@@ -49,9 +49,10 @@ internal static class SceneLoader
         // 空图集的 builder 只为 CollectSprites 占位：收集直走 resolver，用不到落位。
         BlockMeshBuilder collector = new(resolver, TextureAtlas.Build(packs, []));
         HashSet<string> sprites = [];
-        collector.CollectSprites(document.Regions, sprites);
+        List<GeneratedSprite> generatedSprites = [];
+        collector.CollectSprites(document.Regions, sprites, packs, generatedSprites);
 
-        var atlas = TextureAtlas.Build(packs, sprites);
+        var atlas = TextureAtlas.Build(packs, sprites, generatedSprites);
         BlockMeshBuilder builder = new(resolver, atlas);
 
         List<MeshData> meshes = [];

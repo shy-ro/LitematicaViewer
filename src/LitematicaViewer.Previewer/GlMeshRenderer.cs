@@ -4,7 +4,7 @@ using LitematicaViewer.Previewer.Gpu;
 
 namespace LitematicaViewer.Previewer;
 
-// 有贴图的任意网格：Meshing 中间层的产物（pos3 + normal3 + uv2 交错，索引 uint）交给这里画。
+// 有贴图的任意网格：Meshing 中间层的产物（pos3 + normal3 + uv2 + tint1 + ao1）交给这里画。
 // Previewer 不知道 Meshing 存在：装填只认数组，布局由本类的常量约定（与 MeshData 一一对应）。
 //
 // 数据到达与 GL 可用是两个互不相干的时间点（文件在后台解析时上下文早就开着；上下文丢失
@@ -13,9 +13,9 @@ namespace LitematicaViewer.Previewer;
 // 缓冲的销毁仍只在 Dispose / Abandon，R5 的「建」放宽到渲染回调是本类存在的理由。
 internal sealed class GlMeshRenderer : IDisposable
 {
-    // pos3 + normal3 + uv2 + tint1。与 Meshing 的 MeshData.FloatsPerVertex 相同，
+    // pos3 + normal3 + uv2 + tint1 + ao1。与 Meshing 的 MeshData.FloatsPerVertex 相同，
     // 但这里不给引用——两个工程零引用，布局改了会在下面的断言处炸出来。
-    internal const int FloatsPerVertex = 9;
+    internal const int FloatsPerVertex = 10;
 
     private const string VertexShaderSource = """
                                               #version 300 es
@@ -25,18 +25,21 @@ internal sealed class GlMeshRenderer : IDisposable
                                               layout(location = 1) in vec3 aNormal;
                                               layout(location = 2) in vec2 aUv;
                                               layout(location = 3) in float aTint;
+                                              layout(location = 4) in float aAo;
 
                                               uniform mat4 uViewProjection;
 
                                               out vec3 vNormal;
                                               out vec2 vUv;
                                               out float vTint;
+                                              out float vAo;
 
                                               void main()
                                               {
                                                   vNormal = aNormal;
                                                   vUv = aUv;
                                                   vTint = aTint;
+                                                  vAo = aAo;
                                                   gl_Position = uViewProjection * vec4(aPosition, 1.0);
                                               }
                                               """;
@@ -49,6 +52,7 @@ internal sealed class GlMeshRenderer : IDisposable
                                                 in vec3 vNormal;
                                                 in vec2 vUv;
                                                 in float vTint;
+                                                in float vAo;
 
                                                 uniform sampler2D uAtlas;
                                                 uniform float uOpaquePass;
@@ -62,7 +66,7 @@ internal sealed class GlMeshRenderer : IDisposable
                                                     // 光的方向固定在世界空间，相机怎么转明暗关系都不变。
                                                     vec3 light = normalize(vec3(0.35, 0.9, 0.2));
                                                     float diffuse = max(dot(normalize(vNormal), light), 0.0);
-                                                    float shade = 0.62 + 0.38 * diffuse;
+                                                    float shade = (0.62 + 0.38 * diffuse) * vAo;
 
                                                     vec4 texel = texture(uAtlas, vUv);
 
@@ -251,7 +255,7 @@ internal sealed class GlMeshRenderer : IDisposable
         _atlas = null;
 
         _atlas = GlTexture.Create(gl, _atlasLevels!, _atlasWidth, _atlasHeight);
-        _mesh = GlMesh.Create(gl, _vertices!, _vertices!.Length / FloatsPerVertex, _indices!, [3, 3, 2, 1]);
+        _mesh = GlMesh.Create(gl, _vertices!, _vertices!.Length / FloatsPerVertex, _indices!, [3, 3, 2, 1, 1]);
 
         // 混合与深度语义是本渲染器的前置条件，自己设一遍（幂等），不赌别的渲染器
         // 的 Initialize 恰好先跑：alpha 输出靠 (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) 混合

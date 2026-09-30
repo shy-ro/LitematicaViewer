@@ -9,7 +9,7 @@ namespace LitematicaViewer.Meshing;
 // Document → 网格。邻居是空气才出面（区域外算空气，外表面照常出），
 // 每个面的几何与 uv 从资产层解析出的 element 拿，variant 的 x/y 旋转与
 // element 的自身旋转在这里变成矩阵。
-public sealed class BlockMeshBuilder
+public sealed partial class BlockMeshBuilder
 {
     // id 里含这些片段的不遮挡邻居。模型判据把它们认成整方块（cube_all），只能按 id 排除。
     private static readonly string[] NonOccludingMarkers =
@@ -39,7 +39,8 @@ public sealed class BlockMeshBuilder
     // 这里必须直走 resolver 而不是 GetState 的缓存：缓存里的四边形是在图集上算的
     // （uv 要映射进 sprite 落位），而图集要等这份收集做完才建得出来——
     // 先有蛋后有鸡的顺序反过来一次，sprite 全集就永远是空的。
-    public void CollectSprites(IEnumerable<LitematicRegion> regions, HashSet<string> output)
+    public void CollectSprites(IEnumerable<LitematicRegion> regions, HashSet<string> output,
+        PackStack? packs = null, ICollection<GeneratedSprite>? generatedSprites = null)
     {
         HashSet<string> seenStates = new(StringComparer.Ordinal);
         foreach (var region in regions)
@@ -64,6 +65,8 @@ public sealed class BlockMeshBuilder
                 if (face.Sprite.Length > 0)
                     output.Add(face.Sprite);
         }
+
+        CollectSpecialSprites(regions, output, packs, generatedSprites);
     }
 
     public MeshData BuildRegion(LitematicRegion region)
@@ -171,7 +174,7 @@ public sealed class BlockMeshBuilder
                             continue;
                         }
 
-                        EmitQuad(vertices, indices, origin, quad);
+                        EmitQuad(vertices, indices, origin, quad, blocks, occludeFlags, size, x, y, z);
                     }
 
                     // waterlogged 宿主：本体已画，水面叠在宿主格里（vanilla 双层渲染）。
@@ -179,6 +182,9 @@ public sealed class BlockMeshBuilder
                 }
             }
         }
+
+        EmitBlockEntityOverlays(region, vertices, indices);
+        EmitEntities(region, vertices, indices);
 
         Debug.WriteLine(
             $"[MESH][build] region={region.Name} blocks={region.CountNonAirBlocks()} " +
@@ -444,7 +450,8 @@ public sealed class BlockMeshBuilder
         return 0f;
     }
 
-    private static void EmitQuad(List<float> vertices, List<int> indices, Vector3 origin, CachedQuad quad)
+    private static void EmitQuad(List<float> vertices, List<int> indices, Vector3 origin, CachedQuad quad,
+        int[] blocks, bool[] occludeFlags, Vector3I size, int x, int y, int z)
     {
         var baseIndex = vertices.Count / MeshData.FloatsPerVertex;
         foreach (var (position, uv) in new[]
@@ -461,6 +468,7 @@ public sealed class BlockMeshBuilder
             vertices.Add(uv.X);
             vertices.Add(uv.Y);
             vertices.Add(quad.TintSlot);
+            vertices.Add(VertexAo(position, quad.Normal, blocks, occludeFlags, size, x, y, z));
         }
 
         indices.Add(baseIndex);
@@ -469,6 +477,65 @@ public sealed class BlockMeshBuilder
         indices.Add(baseIndex);
         indices.Add(baseIndex + 2);
         indices.Add(baseIndex + 3);
+    }
+
+    private static float VertexAo(Vector3 position, Vector3 normal, int[] blocks, bool[] occludeFlags,
+        Vector3I size, int x, int y, int z)
+    {
+        var normalAxis = AxisOf(normal);
+        if (MathF.Abs(ComponentOf(normal, normalAxis)) < 0.999f) return 1f;
+        var faceCoordinate = normalAxis switch
+        {
+            0 => position.X,
+            1 => position.Y,
+            _ => position.Z
+        };
+        var normalSign = ComponentOf(normal, normalAxis) > 0 ? 1 : -1;
+        if (MathF.Abs(faceCoordinate - (normalSign > 0 ? 1f : 0f)) > 0.001f) return 1f;
+
+        Span<int> tangentAxes = stackalloc int[2];
+        var cursor = 0;
+        for (var axis = 0; axis < 3; axis++)
+            if (axis != normalAxis)
+                tangentAxes[cursor++] = axis;
+
+        var side1Sign = ComponentAt(position, tangentAxes[0]) >= 0.5f ? 1 : -1;
+        var side2Sign = ComponentAt(position, tangentAxes[1]) >= 0.5f ? 1 : -1;
+        Span<int> normalStep = stackalloc int[3];
+        Span<int> side1 = stackalloc int[3];
+        Span<int> side2 = stackalloc int[3];
+        normalStep[normalAxis] = normalSign;
+        side1[tangentAxes[0]] = side1Sign;
+        side2[tangentAxes[1]] = side2Sign;
+
+        var side1Blocked = IsOccludingAt(blocks, occludeFlags, size,
+            x + normalStep[0] + side1[0], y + normalStep[1] + side1[1], z + normalStep[2] + side1[2]);
+        var side2Blocked = IsOccludingAt(blocks, occludeFlags, size,
+            x + normalStep[0] + side2[0], y + normalStep[1] + side2[1], z + normalStep[2] + side2[2]);
+        var cornerBlocked = IsOccludingAt(blocks, occludeFlags, size,
+            x + normalStep[0] + side1[0] + side2[0],
+            y + normalStep[1] + side1[1] + side2[1],
+            z + normalStep[2] + side1[2] + side2[2]);
+
+        if (side1Blocked && side2Blocked) return 0.55f;
+        var occupied = (side1Blocked ? 1 : 0) + (side2Blocked ? 1 : 0) + (cornerBlocked ? 1 : 0);
+        return occupied switch { 0 => 1f, 1 => 0.82f, 2 => 0.68f, _ => 0.55f };
+    }
+
+    private static float ComponentAt(Vector3 value, int axis) => axis switch
+    {
+        0 => value.X,
+        1 => value.Y,
+        _ => value.Z
+    };
+
+    private static bool IsOccludingAt(int[] blocks, bool[] occludeFlags, Vector3I size, int x, int y, int z)
+    {
+        if (x < 0 || y < 0 || z < 0 || x >= size.X || y >= size.Y || z >= size.Z) return false;
+        var index = (y * size.Z + z) * size.X + x;
+        return (uint)index < (uint)blocks.Length
+               && (uint)blocks[index] < (uint)occludeFlags.Length
+               && occludeFlags[blocks[index]];
     }
 
     private Vector2 MapUv(float u16, float v16, SpriteRect rect)

@@ -12,6 +12,12 @@ public sealed record LitematicRegion(
     ImmutableArray<BlockStateDefinition> Palette,
     ImmutableArray<int> BlockIndices)
 {
+    // Positions are region-local, matching the Pos values stored by Litematica.
+    public ImmutableDictionary<Vector3I, BlockEntityData> BlockEntities { get; init; } =
+        ImmutableDictionary<Vector3I, BlockEntityData>.Empty;
+
+    public ImmutableArray<EntityData> Entities { get; init; } = [];
+
     public long Volume => Bounds.Volume;
 
     // 索引顺序 x 最快、然后 z、最后 y。Minecraft 在区域内的列式遍历就是这个顺序，

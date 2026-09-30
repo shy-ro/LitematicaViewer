@@ -232,6 +232,7 @@ public static class MeshSmoke
 
         CheckSingleBlock();
         CheckFaceCulling();
+        CheckAmbientOcclusion();
         CheckLogAxisRotation();
         CheckFluidRules();
         foreach (var path in litematics) CheckRealFile(path);
@@ -284,6 +285,22 @@ public static class MeshSmoke
 
         Debug.Assert(mesh.Indices.Length == 60, $"[MESH][smoke] 双方块索引={mesh.Indices.Length} expected=60（剔除失效会是 72）");
         Debug.WriteLine("[MESH][smoke] 双方块相接: 10 面 60 索引，共享面被剔除 ✓");
+        _checks++;
+    }
+
+    private static void CheckAmbientOcclusion()
+    {
+        var blocks = Enumerable.Repeat(1, 27).ToArray();
+        blocks[(1 * 3 + 1) * 3 + 1] = 0;
+        blocks[(2 * 3 + 1) * 3 + 0] = 0;
+        var builder = CreateBuilder("minecraft:block/stone");
+        var mesh = builder.BuildRegion(MakeRegion(new Vector3I(3, 3, 3), [Stone, Air], blocks));
+        var values = Enumerable.Range(0, mesh.VertexCount)
+            .Select(vertex => mesh.Vertices[vertex * MeshData.FloatsPerVertex + MeshData.AoOffset]).ToArray();
+        Debug.Assert(values.Any(static value => value < 0.99f), "[MESH][smoke] AO 没有压暗任何顶点");
+        Debug.Assert(values.All(static value => value is >= 0.55f and <= 1f),
+            "[MESH][smoke] AO 超出 [0.55,1]");
+        Debug.WriteLine($"[MESH][smoke] AO: range=[{values.Min():F2},{values.Max():F2}] 邻角逐顶点压暗 ✓");
         _checks++;
     }
 
@@ -393,6 +410,18 @@ public static class MeshSmoke
         Debug.Assert(
             MathF.Abs(slope - (own0 + FluidMesher.OwnHeight(2)) / 2f) < 1e-5f,
             $"[MESH][smoke] 相邻水格的角高应是平均 got={slope}");
+
+        // 垂直对角连接：两个正交邻居都为空，但对角水列向上连续。
+        // 共享角必须满高，否则上层对角水格下方会露出三角缝。
+        var diagonalBlocks = Enumerable.Repeat(3, 2 * 2 * 2).ToArray();
+        FluidMesher.World diagonalWorld = new(water, levels, occ, diagonalBlocks, new Vector3I(2, 2, 2));
+        diagonalBlocks[(0 * 2 + 0) * 2 + 0] = 1; // (0,0,0)
+        diagonalBlocks[(0 * 2 + 1) * 2 + 1] = 1; // (1,0,1)
+        diagonalBlocks[(1 * 2 + 1) * 2 + 1] = 1; // (1,1,1)
+        var diagonalCorner = FluidMesher.Corner(diagonalWorld, 0, 0, 0, 0, +1, +1);
+        Debug.Assert(
+            MathF.Abs(diagonalCorner - 1f) < 1e-5f,
+            $"[MESH][smoke] 向上连续的对角水列应把共享角抬到满高 got={diagonalCorner}");
 
         // 集成：4x1x1 的 level 0..3 水阶梯。18 面 = 两头各 5 + 中间两格各 4
         // （相邻水格之间不画壁——连通标记失灵就会多出面，交界上两片重合 z-fight）。

@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Globalization;
+using System.Numerics;
 using LitematicaViewer.Core.Io;
 using LitematicaViewer.Core.Model;
 using Poly.NBT;
@@ -74,7 +75,11 @@ public static class LitematicParser
                 raw.Size,
                 IntBounds.FromPositionSize(raw.Position, raw.Size),
                 raw.Palette,
-                raw.BlockIndices))
+                raw.BlockIndices)
+            {
+                BlockEntities = raw.BlockEntities,
+                Entities = raw.Entities
+            })
         ];
 
         // 空 Regions 时不能走 Enclose：default(IntBounds) 的 Min 与 Max 都是原点，
@@ -141,15 +146,162 @@ public static class LitematicParser
             $"[CORE][parse.region] name='{name}' position={position} size={size} absSize={size.Abs()} " +
             $"bounds={bounds} volume={volume} palette={palette.Length} bits={bits} " +
             $"longs={packed.Length} requiredLongs={required} paletteHead='{palette[0]}'");
+        var blockEntities = ReadBlockEntities(node, issues, name);
+        var entities = ReadEntities(node, issues, name);
+
         Debug.WriteLine(
             $"[CORE][parse.region] name='{name}' entities={CountListItems(node, "Entities")} " +
             $"tileEntities={CountListItems(node, "TileEntities")} " +
             $"pendingBlockTicks={CountListItems(node, "PendingBlockTicks")} " +
-            $"pendingFluidTicks={CountListItems(node, "PendingFluidTicks")} " +
-            $"note=本阶段不解，只确认它们存在且不被当成未知字段");
+            $"pendingFluidTicks={CountListItems(node, "PendingFluidTicks")} parsedEntities={entities.Length} " +
+            $"parsedTileEntities={blockEntities.Count}");
 
-        return new RawRegion(name, position, size, palette, indices);
+        return new RawRegion(name, position, size, palette, indices)
+        {
+            BlockEntities = blockEntities,
+            Entities = entities
+        };
     }
+
+    private static ImmutableDictionary<Vector3I, BlockEntityData> ReadBlockEntities(
+        NbtCompound node, ImmutableArray<string>.Builder issues, string regionName)
+    {
+        if (!node.TryGetValue("TileEntities", out var element) || element is not NbtList list) return
+            ImmutableDictionary<Vector3I, BlockEntityData>.Empty;
+
+        var result = ImmutableDictionary.CreateBuilder<Vector3I, BlockEntityData>();
+        foreach (var item in list)
+        {
+            if (item is not NbtCompound compound || !TryReadBlockEntityPosition(compound, out var position))
+            {
+                if (item is NbtCompound skipped)
+                    Debug.WriteLine(
+                        $"[CORE][parse.blockEntity] missing position keys=[{string.Join(',', skipped.Keys)}] " +
+                        $"PosType={(skipped.TryGetValue("Pos", out var pos) ? pos.GetType().Name : "absent")}");
+                issues.Add($"region '{regionName}': block entity without a three-int Pos was skipped");
+                continue;
+            }
+
+            var data = ReadNbtMap(compound);
+            var id = data.GetString("id") ?? data.GetString("Id") ?? string.Empty;
+            result[position] = new BlockEntityData(id, position, data);
+        }
+
+        return result.ToImmutable();
+    }
+
+    private static ImmutableArray<EntityData> ReadEntities(
+        NbtCompound node, ImmutableArray<string>.Builder issues, string regionName)
+    {
+        if (!node.TryGetValue("Entities", out var element) || element is not NbtList list) return [];
+
+        var result = ImmutableArray.CreateBuilder<EntityData>(list.Count);
+        foreach (var item in list)
+        {
+            if (item is not NbtCompound compound)
+            {
+                issues.Add($"region '{regionName}': non-compound entity was skipped");
+                continue;
+            }
+
+            var data = ReadNbtMap(compound);
+            var id = data.GetString("id") ?? data.GetString("Id") ?? string.Empty;
+            var position = TryReadDoubleVector(compound, "Pos", out var found) ? found : Vector3.Zero;
+            result.Add(new EntityData(id, position, data));
+        }
+
+        return result.MoveToImmutable();
+    }
+
+    private static bool TryReadIntVector(NbtCompound node, string key, out Vector3I value)
+    {
+        value = Vector3I.Zero;
+        if (!node.TryGetValue(key, out var element)) return false;
+        if (element is NbtIntArray array && array.Value.Length >= 3)
+        {
+            value = new Vector3I(array.Value[0], array.Value[1], array.Value[2]);
+            return true;
+        }
+
+        if (element is not NbtList list || list.Count < 3) return false;
+        var values = list.Select(ReadIntegral).Take(3).ToArray();
+        if (values.Any(static item => item is null)) return false;
+        value = new Vector3I((int)values[0]!.Value, (int)values[1]!.Value, (int)values[2]!.Value);
+        return true;
+    }
+
+    private static bool TryReadBlockEntityPosition(NbtCompound node, out Vector3I value)
+    {
+        if (TryReadIntVector(node, "Pos", out value) || TryReadIntVector(node, "pos", out value)) return true;
+        if (node.ContainsKey("x") && node.ContainsKey("y") && node.ContainsKey("z"))
+        {
+            var x = ReadIntegral(node["x"]);
+            var y = ReadIntegral(node["y"]);
+            var z = ReadIntegral(node["z"]);
+            if (x is not null && y is not null && z is not null)
+            {
+                value = new Vector3I((int)x.Value, (int)y.Value, (int)z.Value);
+                return true;
+            }
+        }
+
+        value = Vector3I.Zero;
+        return false;
+    }
+
+    private static bool TryReadDoubleVector(NbtCompound node, string key, out Vector3 value)
+    {
+        value = Vector3.Zero;
+        if (!node.TryGetValue(key, out var element) || element is not NbtList list || list.Count < 3) return false;
+        var values = list.Select(ReadFloating).Take(3).ToArray();
+        if (values.Any(static item => item is null)) return false;
+        value = new Vector3((float)values[0]!.Value, (float)values[1]!.Value, (float)values[2]!.Value);
+        return true;
+    }
+
+    private static NbtMap ReadNbtMap(NbtCompound compound)
+    {
+        var values = ImmutableDictionary.CreateBuilder<string, NbtData>(StringComparer.Ordinal);
+        foreach (var pair in compound) values[pair.Key] = ReadNbtData(pair.Value);
+        return new NbtMap(values.ToImmutable());
+    }
+
+    private static NbtData ReadNbtData(NbtElement element) => element switch
+    {
+        NbtByte value => new NbtInteger(value.Value),
+        NbtShort value => new NbtInteger(value.Value),
+        NbtInt value => new NbtInteger(value.Value),
+        NbtLong value => new NbtInteger(value.Value),
+        NbtFloat value => new NbtFloating(value.Value),
+        NbtDouble value => new NbtFloating(value.Value),
+        NbtString value => new NbtText(value.Value),
+        NbtByteArray value => new NbtBytes([.. value.Value]),
+        NbtIntArray value => new NbtInts([.. value.Value]),
+        NbtLongArray value => new NbtLongs([.. value.Value]),
+        NbtList value => new NbtSequence([.. value.Select(ReadNbtData)]),
+        NbtCompound value => ReadNbtMap(value),
+        _ => new NbtText(element.ToString() ?? string.Empty)
+    };
+
+    private static long? ReadIntegral(NbtElement element) => element switch
+    {
+        NbtByte value => value.Value,
+        NbtShort value => value.Value,
+        NbtInt value => value.Value,
+        NbtLong value => value.Value,
+        _ => null
+    };
+
+    private static double? ReadFloating(NbtElement element) => element switch
+    {
+        NbtByte value => value.Value,
+        NbtShort value => value.Value,
+        NbtInt value => value.Value,
+        NbtLong value => value.Value,
+        NbtFloat value => value.Value,
+        NbtDouble value => value.Value,
+        _ => null
+    };
 
     private static LitematicMetadata ReadMetadata(NbtCompound root)
     {

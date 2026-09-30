@@ -19,6 +19,14 @@ public static class CoreSmoke
 
     public static int Main(string[] args)
     {
+        if (args.Length >= 2 && args[0] == "--scan-entities")
+            return ScanEntities(args[1..]);
+        if (args.Length >= 3 && args[0] == "--dump-entity")
+        {
+            var nonEmpty = args.Contains("--nonempty", StringComparer.Ordinal);
+            return DumpEntity(args[1], args[2..].Where(static arg => arg != "--nonempty").ToArray(), nonEmpty);
+        }
+
         // 没有这一行时 Debug.WriteLine 只进调试器的输出窗口，从终端 dotnet run 什么都看不到，
         // 而验收标准恰恰是"看桩输出对不对"。Release 下这个 Main 根本不存在，不必条件化。
         using TextWriterTraceListener listener = new(Console.Out);
@@ -34,6 +42,7 @@ public static class CoreSmoke
         CheckSingleStateRegion();
         CheckNegativeSizeRegion();
         CheckIndexRoundTrip();
+        CheckEntityData();
         CheckErrorInputs();
         CheckPicking();
         CheckPickingNearestRegion();
@@ -48,6 +57,140 @@ public static class CoreSmoke
         // 一次跑完拿到全部失败比第一个失败就停更有用。
         Debug.Assert(_failures == 0, $"CoreSmoke failures={_failures}");
         return _failures == 0 ? 0 : 1;
+    }
+
+    private static void CheckEntityData()
+    {
+        var result = LitematicLoader.TryLoad(CoreFixtureBuilder.BuildEntityLitematic(), "fixture://entities");
+        Check(result.Success, "entity fixture parses");
+        if (!result.Success) return;
+        var region = result.Document!.Regions[0];
+        Check(region.BlockEntities.Count == 1, $"block entities={region.BlockEntities.Count} expected=1");
+        Check(region.BlockEntities.TryGetValue(new Vector3I(1, 2, 3), out var sign),
+            "block entity indexed by local position");
+        Check(sign?.Data.GetMap("front_text")?.GetString("color") == "red", "nested block entity NBT preserved");
+        Check(region.Entities.Length == 1, $"entities={region.Entities.Length} expected=1");
+        Check(region.Entities[0].Position == new Vector3(1.5f, 2.5f, 3.5f),
+            $"entity position={region.Entities[0].Position} expected=<1.5,2.5,3.5>");
+        Check(region.Entities[0].Data.GetMap("Item")?.GetString("id") == "minecraft:stone",
+            "nested entity item NBT preserved");
+    }
+
+    private static int ScanEntities(string[] roots)
+    {
+        Dictionary<string, int> blockEntityIds = new(StringComparer.Ordinal);
+        Dictionary<string, int> entityIds = new(StringComparer.Ordinal);
+        Dictionary<string, int> blockEntityKeys = new(StringComparer.Ordinal);
+        Dictionary<string, int> entityKeys = new(StringComparer.Ordinal);
+        var files = 0;
+        var failures = 0;
+        foreach (var path in roots.SelectMany(EnumerateLitematics))
+        {
+            files++;
+            var result = LitematicLoader.TryLoadFile(path);
+            if (!result.Success)
+            {
+                failures++;
+                Console.WriteLine($"PARSE FAIL {path}: {result.Error}");
+                continue;
+            }
+
+            foreach (var region in result.Document!.Regions)
+            {
+                foreach (var blockEntity in region.BlockEntities.Values)
+                {
+                    Increment(blockEntityIds, blockEntity.Id);
+                    foreach (var key in blockEntity.Data.Values.Keys) Increment(blockEntityKeys, key);
+                }
+
+                foreach (var entity in region.Entities)
+                {
+                    Increment(entityIds, entity.Id);
+                    foreach (var key in entity.Data.Values.Keys) Increment(entityKeys, key);
+                }
+            }
+        }
+
+        Console.WriteLine($"files={files} failures={failures}");
+        PrintHistogram("blockEntityIds", blockEntityIds);
+        PrintHistogram("entityIds", entityIds);
+        PrintHistogram("blockEntityKeys", blockEntityKeys);
+        PrintHistogram("entityKeys", entityKeys);
+        return failures == 0 ? 0 : 1;
+    }
+
+    private static int DumpEntity(string requestedId, string[] roots, bool nonEmpty)
+    {
+        foreach (var path in roots.SelectMany(EnumerateLitematics))
+        {
+            var result = LitematicLoader.TryLoadFile(path);
+            if (!result.Success) continue;
+            foreach (var region in result.Document!.Regions)
+            {
+                var blockEntity = region.BlockEntities.Values.FirstOrDefault(value => value.Id == requestedId &&
+                    (!nonEmpty || HasVisibleData(value.Data)));
+                if (blockEntity is not null)
+                {
+                    Console.WriteLine($"file={path}\nregion={region.Name}\nposition={blockEntity.Position}\n{FormatNbt(blockEntity.Data)}");
+                    return 0;
+                }
+
+                var entity = region.Entities.FirstOrDefault(value => value.Id == requestedId);
+                if (entity is not null)
+                {
+                    Console.WriteLine($"file={path}\nregion={region.Name}\nposition={entity.Position}\n{FormatNbt(entity.Data)}");
+                    return 0;
+                }
+            }
+        }
+
+        Console.WriteLine($"not found: {requestedId}");
+        return 1;
+    }
+
+    private static bool HasVisibleData(NbtMap data)
+    {
+        if (data.GetMap("front_text")?.GetSequence("messages") is { } messages &&
+            messages.Values.Any(static value => value.AsString() is { Length: > 2 } text && text != "{\"text\":\"\"}"))
+            return true;
+        if (data.GetSequence("Patterns") is { Values.Length: > 0 }) return true;
+        return data.GetMap("Item")?.GetString("id") is not null;
+    }
+
+    private static string FormatNbt(NbtData value) => value switch
+    {
+        NbtInteger integer => integer.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        NbtFloating floating => floating.Value.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+        NbtText text => System.Text.Json.JsonSerializer.Serialize(text.Value),
+        NbtBytes bytes => $"bytes[{bytes.Values.Length}]",
+        NbtInts ints => "[" + string.Join(',', ints.Values) + "]",
+        NbtLongs longs => "[" + string.Join(',', longs.Values) + "]",
+        NbtSequence sequence => "[" + string.Join(',', sequence.Values.Select(FormatNbt)) + "]",
+        NbtMap map => "{" + string.Join(',', map.Values.OrderBy(static pair => pair.Key, StringComparer.Ordinal)
+            .Select(static pair => System.Text.Json.JsonSerializer.Serialize(pair.Key) + ":" + FormatNbt(pair.Value))) + "}",
+        _ => value.ToString() ?? string.Empty
+    };
+
+    private static IEnumerable<string> EnumerateLitematics(string path)
+    {
+        if (File.Exists(path)) return [path];
+        return Directory.Exists(path)
+            ? Directory.EnumerateFiles(path, "*.litematic", SearchOption.AllDirectories)
+            : [];
+    }
+
+    private static void Increment(Dictionary<string, int> histogram, string key)
+    {
+        histogram.TryGetValue(key, out var count);
+        histogram[key] = count + 1;
+    }
+
+    private static void PrintHistogram(string label, Dictionary<string, int> histogram)
+    {
+        Console.WriteLine(label + "=" + string.Join(", ", histogram
+            .OrderByDescending(static pair => pair.Value)
+            .ThenBy(static pair => pair.Key, StringComparer.Ordinal)
+            .Select(static pair => $"{pair.Key}:{pair.Value}")));
     }
 
     private static void CheckCodecBitWidths()

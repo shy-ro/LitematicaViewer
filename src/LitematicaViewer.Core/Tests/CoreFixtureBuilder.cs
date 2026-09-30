@@ -102,13 +102,36 @@ public static class CoreFixtureBuilder
                 .. palette.Select(static p => (NbtElement)Compound(
                     ("Name", new NbtString(p.Name))))
             ])),
-            ("Entities", new NbtList()),
-            ("TileEntities", new NbtList()),
+            ("Entities", new NbtList(spec.Entities)),
+            ("TileEntities", new NbtList(spec.TileEntities)),
             ("PendingBlockTicks", new NbtList()),
             ("PendingFluidTicks", new NbtList()),
             ("BlockStates", new NbtLongArray([.. packed])));
 
         return (region, nonAir, bounds.Volume);
+    }
+
+    public static byte[] BuildEntityLitematic()
+    {
+        var sign = Compound(
+            ("id", new NbtString("minecraft:sign")),
+            ("x", new NbtInt(1)), ("y", new NbtInt(2)), ("z", new NbtInt(3)),
+            ("front_text", Compound(
+                ("color", new NbtString("red")),
+                ("messages", new NbtList([new NbtString("hello"), new NbtString(""),
+                    new NbtString(""), new NbtString("")])))));
+        var frame = Compound(
+            ("id", new NbtString("minecraft:item_frame")),
+            ("Pos", new NbtList([new NbtDouble(1.5), new NbtDouble(2.5), new NbtDouble(3.5)])),
+            ("Facing", new NbtByte(2)),
+            ("Item", Compound(("id", new NbtString("minecraft:stone")), ("Count", new NbtByte(1)))));
+        RegionSpec region = new("entities", Vector3I.Zero, new Vector3I(4, 4, 4),
+            ["minecraft:air"], [.. Enumerable.Repeat(0, 64)])
+        {
+            TileEntities = [sign],
+            Entities = [frame]
+        };
+        return BuildLitematic(true, region);
     }
 
     public static byte[] BuildNbtWithoutRegions()

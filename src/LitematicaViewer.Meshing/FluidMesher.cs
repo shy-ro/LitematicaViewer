@@ -96,8 +96,8 @@ public sealed class FluidMesher(TextureAtlas atlas)
     }
 
     // 四角高。vanilla 思路：头顶同流体 → 满格（列内部）；两侧与对角的同流体列
-    // 参与平均 → 水面向低处倾斜；两侧都不是流体就保持自身高——池边贴实心墙时
-    // 池面是平的，不往墙上塌。
+    // 参与平均 → 水面向低处倾斜。任一参与列向上连续时，共享角必须抬到满格，
+    // 否则上层对角流体下方会露出三角缝。三列都不是流体时保持自身高。
     internal static float Corner(World world, int x, int y, int z, int level, int dx, int dz)
     {
         if (world.IsWater(x, y + 1, z)) return 1f;
@@ -105,11 +105,13 @@ public sealed class FluidMesher(TextureAtlas atlas)
         var self = OwnHeight(level);
         var side1 = ColumnTop(world, x + dx, y, z);
         var side2 = ColumnTop(world, x, y, z + dz);
-        if (side1 < 0f && side2 < 0f) return self;
+        var diag = ColumnTop(world, x + dx, y, z + dz);
+
+        if (side1 >= 1f || side2 >= 1f || diag >= 1f) return 1f;
+        if (side1 < 0f && side2 < 0f && diag < 0f) return self;
 
         var sum = self + MathF.Max(side1, 0f) + MathF.Max(side2, 0f);
         var count = 1 + (side1 >= 0f ? 1 : 0) + (side2 >= 0f ? 1 : 0);
-        var diag = ColumnTop(world, x + dx, y, z + dz);
         if (diag >= 0f)
         {
             sum += diag;
@@ -202,6 +204,7 @@ public sealed class FluidMesher(TextureAtlas atlas)
             vertices.Add(uv.X);
             vertices.Add(uv.Y);
             vertices.Add(tint);
+            vertices.Add(1f);
         }
 
         indices.Add(baseIndex);

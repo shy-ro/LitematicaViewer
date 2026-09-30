@@ -516,6 +516,7 @@ internal static class PreviewBlocks
                 mesh.Vertices[i0 * MeshData.FloatsPerVertex + 5]);
             var shade = 0.62f + 0.38f * MathF.Max(Vector3.Dot(normal, Light), 0f);
             var tintSlot = mesh.Vertices[i0 * MeshData.FloatsPerVertex + 8];
+            var ao = mesh.Vertices[i0 * MeshData.FloatsPerVertex + MeshData.AoOffset];
             var tint = TintOf(tintSlot);
 
             var area = Edge(s0, s1, s2.X, s2.Y);
@@ -549,9 +550,9 @@ internal static class PreviewBlocks
                 if (atlas.Pixels[texel + 3] < 128) continue; // alpha cutout，与片元着色器同阈值
 
                 zbuf[index] = depth;
-                rgb[index * 3 + 0] = (byte)Math.Clamp(atlas.Pixels[texel + 0] * tint.X * shade, 0, 255);
-                rgb[index * 3 + 1] = (byte)Math.Clamp(atlas.Pixels[texel + 1] * tint.Y * shade, 0, 255);
-                rgb[index * 3 + 2] = (byte)Math.Clamp(atlas.Pixels[texel + 2] * tint.Z * shade, 0, 255);
+                rgb[index * 3 + 0] = (byte)Math.Clamp(atlas.Pixels[texel + 0] * tint.X * shade * ao, 0, 255);
+                rgb[index * 3 + 1] = (byte)Math.Clamp(atlas.Pixels[texel + 1] * tint.Y * shade * ao, 0, 255);
+                rgb[index * 3 + 2] = (byte)Math.Clamp(atlas.Pixels[texel + 2] * tint.Z * shade * ao, 0, 255);
             }
         }
 

@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using LitematicaViewer.Core.Model;
+using Poly.NBT.Dom;
 
 namespace LitematicaViewer.Core.Tests;
 
@@ -9,4 +10,8 @@ public sealed record RegionSpec(
     Vector3I Position,
     Vector3I Size,
     ImmutableArray<string> PaletteNames,
-    ImmutableArray<int> Indices);
+    ImmutableArray<int> Indices)
+{
+    public ImmutableArray<NbtElement> TileEntities { get; init; } = [];
+    public ImmutableArray<NbtElement> Entities { get; init; } = [];
+}

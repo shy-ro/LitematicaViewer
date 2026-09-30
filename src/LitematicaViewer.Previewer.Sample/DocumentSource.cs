@@ -128,9 +128,10 @@ internal sealed class DocumentSource
         // 空集的 Build 出一张 16x1 的空图集，纯属给构造函数占位。
         BlockMeshBuilder collector = new(resolver, TextureAtlas.Build(packs, []));
         HashSet<string> sprites = [];
-        collector.CollectSprites(document.Regions, sprites);
+        List<GeneratedSprite> generatedSprites = [];
+        collector.CollectSprites(document.Regions, sprites, packs, generatedSprites);
 
-        var atlas = TextureAtlas.Build(packs, sprites);
+        var atlas = TextureAtlas.Build(packs, sprites, generatedSprites);
         BlockMeshBuilder builder = new(resolver, atlas);
 
         List<MeshData> parts = [];

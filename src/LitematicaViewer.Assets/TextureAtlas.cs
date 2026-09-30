@@ -7,6 +7,8 @@ namespace LitematicaViewer.Assets;
 // （动画贴图取首帧后是正方形，非动画的原样）。
 public sealed record SpriteRect(string Sprite, int X, int Y, int Width, int Height);
 
+public sealed record GeneratedSprite(string Sprite, byte[] Rgba, int Width, int Height);
+
 // 自己拼的图集。不用游戏运行时的图集 dump：布局随版本变、还被拆成多页。
 // 这里只收录调用方点名的 sprite，行式装箱，行内同高。
 // 像素是 RGBA8、行主序、原点在左上（PNG 的约定）；v 翻转交给网格阶段。
@@ -59,20 +61,29 @@ public sealed class TextureAtlas
 
     // 逐个从包栈里读 PNG 并装箱。缺的贴图给品红/黑棋盘（MC missingno 的样式），
     // 网格照常生成，缺什么在画面上一眼能认出来——比静默用白块好查得多。
-    public static TextureAtlas Build(PackStack packs, IEnumerable<string> sprites)
+    public static TextureAtlas Build(PackStack packs, IEnumerable<string> sprites,
+        IEnumerable<GeneratedSprite>? generatedSprites = null)
     {
         List<(string Sprite, byte[] Rgba, int W, int H)> decoded = [];
         List<string> missing = [];
 
+        var generated = (generatedSprites ?? []).ToDictionary(static item => item.Sprite, StringComparer.Ordinal);
+
         foreach (var sprite in sprites.Distinct().OrderBy(s => s, StringComparer.Ordinal))
         {
+            if (generated.TryGetValue(sprite, out var supplied))
+            {
+                decoded.Add((sprite, supplied.Rgba, supplied.Width, supplied.Height));
+                continue;
+            }
+
             var (ns, path) = SplitId(sprite);
             if (packs.TryRead($"assets/{ns}/textures/{path}.png", out var png))
             {
                 var image = ImageResult.FromMemory(png, ColorComponents.RedGreenBlueAlpha);
-                var (rgba, w, h) = image.Width == image.Height
-                    ? (image.Data, image.Width, image.Height)
-                    : TakeFirstFrame(image);
+                var (rgba, w, h) = image.Height > image.Width && image.Height % image.Width == 0
+                    ? TakeFirstFrame(image)
+                    : (image.Data, image.Width, image.Height);
                 decoded.Add((sprite, rgba, w, h));
             }
             else
@@ -94,6 +105,10 @@ public sealed class TextureAtlas
                 missing.Add(sprite);
             }
         }
+
+        foreach (var supplied in generated.Values)
+            if (!decoded.Any(item => item.Sprite == supplied.Sprite))
+                decoded.Add((supplied.Sprite, supplied.Rgba, supplied.Width, supplied.Height));
 
         // 行式装箱：按高降序排，一行放不下就换行。图集宽先定（容纳最宽的 sprite，
         // 抬到 2 的幂，GLES 3.0 对 NPOT 其实宽容，但 2 的幂将来开 mipmap 不用重排），
@@ -317,10 +332,8 @@ public sealed class TextureAtlas
         }
     }
 
-    // 非正方形贴图两种形状：竖排动画（水、熔岩、火，h 是 w 的整数倍）取最顶上
-    // 的 w×w 首帧；横排实体皮肤图集（64x32 之类，头颅贴图就是这种）没有「帧」的
-    // 概念，取左上角 min(w,h)² 的正方——头颅都画在皮肤图集的左上角，正好落在里面。
-    // 之前只认竖排：横排贴图按 w×w 去拷直接把 BlockCopy 越界炸掉。
+    // 只有「高是宽的整数倍」才是竖排动画（水、熔岩、火），取最顶上的首帧。
+    // 64x32 的告示牌/旧皮肤等横向实体展开图必须完整保留，不能裁成正方形。
     private static (byte[] Rgba, int Width, int Height) TakeFirstFrame(ImageResult image)
     {
         var side = Math.Min(image.Width, image.Height);
