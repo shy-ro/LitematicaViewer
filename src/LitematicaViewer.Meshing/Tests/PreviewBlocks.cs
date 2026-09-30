@@ -25,6 +25,12 @@ internal static class PreviewBlocks
 {
     private const int Side = 192;
 
+    // montage 的底色。格子背景必须与它一致：格子之间不留缝、不画边框，
+    // 只要两者不同色就会看到一圈深色方框（那正是「不同颜色的边框」的来源）。
+    private const byte BackgroundR = 40;
+    private const byte BackgroundG = 40;
+    private const byte BackgroundB = 40;
+
     // 区域 alpha 加权均色（alpha>=128 才计色）。返回 (-1,-1,-1) 表示区域内无不透明纹素。
     // TexturePad 必须与 TextureAtlas.Pad 一致：那是 private 的，这里抄一份并注释钉死。
     private const int TexturePad = 8;
@@ -128,16 +134,16 @@ internal static class PreviewBlocks
     // 一张 montage 扫一眼就能圈出异常区，再回 --preview 拿单张细看。
     //
     // args：--montage <out.png> [--names] [--gap N] [过滤子串] [每格边长] [上限张数] <资源包...>
-    // 过滤子串对状态键做 OrdinalContains（"iron" 只看铁系）。格边长默认 96，下限 32；
-    // 格间距 --gap 默认 6。--names 在每格左上角画状态键（系统字体、纯黄字、无底条、
-    // 换行不截断，全名另在 .txt 索引里）。开关先行剥离再走位置参数，否则会被当成
-    // 过滤子串吃掉。同行写一个 .txt 索引（序号 → 状态键）：对账靠它。
+    // 过滤子串对状态键做 OrdinalContains（"iron" 只看铁系）。格边长默认 128，下限 32；
+    // 格间距 --gap 默认 0（格子同底色，本来也看不出缝）。--names 在每格左侧的标签列里
+    // 画状态键（系统字体、纯黄字、无底条、按列宽断行不截断，全名另在 .txt 索引里）。
+    // 开关先行剥离再走位置参数，否则会被当成过滤子串吃掉。同行写一个 .txt 索引。
     public static int RunMontage(string[] args)
     {
         // args[1] 是输出路径，已在 MeshSmoke.Main 分流处保证存在。
         var outPath = args[1];
         var names = false;
-        var gap = 6;
+        var gap = 0;
         var rest = new List<string>();
         for (var i = 2; i < args.Length; i++)
         {
@@ -149,7 +155,7 @@ internal static class PreviewBlocks
         }
 
         var filter = string.Empty;
-        var cell = 96;
+        var cell = 128;
         var limit = 512;
         // 固定顺序：[过滤子串] [格边长] [上限]，都可选，遇到第一个资源包路径即停。
         // （资源包路径若与数字同名会被吃掉——真实包名没有纯数字的，值得为省解析器不设转义。）
@@ -293,7 +299,7 @@ internal static class PreviewBlocks
             int holePixels;
             if (tiles is not null)
             {
-                (rgb, isFullCube, holePixels) = RenderToBuffer(mesh, atlas, cell);
+                (rgb, isFullCube, holePixels) = RenderToBuffer(mesh, atlas, cell, BackgroundR);
                 if (tiles.Count < montage!.Limit)
                 {
                     tiles.Add(rgb);
@@ -304,7 +310,7 @@ internal static class PreviewBlocks
             else
             {
                 var path = Path.Combine(outDir, SafeFileName(key) + ".png");
-                (rgb, isFullCube, holePixels) = RenderToBuffer(mesh, atlas, Side);
+                (rgb, isFullCube, holePixels) = RenderToBuffer(mesh, atlas, Side, 0);
                 WritePng(path, Side, Side, rgb);
             }
 
@@ -456,9 +462,9 @@ internal static class PreviewBlocks
     // 单位立方体的屏纵向半展宽是 0.79（横向 0.71），顶面/底面本就溢出格子被切；高度
     // 1.5 的栅栏、2 的门、1/16 的地毯更惨。自适应后每个方块都完整装进格子。
     private static (byte[] Rgb, bool IsFullCube, int HolePixels) RenderToBuffer(MeshData mesh, TextureAtlas atlas,
-        int side)
+        int side, byte background)
     {
-        return RenderGeneral(mesh, atlas, side, default, 0f, true, true);
+        return RenderGeneral(mesh, atlas, side, default, 0f, true, true, background);
     }
 
     // 通用软件光栅化：等距视角（yaw 45°、pitch≈33.7°），正交投影。
@@ -466,9 +472,17 @@ internal static class PreviewBlocks
     // keepFullCubeInfo 只在单方块模式下有意义，region 模式恒 false。
     private static (byte[] Rgb, bool IsFullCube, int HolePixels) RenderGeneral(
         MeshData mesh, TextureAtlas atlas, int side, Vector3 centre, float radius, bool autoFit,
-        bool keepFullCubeInfo)
+        bool keepFullCubeInfo, byte background = 0)
     {
         var rgb = new byte[side * side * 3];
+        if (background != 0)
+            for (var i = 0; i < side * side; i++)
+            {
+                rgb[i * 3 + 0] = background;
+                rgb[i * 3 + 1] = background;
+                rgb[i * 3 + 2] = background;
+            }
+
         var zbuf = new float[side * side];
         Array.Fill(zbuf, float.NegativeInfinity);
 
@@ -757,51 +771,59 @@ internal static class PreviewBlocks
         return count == 0 ? (-1, -1, -1) : ((int)(r / count), (int)(g / count), (int)(b / count));
     }
 
-    // 把若干已渲染的方格拼成一张网格大图。列数按「总数开方向上取整」，
-    // 接近正方最好扫视；1px 深灰缝分开相邻格子。
+    // 把若干已渲染的方格拼成一张网格大图。列数按「总数开方向上取整」，接近正方最好扫视。
+    // 背景与格子同色、格间距默认 0：格子之间没有缝也没有边框，方块之间靠自身的留白分开。
+    // --names 时每格左侧让出一条标签列（状态键有自己的地盘，不压方块、也不截断）；
+    // 标签列同时把相邻两格的方块隔开，所以没有间距也不会挤在一起。
     private static void WriteMontage(string path, List<byte[]> tiles, int cell, List<string>? keys = null,
-        bool names = false, int gap = 6)
+        bool names = false, int gap = 0)
     {
+        var labelled = names && keys is not null;
+        var labelW = labelled ? Math.Max(48, cell * 5 / 8) : 0;
+        var tileW = cell + labelW;
+
         var columns = Math.Max(1, (int)MathF.Ceiling(MathF.Sqrt(tiles.Count)));
         var rows = Math.Max(1, (int)MathF.Ceiling(tiles.Count / (float)columns));
-        var width = columns * cell + (columns + 1) * gap;
+        var width = columns * tileW + (columns + 1) * gap;
         var height = rows * cell + (rows + 1) * gap;
         var rgb = new byte[width * height * 3];
         for (var i = 0; i < width * height; i++)
         {
-            rgb[i * 3 + 0] = 40;
-            rgb[i * 3 + 1] = 40;
-            rgb[i * 3 + 2] = 40;
+            rgb[i * 3 + 0] = BackgroundR;
+            rgb[i * 3 + 1] = BackgroundG;
+            rgb[i * 3 + 2] = BackgroundB;
         }
 
         for (var tile = 0; tile < tiles.Count; tile++)
         {
             var tx = tile % columns;
             var ty = tile / columns;
-            var originX = gap + tx * (cell + gap);
-            var originY = gap + ty * (cell + gap);
+            var tileX = gap + tx * (tileW + gap);
+            var tileY = gap + ty * (cell + gap);
+            var originX = tileX + labelW;
             var pixels = tiles[tile];
             for (var y = 0; y < cell; y++)
             {
                 var source = y * cell * 3;
-                var target = ((originY + y) * width + originX) * 3;
+                var target = ((tileY + y) * width + originX) * 3;
                 Buffer.BlockCopy(pixels, source, rgb, target, cell * 3);
             }
 
-            if (names && keys is not null)
-                DrawLabel(rgb, width, originX, originY, cell, keys[tile]);
+            if (labelled)
+                DrawLabel(rgb, width, tileX + 3, tileY + 3, labelW - 8, cell - 6, keys![tile]);
         }
 
         WritePng(path, width, height, rgb);
     }
 
-    // 状态键标注：系统字体（GDI 默认 UI 字体 Segoe UI）、纯黄字、无底条，贴每格
-    // 左上角。字号随格子放大，按 [ ] , : 断行且不截断（超长段按实测像素宽硬切）。
-    private static void DrawLabel(byte[] rgb, int imageWidth, int originX, int originY, int cell, string key)
+    // 状态键标注：系统字体（GDI 默认 UI 字体 Segoe UI）、纯黄字、无底条。放在每格左侧的
+    // 标签列里——不压方块、不截断（按列宽断行，字号在列宽×列高内自适应）。
+    private static void DrawLabel(byte[] rgb, int imageWidth, int x0, int y0, int maxWidth, int maxHeight,
+        string key)
     {
         // minecraft: 在 montage 语境是噪音，截掉省宽度。
         var text = key.StartsWith("minecraft:", StringComparison.Ordinal) ? key["minecraft:".Length..] : key;
-        GdiText.DrawInto(rgb, imageWidth, originX + 1, originY + 1, cell - 2, cell - 2, text);
+        GdiText.DrawInto(rgb, imageWidth, x0, y0, maxWidth, maxHeight, text);
     }
 
     private static void WritePng(string path, int width, int height, byte[] rgb)
@@ -930,7 +952,9 @@ internal static class PreviewBlocks
         private static int Measure(string text) =>
             text.Length == 0 ? 0 : (GetTextExtentPoint32W(Dc, text, text.Length, out var size) ? size.Width : 0);
 
-        // 断行：优先在 [ ] , : 后断（属性段天然成组），段内超宽按实测宽度硬切。
+        // 断行：优先在 [ ] , : _ - = 后断（属性段、命名段天然成组），段内超宽按实测宽度硬切。
+        // 下划线与等号也算边界：mod 的方块名多是 snake_case（linear_chassis），属性是
+        // k=v（facing=south），只按标点断会把名字/属性从中间劈开，读起来很难受。
         private static List<string> Wrap(string text, int maxWidth)
         {
             List<string> tokens = [];
@@ -938,7 +962,7 @@ internal static class PreviewBlocks
             foreach (var ch in text)
             {
                 current += ch;
-                if (ch is ',' or '[' or ']' or ':')
+                if (ch is ',' or '[' or ']' or ':' or '_' or '-' or '=')
                 {
                     tokens.Add(current);
                     current = "";
@@ -981,13 +1005,14 @@ internal static class PreviewBlocks
             return lines;
         }
 
-        // 文本按格宽自动取舍字号（格越大字越大），渲染后按透明键叠进目标 RGB 缓冲。
+        // 文本按列宽自适应字号（列宽才是真约束：字号定得比列能容纳的大，只会立刻缩回来）、
+        // 断行后按透明键叠进目标 RGB 缓冲。
         public static void DrawInto(byte[] rgb, int imageWidth, int x0, int y0, int maxWidth, int maxHeight,
             string text)
         {
             if (maxWidth < 8 || maxHeight < 8) return;
 
-            var fontPx = Math.Clamp(maxHeight / 5, 11, 48);
+            var fontPx = Math.Clamp(maxWidth / 5, 11, 26);
             List<string> lines;
             int boxW;
             int boxH;
