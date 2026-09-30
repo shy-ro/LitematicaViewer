@@ -133,11 +133,12 @@ internal static class PreviewBlocks
     // 而是按行序铺进一张 PNG。用途：快速人检「哪类方块不对劲」——翻几千张散图不现实，
     // 一张 montage 扫一眼就能圈出异常区，再回 --preview 拿单张细看。
     //
-    // args：--montage <out.png> [--names] [--gap N] [过滤子串] [每格边长] [上限张数] <资源包...>
+    // args：--montage <out.png> [--names] [--gap N] [过滤子串] [每格边长] [每块格数] <资源包...>
     // 过滤子串对状态键做 OrdinalContains（"iron" 只看铁系）。格边长默认 128，下限 32；
     // 格间距 --gap 默认 0（格子同底色，本来也看不出缝）。--names 在每格左侧的标签列里
     // 画状态键（系统字体、纯黄字、无底条、按列宽断行不截断，全名另在 .txt 索引里）。
-    // 开关先行剥离再走位置参数，否则会被当成过滤子串吃掉。同行写一个 .txt 索引。
+    // 每块格数 >0 时分块出多张图（第 1 张原名，之后 _2、_3…），0（默认）＝不分块铺一张。
+    // 开关先行剥离再走位置参数，否则会被当成过滤子串吃掉。每张图同行写一个 .txt 索引。
     public static int RunMontage(string[] args)
     {
         // args[1] 是输出路径，已在 MeshSmoke.Main 分流处保证存在。
@@ -158,8 +159,8 @@ internal static class PreviewBlocks
 
         var filter = string.Empty;
         var cell = 128;
-        var limit = 512;
-        // 固定顺序：[过滤子串] [格边长] [上限]，都可选，遇到第一个资源包路径即停。
+        var chunkSize = 0;
+        // 固定顺序：[过滤子串] [格边长] [每块格数]，都可选，遇到第一个资源包路径即停。
         // （资源包路径若与数字同名会被吃掉——真实包名没有纯数字的，值得为省解析器不设转义。）
         var scan = 0;
         if (scan < rest.Count && !File.Exists(rest[scan]) && !Directory.Exists(rest[scan])) filter = rest[scan++];
@@ -170,16 +171,17 @@ internal static class PreviewBlocks
             scan++;
         }
 
-        // 上限 0（或负）＝不限，全量铺满。上限只是给「几千张铺一张」省内存的闸门。
-        if (scan < rest.Count && int.TryParse(rest[scan], out var parsedLimit))
+        // 每块格数：0（或负）＝不分块，全部铺一张。>0 时满一块就落盘一张再继续。
+        if (scan < rest.Count && int.TryParse(rest[scan], out var parsedChunk))
         {
-            limit = parsedLimit <= 0 ? int.MaxValue : parsedLimit;
+            chunkSize = parsedChunk <= 0 ? 0 : parsedChunk;
             scan++;
         }
 
         List<string> packPaths = [.. rest.Skip(scan)];
         var montageDir = Path.GetDirectoryName(Path.GetFullPath(outPath)) ?? ".";
-        return RunCore(montageDir, new MontageOptions(outPath, filter, cell, limit, names, gap, noDup), [.. packPaths]);
+        return RunCore(montageDir, new MontageOptions(outPath, filter, cell, chunkSize, names, gap, noDup),
+            [.. packPaths]);
     }
 
     private static int RunCore(string outDir, MontageOptions? montage, string[] packPaths)
@@ -282,7 +284,7 @@ internal static class PreviewBlocks
             $" sprites={sprites.Count} 解析失败={resolveFailures.Count}");
         Console.Out.WriteLine(
             $"[MESH] 出图格 {renderKeys.Count}（去重 {(dedup ? "开" : "关")}） sprite {sprites.Count} 解析失败 {resolveFailures.Count}"
-            + (montage is { Limit: not int.MaxValue } lm ? $"，本图上限 {lm.Limit}" : string.Empty));
+            + (montage is { ChunkSize: > 0 } lm ? $"，每块 {lm.ChunkSize} 格" : string.Empty));
 
         var atlas = TextureAtlas.Build(packs, sprites);
         Debug.WriteLine(
@@ -327,10 +329,13 @@ internal static class PreviewBlocks
         List<string> hollowCubes = [];
         List<string> emptyMeshes = [];
         var written = 0;
-        List<string> montageIndex = [];
         List<string> montageKeys = [];
         List<byte[]>? tiles = montage is null ? null : [];
         var cell = montage?.Cell ?? Side;
+        // 分块落盘的产物路径，供收尾汇总。chunkBase 是当前块第一格的全局序号，
+        // 所以索引里的序号跨块连续（格在块内的位置 = 序号 % ChunkSize），按序号能反推块。
+        List<string> chunkFiles = [];
+        var chunkBase = 0;
         foreach (var key in renderKeys.OrderBy(k => k, StringComparer.Ordinal))
         {
             var state = ParseStateKey(key);
@@ -342,11 +347,14 @@ internal static class PreviewBlocks
             if (tiles is not null)
             {
                 (rgb, isFullCube, holePixels) = RenderToBuffer(mesh, atlas, cell, BackgroundR);
-                if (tiles.Count < montage!.Limit)
+                tiles.Add(rgb);
+                montageKeys.Add(key);
+                if (montage!.ChunkSize > 0 && tiles.Count >= montage.ChunkSize)
                 {
-                    tiles.Add(rgb);
-                    montageKeys.Add(key);
-                    montageIndex.Add($"{tiles.Count - 1}: {key}");
+                    chunkFiles.Add(FlushChunk(montage, tiles, montageKeys, cell, chunkBase, chunkFiles.Count));
+                    chunkBase += tiles.Count;
+                    tiles.Clear();
+                    montageKeys.Clear();
                 }
             }
             else
@@ -365,15 +373,14 @@ internal static class PreviewBlocks
             if (isFullCube && holePixels > 4) hollowCubes.Add($"{key} holes={holePixels}");
         }
 
-        if (tiles is not null && montage is not null)
-        {
-            var (mw, mh) = WriteMontage(montage.OutPath, tiles, cell, montageKeys, montage.Names, montage.Gap);
-            var indexPath = Path.ChangeExtension(montage.OutPath, ".txt");
-            File.WriteAllLines(indexPath, montageIndex);
-            Console.Out.WriteLine(
-                $"[MESH] 拼图 {tiles.Count} 格 → {mw}x{mh}: {Path.GetFullPath(montage.OutPath)}");
-            Console.Out.WriteLine($"[MESH] 索引: {Path.GetFullPath(indexPath)}");
-        }
+        // 收尾：最后不满一块的余量（ChunkSize=0 时就是全部）。
+        if (tiles is { Count: > 0 } && montage is not null)
+            chunkFiles.Add(FlushChunk(montage, tiles, montageKeys, cell, chunkBase, chunkFiles.Count));
+
+        if (chunkFiles.Count > 0 && montage is not null)
+            Console.Out.WriteLine(montage.ChunkSize > 0
+                ? $"[MESH] 共 {chunkFiles.Count} 张，每块 {montage.ChunkSize} 格；索引为各同名 .txt（序号跨块连续）"
+                : "[MESH] 单张全量（未分块），索引为同名 .txt");
 
         // 4) 汇总报告：人查 PNG，程序查两类铁律故障。
         var report = Path.Combine(outDir, "_report.txt");
@@ -398,6 +405,13 @@ internal static class PreviewBlocks
             writer.WriteLine();
             writer.WriteLine($"== 完整方块内部透洞（面材质空了的最直接证据）{hollowCubes.Count} ==");
             foreach (var line in hollowCubes) writer.WriteLine(line);
+
+            if (chunkFiles.Count > 0)
+            {
+                writer.WriteLine();
+                writer.WriteLine($"== montage 分块 {chunkFiles.Count} 张（每块 {(montage?.ChunkSize ?? 0)} 格）==");
+                foreach (var line in chunkFiles) writer.WriteLine(line);
+            }
         }
 
         Debug.WriteLine(
@@ -827,6 +841,34 @@ internal static class PreviewBlocks
     // 背景与格子同色、格间距默认 0：格子之间没有缝也没有边框，方块之间靠自身的留白分开。
     // --names 时每格左侧让出一条标签列（状态键有自己的地盘，不压方块、也不截断）；
     // 标签列同时把相邻两格的方块隔开，所以没有间距也不会挤在一起。
+    // 分块落盘：把一个 chunk 的格子写成 PNG + 同名 .txt 索引，返回 PNG 的绝对路径。
+    // baseIndex 是该块第一格的全局序号——索引里的序号跨块连续，所以「某状态在哪一格」
+    // 不因分块而改变（块号 = 序号 / ChunkSize，块内位置 = 序号 % ChunkSize）。
+    private static string FlushChunk(MontageOptions montage, List<byte[]> tiles, List<string> keys, int cell,
+        int baseIndex, int chunkIndex)
+    {
+        var path = ChunkPath(montage.OutPath, chunkIndex);
+        var (width, height) = WriteMontage(path, tiles, cell, keys, montage.Names, montage.Gap);
+        var indexPath = Path.ChangeExtension(path, ".txt");
+        List<string> index = new(tiles.Count);
+        for (var i = 0; i < keys.Count; i++) index.Add($"{baseIndex + i}: {keys[i]}");
+        File.WriteAllLines(indexPath, index);
+        Console.Out.WriteLine(
+            $"[MESH] 第 {chunkIndex + 1} 张 {tiles.Count} 格 → {width}x{height}: {Path.GetFullPath(path)}");
+        return Path.GetFullPath(path);
+    }
+
+    // 第 1 张沿用调用者给的原名，之后 _2、_3…（与 --regionrender 的多 region 命名一致）。
+    private static string ChunkPath(string outPath, int chunkIndex)
+    {
+        if (chunkIndex == 0) return outPath;
+        var dir = Path.GetDirectoryName(outPath);
+        var name = Path.GetFileNameWithoutExtension(outPath);
+        var ext = Path.GetExtension(outPath);
+        var file = $"{name}_{chunkIndex + 1}{ext}";
+        return dir is null ? file : Path.Combine(dir, file);
+    }
+
     // 返回整图尺寸：RunCore 要把它打进 stdout（Release 下 Debug.WriteLine 全被裁掉，
     // 用户跑命令行时没有这条就完全看不到反馈，看起来像「没跑」）。
     private static (int Width, int Height) WriteMontage(string path, List<byte[]> tiles, int cell,
@@ -1213,6 +1255,9 @@ internal static class PreviewBlocks
             string text, int length, out TextSize size);
     }
 
-    private sealed record MontageOptions(string OutPath, string Filter, int Cell, int Limit, bool Names, int Gap,
+    // ChunkSize：每张图的格数，>0 时分块出多张（第 1 张用原文件名，之后 _2、_3…），
+    // 0 = 不分块，全部铺进一张。分块不只是省内存（2000 格约 98MB tile，9265 格约 455MB），
+    // 也让每张图小到能直接打开看。
+    private sealed record MontageOptions(string OutPath, string Filter, int Cell, int ChunkSize, bool Names, int Gap,
         bool NoDup);
 }
