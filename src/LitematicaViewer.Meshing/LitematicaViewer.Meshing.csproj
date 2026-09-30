@@ -3,7 +3,8 @@
   <PropertyGroup>
     <RootNamespace>LitematicaViewer.Meshing</RootNamespace>
     <AssemblyName>LitematicaViewer.Meshing</AssemblyName>
-    <OutputType Condition="'$(Configuration)' == 'Debug'">Exe</OutputType>
+    <!-- 工具壳入口（MeshSmoke/PackSmoke/preview）；消费方引用产物 dll，OutputType 不影响被引用。 -->
+    <OutputType>Exe</OutputType>
   </PropertyGroup>
 
   <ItemGroup>
