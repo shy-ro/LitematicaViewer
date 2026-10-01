@@ -56,6 +56,8 @@ internal sealed class GlMeshRenderer : IDisposable
 
                                                 uniform sampler2D uAtlas;
                                                 uniform float uOpaquePass;
+                                                uniform float uNoAo;
+                                                uniform float uTexelFetch;
 
                                                 out vec4 fragColor;
 
@@ -66,9 +68,19 @@ internal sealed class GlMeshRenderer : IDisposable
                                                     // 光的方向固定在世界空间，相机怎么转明暗关系都不变。
                                                     vec3 light = normalize(vec3(0.35, 0.9, 0.2));
                                                     float diffuse = max(dot(normalize(vNormal), light), 0.0);
-                                                    float shade = (0.62 + 0.38 * diffuse) * vAo;
+                                                    float shade = (0.62 + 0.38 * diffuse) * mix(vAo, 1.0, uNoAo);
 
-                                                    vec4 texel = texture(uAtlas, vUv);
+                                                    vec4 texel;
+                                                    if (uTexelFetch > 0.5)
+                                                    {
+                                                        ivec2 ts = textureSize(uAtlas, 0);
+                                                        ivec2 tc = clamp(ivec2(vUv * vec2(ts)), ivec2(0), ts - 1);
+                                                        texel = texelFetch(uAtlas, tc, 0);
+                                                    }
+                                                    else
+                                                    {
+                                                        texel = texture(uAtlas, vUv);
+                                                    }
 
                                                     // alpha cutout：玻璃、树叶这类挖孔贴图，孔洞的 alpha 是 0，直接丢片元。
                                                     // 阈值取 0.5 与 MC 一致。
@@ -231,8 +243,43 @@ internal sealed class GlMeshRenderer : IDisposable
         var viewProjection = camera.GetViewMatrix() * camera.GetProjectionMatrix(aspect);
 
         _atlas!.Bind(0);
+
+        // 反证开关（LV_UNBIND=1）：绑定之后立刻把 unit 0 解到纹理 0。画面若因此变黑，
+        // 说明采样确实由这里控制；若画面纹丝不动，说明这条 bind→draw 不是出图的那条路。
+        // 只在真的要用时开，别常驻——它会让画面全黑。
+        if (Environment.GetEnvironmentVariable("LV_UNBIND") == "1")
+            gl.BindTexture(GlConsts.GL_TEXTURE_2D, 0);
+
+        // 探针：绑定之后、绘制之前回读。创建时的回读只说明当时设对了；渲染用的若
+        // 不是同一张纹理、或 BASE_LEVEL 被抬起来，只有这里看得见。每帧都打会刷屏，
+        // 用 LV_PROBE=1 门控。
+        if (Environment.GetEnvironmentVariable("LV_PROBE") == "1")
+        {
+            var probeMag = GlRaw.GetTexParameteriv(gl, GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_MAG_FILTER);
+            var probeMin = GlRaw.GetTexParameteriv(gl, GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_MIN_FILTER);
+            var probeBase = GlRaw.GetTexParameteriv(gl, GlConsts.GL_TEXTURE_2D, 0x813C);
+            var probeMax = GlRaw.GetTexParameteriv(gl, GlConsts.GL_TEXTURE_2D, 0x813D);
+            var probeUnit = GlRaw.GetInteger(gl, 0x84E0);
+            var probeBound = GlRaw.GetInteger(gl, 0x8069);
+            var probeSampler = GlRaw.GetInteger(gl, 0x8919);
+            Debug.WriteLine(
+                $"[PREVIEWER][gl.mesh.bind] renderTime MAG={(probeMag is { } pa ? $"0x{pa:X4}" : "null")} " +
+                $"MIN={(probeMin is { } pb ? $"0x{pb:X4}" : "null")} " +
+                $"BASE_LEVEL={(probeBase is { } pc ? pc.ToString() : "null")} " +
+                $"MAX_LEVEL={(probeMax is { } pd ? pd.ToString() : "null")} " +
+                $"activeUnit={(probeUnit is { } pe ? (pe - 0x84C0).ToString() : "?")} " +
+                $"binding2D={(probeBound is { } pf ? pf.ToString() : "?")} " +
+                $"samplerBinding={(probeSampler is { } pg ? pg.ToString() : "?")} " +
+                "note=samplerBinding 非 0 时它覆盖纹理 filter");
+        }
+
         _shader.Use();
         _shader.SetMatrix4("uViewProjection", viewProjection);
+        // 诊断开关（不设即为 0，正常路径零开销）。LV_NOAO=1 去掉 AO 渐变、LV_TEXFETCH=1
+        // 绕过 filter/mip 按纹素取——两个都是用来把「糊」拆成「AO 盖细节」与「过滤插值」
+        // 两步的，排查时成对用，见 docs 里那次 AF 结案。
+        if (Environment.GetEnvironmentVariable("LV_NOAO") == "1") _shader.SetFloat("uNoAo", 1f);
+        if (Environment.GetEnvironmentVariable("LV_TEXFETCH") == "1") _shader.SetFloat("uTexelFetch", 1f);
 
         // 两 pass：vanilla 的 opaque + translucent 同构。不透明先画并写深度，
         // 半透明后画、LEQUAL、不写深度——水的半透明才不会把后画的不透明方块

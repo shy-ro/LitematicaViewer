@@ -204,6 +204,59 @@ internal static class GlRaw
         return true;
     }
 
+    // void glGetTexParameteriv(GLenum target, GLenum pname, GLint* params)
+    //
+    // 「设置有没有落到真正生效的那个 pname 上」只能靠回读证。过滤相关的 pname 值
+    // 全是猜不得的（GlConsts 的常量值与本机驱动的实际行为是两码事），所以设完必须能查。
+    internal static int? GetTexParameteriv(GlInterface gl, int target, int pname)
+    {
+        var entry = gl.GetProcAddress("glGetTexParameteriv");
+        if (entry == IntPtr.Zero) return null;
+
+        var buffer = Marshal.AllocHGlobal(sizeof(int));
+        try
+        {
+            Marshal.GetDelegateForFunctionPointer<GetTexParameterivDelegate>(entry)(target, pname, buffer);
+            return Marshal.ReadInt32(buffer);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    // void glGetIntegerv(GLenum pname, GLint* data)
+    //
+    // 查上下文状态用。绑定量、当前纹理单元、当前 sampler 这类「谁在生效」的问题
+    // 只能靠它回答——filter 设了却不影响采样时，第一嫌疑就是 unit 上挂了 sampler。
+    internal static int? GetInteger(GlInterface gl, int pname)
+    {
+        var entry = gl.GetProcAddress("glGetIntegerv");
+        if (entry == IntPtr.Zero) return null;
+
+        var buffer = Marshal.AllocHGlobal(sizeof(int));
+        try
+        {
+            Marshal.GetDelegateForFunctionPointer<GetIntegervDelegate>(entry)(pname, buffer);
+            return Marshal.ReadInt32(buffer);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    // void glBindSampler(GLuint unit, GLuint sampler)：sampler 为 0 表示解绑，
+    // 让该单元回到「用纹理自己的 filter」的语义。
+    internal static bool BindSampler(GlInterface gl, int unit, int sampler)
+    {
+        var entry = gl.GetProcAddress("glBindSampler");
+        if (entry == IntPtr.Zero) return false;
+
+        Marshal.GetDelegateForFunctionPointer<BindSamplerDelegate>(entry)(unit, sampler);
+        return true;
+    }
+
     private static T Cache<T>(GlInterface gl, string name, ref T? cache) where T : Delegate
     {
         if (cache is null)
@@ -308,6 +361,15 @@ internal static class GlRaw
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate void TexParameterfDelegate(int target, int pname, float param);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void GetTexParameterivDelegate(int target, int pname, IntPtr value);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void GetIntegervDelegate(int pname, IntPtr value);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void BindSamplerDelegate(int unit, int sampler);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate void GenDeleteDelegate(int count, IntPtr ids);
