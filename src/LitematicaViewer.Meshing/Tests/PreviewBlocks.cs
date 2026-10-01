@@ -105,28 +105,16 @@ internal static class PreviewBlocks
             return 1;
         }
 
-        // sprite 收集走文档调色板的真实状态（带属性），与 Sample 的 CollectSprites 同口径。
+        // 走与 Sample/ShellPreview 完全相同的收集入口，确保真实区域里的告示牌文字、
+        // 旗帜图案、画和物品展示框不会只在软件 regionrender 中丢失。
         HashSet<string> sprites = new(StringComparer.Ordinal);
-        BlockMeshBuilder builder;
-        foreach (var region in result.Document!.Regions)
-        foreach (var state in region.Palette)
-            try
-            {
-                foreach (var variant in resolver.Resolve(state.ToString()).Variants)
-                foreach (var element in variant.Model.Elements)
-                foreach (var face in element.Faces)
-                    if (face.Sprite.Length > 0)
-                        sprites.Add(face.Sprite);
-            }
-            catch
-            {
-                // 解析失败的状态真渲染时同样失败，网格期会跳过，这里不重复点名。
-            }
-
-        var atlas = TextureAtlas.Build(packs, sprites);
+        List<GeneratedSprite> generatedSprites = [];
+        BlockMeshBuilder collector = new(resolver, TextureAtlas.Build(packs, []));
+        collector.CollectSprites(result.Document!.Regions, sprites, packs, generatedSprites);
+        var atlas = TextureAtlas.Build(packs, sprites, generatedSprites);
         Console.Out.WriteLine(
             $"[MESH][regionrender] 图集 {atlas.Width}x{atlas.Height} sprites={atlas.Rects.Count} 缺失={atlas.MissingCount}");
-        builder = new BlockMeshBuilder(resolver, atlas);
+        BlockMeshBuilder builder = new(resolver, atlas);
 
         var regionIndex = 0;
         foreach (var region in result.Document.Regions)
@@ -253,6 +241,198 @@ internal static class PreviewBlocks
 
         var montageDir = Path.GetDirectoryName(Path.GetFullPath(outPath)) ?? ".";
         return RunCore(montageDir, new MontageOptions(outPath, filter, cell, chunkSize, names, gap, noDup), [.. rest]);
+    }
+
+    public static int RunContainerMontage(string outDir, string[] packPaths)
+    {
+        Directory.CreateDirectory(outDir);
+        using PackStack packs = new();
+        foreach (var path in packPaths)
+            packs.Add(Directory.Exists(path) ? ResourcePack.OpenFolder(path) : ResourcePack.OpenZip(path));
+        BlockStateResolver resolver = new(packs);
+        var facings = new[] { "north", "east", "south", "west" };
+        string[] chestStates = [.. facings.Select(static facing =>
+            $"minecraft:chest[facing={facing},type=single,waterlogged=false]")];
+        string[] shulkerStates =
+        [
+            .. new[] { "up", "down", "north", "south", "east", "west" }
+                .Select(static facing => $"minecraft:purple_shulker_box[facing={facing}]")
+        ];
+        RenderChest(Path.Combine(outDir, "chest-matrix.png"), chestStates, facings);
+        Render(Path.Combine(outDir, "shulker-matrix.png"), shulkerStates);
+        RenderSign(Path.Combine(outDir, "sign-debug.png"));
+        return 0;
+
+        void RenderSign(string path)
+        {
+            var state = ParseStateKey("minecraft:oak_sign[rotation=0,waterlogged=false]");
+            var front = MapNbt(("messages", SeqNbt(
+                    new NbtText("{\"text\":\"告示牌文字\"}"),
+                    new NbtText("{\"text\":\"正面第二行\"}"),
+                    new NbtText("{\"text\":\"像素字体测试\"}"),
+                    new NbtText("{\"text\":\"0123456789\"}"))),
+                ("color", new NbtText("black")));
+            var back = MapNbt(("messages", SeqNbt(
+                    new NbtText("{\"text\":\"BACK SIDE\"}"),
+                    new NbtText("{\"text\":\"Line Two\"}"),
+                    new NbtText("{\"text\":\"Glow Text\"}"),
+                    new NbtText("{\"text\":\"ABC 123\"}"))),
+                ("color", new NbtText("red")), ("has_glowing_text", new NbtInteger(1)));
+            var region = MakeSingleBlockRegion(state) with
+            {
+                BlockEntities = ImmutableDictionary<Vector3I, BlockEntityData>.Empty.Add(
+                    Vector3I.Zero, new BlockEntityData("minecraft:sign", Vector3I.Zero,
+                        MapNbt(("front_text", front), ("back_text", back))))
+            };
+            HashSet<string> sprites = new(StringComparer.Ordinal);
+            List<GeneratedSprite> generated = [];
+            var collector = new BlockMeshBuilder(resolver, TextureAtlas.Build(packs, []));
+            collector.CollectSprites([region], sprites, packs, generated);
+            var atlas = TextureAtlas.Build(packs, sprites, generated);
+            var mesh = new BlockMeshBuilder(resolver, atlas).BuildRegion(region);
+            var rgb = RenderToBuffer(mesh, atlas, 300, BackgroundR).Rgb;
+            var size = WriteMontage(path, [rgb], 300, ["oak_sign front/back"], true, 4);
+            Console.WriteLine($"[MESH][containers] {Path.GetFullPath(path)} {size.Width}x{size.Height} sign");
+        }
+
+        static NbtMap MapNbt(params (string Key, NbtData Value)[] values) =>
+            new(values.ToImmutableDictionary(static x => x.Key, static x => x.Value, StringComparer.Ordinal));
+
+        static NbtSequence SeqNbt(params NbtData[] values) => new([.. values]);
+
+        void Render(string path, IReadOnlyList<string> keys)
+        {
+            var states = keys.Select(ParseStateKey).ToArray();
+            var regions = states.Select(MakeSingleBlockRegion).ToArray();
+            HashSet<string> sprites = new(StringComparer.Ordinal);
+            BlockMeshBuilder collector = new(resolver, TextureAtlas.Build(packs, []));
+            collector.CollectSprites(regions, sprites);
+            var atlas = TextureAtlas.Build(packs, sprites);
+            BlockMeshBuilder builder = new(resolver, atlas);
+            List<byte[]> tiles = [];
+            foreach (var region in regions)
+            {
+                var mesh = builder.BuildRegion(region);
+                tiles.Add(RenderToBuffer(mesh, atlas, 220, BackgroundR).Rgb);
+            }
+            var labels = keys.Select(static key => key.Replace("minecraft:", string.Empty, StringComparison.Ordinal)).ToList();
+            var size = WriteMontage(path, tiles, 220, labels, true, 4);
+            Console.WriteLine($"[MESH][containers] {Path.GetFullPath(path)} {size.Width}x{size.Height} states={keys.Count}");
+        }
+
+        void RenderChest(string path, IReadOnlyList<string> singles, IReadOnlyList<string> directions)
+        {
+            List<LitematicRegion> regions = [.. singles.Select(key => MakeSingleBlockRegion(ParseStateKey(key)))];
+            List<string> labels = [.. singles.Select(static key => key.Replace("minecraft:", string.Empty, StringComparison.Ordinal))];
+            foreach (var facing in directions)
+            {
+                // 摆位按原版：left 落在 facing 逆时针那一块（south/west 时是高坐标块）。
+                // 详情与交叉核对见 --chest-dump。
+                regions.Add(MakeDoubleChestRegion(facing, leftAtHigh: facing is "south" or "west"));
+                labels.Add($"chest[facing={facing},double]");
+            }
+            HashSet<string> sprites = new(StringComparer.Ordinal);
+            BlockMeshBuilder collector = new(resolver, TextureAtlas.Build(packs, []));
+            collector.CollectSprites(regions, sprites);
+            var atlas = TextureAtlas.Build(packs, sprites);
+            BlockMeshBuilder builder = new(resolver, atlas);
+            List<byte[]> tiles = [];
+            foreach (var region in regions)
+                tiles.Add(RenderToBuffer(builder.BuildRegion(region), atlas, 260, BackgroundR).Rgb);
+            var size = WriteMontage(path, tiles, 260, labels, true, 4);
+            Console.WriteLine($"[MESH][containers] {Path.GetFullPath(path)} {size.Width}x{size.Height} states={regions.Count}");
+        }
+    }
+
+    // --chest-dump <out.png> <资源包...>：双箱「type=left 落在坐标大的那块还是小的那块」
+    // 的对账图。三段：单箱参考 / 左半块放低坐标 / 左半块放高坐标。
+    // 两段双箱在画面上必须能分辨：半张贴图的透明段是接缝，接缝朝里才连成一张大盖面，
+    // 朝外就是一整块空面加中间一条缝。
+    public static int RunChestDump(string outPath, string[] packPaths)
+    {
+        using PackStack packs = new();
+        foreach (var path in packPaths)
+            packs.Add(Directory.Exists(path) ? ResourcePack.OpenFolder(path) : ResourcePack.OpenZip(path));
+        BlockStateResolver resolver = new(packs);
+        var facings = new[] { "north", "east", "south", "west" };
+        List<LitematicRegion> regions = [];
+        List<string> labels = [];
+        foreach (var facing in facings)
+        {
+            regions.Add(MakeSingleBlockRegion(
+                ParseStateKey($"minecraft:chest[facing={facing},type=single,waterlogged=false]")));
+            labels.Add($"single facing={facing}");
+        }
+
+        foreach (var facing in facings)
+        {
+            regions.Add(MakeDoubleChestRegion(facing, leftAtHigh: false));
+            labels.Add($"double facing={facing} left@low");
+        }
+
+        foreach (var facing in facings)
+        {
+            regions.Add(MakeDoubleChestRegion(facing, leftAtHigh: true));
+            labels.Add($"double facing={facing} left@high");
+        }
+
+        // 半块单独摆：双箱里的半个到底缺没缺面，只有把它单独拿出来才排得掉「被另一半遮住」。
+        foreach (var type in new[] { "left", "right" })
+        {
+            regions.Add(MakeSingleBlockRegion(
+                ParseStateKey($"minecraft:chest[facing=north,type={type},waterlogged=false]")));
+            labels.Add($"half {type} alone facing=north");
+        }
+
+        HashSet<string> sprites = new(StringComparer.Ordinal);
+        BlockMeshBuilder collector = new(resolver, TextureAtlas.Build(packs, []));
+        collector.CollectSprites(regions, sprites);
+        var atlas = TextureAtlas.Build(packs, sprites);
+        BlockMeshBuilder builder = new(resolver, atlas);
+        List<byte[]> tiles = [];
+        var stateDir = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(outPath)) ?? ".", "states");
+        Directory.CreateDirectory(stateDir);
+        for (var ri = 0; ri < regions.Count; ri++)
+        {
+            var mesh = builder.BuildRegion(regions[ri]);
+            // 临时探针：箱子半块的世界范围只有这一步能直接量到，别再靠推理。
+            Vector3 lo = new(float.MaxValue), hi = new(float.MinValue);
+            for (var i = 0; i < mesh.Vertices.Length / MeshData.FloatsPerVertex; i++)
+            {
+                Vector3 v = new(
+                    mesh.Vertices[i * MeshData.FloatsPerVertex + MeshData.PositionOffset],
+                    mesh.Vertices[i * MeshData.FloatsPerVertex + MeshData.PositionOffset + 1],
+                    mesh.Vertices[i * MeshData.FloatsPerVertex + MeshData.PositionOffset + 2]);
+                lo = Vector3.Min(lo, v);
+                hi = Vector3.Max(hi, v);
+            }
+
+            Console.WriteLine($"[MESH][chest.dump] {labels[ri],-32} X {lo.X * 16:F2}..{hi.X * 16:F2}  Y {lo.Y * 16:F2}..{hi.Y * 16:F2}  Z {lo.Z * 16:F2}..{hi.Z * 16:F2}");
+            tiles.Add(RenderToBuffer(mesh, atlas, 300, BackgroundR).Rgb);
+            // 中缝/洞只有放大到看得清单像素才判得动，montage 的 300px 格不够——每格再单独落一张 800px。
+            WriteMontage(Path.Combine(stateDir, $"s{ri:00}.png"),
+                [RenderToBuffer(mesh, atlas, 800, BackgroundR).Rgb], 800, [labels[ri]], true, 6);
+        }
+
+        var size = WriteMontage(outPath, tiles, 300, labels, true, 6);
+        Console.WriteLine($"[MESH][chest-dump] {Path.GetFullPath(outPath)} {size.Width}x{size.Height} states={regions.Count}");
+        return 0;
+    }
+
+    // leftAtHigh：type=left 落在坐标大的那一块。
+    // 原版反编译（写在 FallbackModels 箱子上方的注释里）：ChestType.LEFT 的搭档在 facing
+    // 顺时针方向 → canonical（正面朝南）下 left 是东侧半块、接缝在西缘；北/东朝向反过来。
+    // 也就是 facing 为 south/west 时 left 在高坐标块，north/east 时在低坐标块。
+    private static LitematicRegion MakeDoubleChestRegion(string facing, bool leftAtHigh)
+    {
+        var left = ParseStateKey($"minecraft:chest[facing={facing},type=left,waterlogged=false]");
+        var right = ParseStateKey($"minecraft:chest[facing={facing},type=right,waterlogged=false]");
+        var alongX = facing is "north" or "south";
+        Vector3I size = alongX ? new(2, 1, 1) : new(1, 1, 2);
+        var firstIsLeft = !leftAtHigh;
+        var palette = ImmutableArray.Create(firstIsLeft ? left : right, firstIsLeft ? right : left);
+        return new LitematicRegion("double-chest", Vector3I.Zero, size,
+            IntBounds.FromPositionSize(Vector3I.Zero, size), palette, ImmutableArray.Create(0, 1));
     }
 
     private static int RunCore(string outDir, MontageOptions? montage, string[] packPaths)

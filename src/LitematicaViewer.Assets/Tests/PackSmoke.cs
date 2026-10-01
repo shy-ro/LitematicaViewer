@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Numerics;
 using System.Text.Json;
 using LitematicaViewer.Assets.Model;
 
@@ -42,6 +43,13 @@ public static class PackSmoke
 
         CheckPackStack(packs);
         CheckStone(resolver);
+        CheckShulkerUv(resolver);
+        CheckShulkerColors(resolver);
+        CheckShulkerFacings(resolver);
+        CheckChestVariants(resolver);
+        CheckChestHalvesSeam(resolver);
+        CheckRailMatrix(resolver);
+        CheckRedstoneMultipart(resolver);
         CheckLogAxis(resolver);
         CheckStairsMultipart(resolver);
         CheckElementRotation(resolver);
@@ -120,6 +128,252 @@ public static class PackSmoke
             "[ASSETS][smoke] oak_log[axis=x] 应带 x/y 整体旋转（横放）");
         Debug.WriteLine(
             $"[ASSETS][smoke] oak_log: axis=y 端/侧贴图分开 ✓，axis=x 旋转=({rotated.Variants[0].XDegrees},{rotated.Variants[0].YDegrees}) ✓");
+        _checks++;
+    }
+
+    private static void CheckShulkerUv(BlockStateResolver resolver)
+    {
+        var state = resolver.Resolve("minecraft:yellow_shulker_box");
+        Debug.Assert(state.Variants.Count >= 1, "[ASSETS][smoke] yellow_shulker_box 应命中模型");
+        var elements = state.Variants[0].Model.Elements;
+        Debug.Assert(elements.Count == 2,
+            $"[ASSETS][smoke] 潜影盒应有盒身+盖子两个盒件 实得 {elements.Count}");
+
+        // 新模型按实体尺寸：底座 16x8x16，盖子 16x12x16 且向下重叠 4px。
+        // UV 每个区域内缩 0.25 像素，避免实体展开图相邻区域线性串色。
+        var bodyMinV = elements[0].Faces.Min(face => MathF.Min(face.Uv.Y, face.Uv.W));
+        var lidMinV = elements[1].Faces.Min(face => MathF.Min(face.Uv.Y, face.Uv.W));
+        Debug.Assert(MathF.Abs(bodyMinV - 7.0625f) < 1e-4f,
+            $"[ASSETS][smoke] 潜影盒盒身 UV 起点应为 7.0625 实得 {bodyMinV}");
+        Debug.Assert(MathF.Abs(lidMinV - 0.0625f) < 1e-4f,
+            $"[ASSETS][smoke] 潜影盒盖子 UV 起点应为 0.0625 实得 {lidMinV}");
+        Debug.Assert(elements[0].From == Vector3.Zero && elements[0].To == new Vector3(16, 8, 16),
+            $"[ASSETS][smoke] 潜影盒盒身尺寸应为 16x8x16 实得 {elements[0].From}→{elements[0].To}");
+        Debug.Assert(elements[1].From == new Vector3(0, 4, 0) && elements[1].To == new Vector3(16, 16, 16),
+            $"[ASSETS][smoke] 潜影盒盖子尺寸应为 16x12x16 且重叠 4px 实得 {elements[1].From}→{elements[1].To}");
+        _checks++;
+    }
+
+    private static void CheckShulkerColors(BlockStateResolver resolver)
+    {
+        string[] colors =
+        [
+            "", "white_", "orange_", "magenta_", "light_blue_", "yellow_", "lime_", "pink_",
+            "gray_", "light_gray_", "cyan_", "purple_", "blue_", "brown_", "green_", "red_", "black_"
+        ];
+        foreach (var prefix in colors)
+        {
+            var id = $"minecraft:{prefix}shulker_box";
+            var state = resolver.Resolve(id);
+            Debug.Assert(state.Variants.Count > 0 && state.Variants.All(static variant => variant.Model.Elements.Count == 2),
+                $"[ASSETS][smoke] {id} 应完整解析盒身+盖子");
+            foreach (var face in state.Variants.SelectMany(static variant => variant.Model.Elements)
+                         .SelectMany(static element => element.Faces))
+                Debug.Assert(face.Uv.X is >= 0 and <= 16 && face.Uv.Z is >= 0 and <= 16 &&
+                             face.Uv.Y is >= 0 and <= 16 && face.Uv.W is >= 0 and <= 16,
+                    $"[ASSETS][smoke] {id} UV 越界 {face.Uv}");
+        }
+        Debug.WriteLine($"[ASSETS][smoke] 潜影盒: {colors.Length} 个染色版本盒身/盖子与 UV ✓");
+        _checks++;
+    }
+
+    private static void CheckShulkerFacings(BlockStateResolver resolver)
+    {
+        var expected = new Dictionary<string, (int Axis, float Angle)?>
+        {
+            ["up"] = null, ["down"] = (0, 180), ["north"] = (0, -90),
+            ["south"] = (0, 90), ["east"] = (2, -90), ["west"] = (2, 90)
+        };
+        foreach (var pair in expected)
+        {
+            var state = resolver.Resolve($"minecraft:purple_shulker_box[facing={pair.Key}]");
+            var elements = state.Variants.Single().Model.Elements;
+            Debug.Assert(elements.Count == 2, $"[ASSETS][smoke] shulker facing={pair.Key} 应有两壳件");
+            if (pair.Value is null)
+                Debug.Assert(elements.All(static element => element.Rotation is null),
+                    "[ASSETS][smoke] shulker facing=up 不应旋转");
+            else
+                Debug.Assert(elements.All(element => element.Rotation is { } rotation &&
+                    rotation.Axis == pair.Value.Value.Axis &&
+                    MathF.Abs(rotation.AngleDegrees - pair.Value.Value.Angle) < 1e-4f),
+                    $"[ASSETS][smoke] shulker facing={pair.Key} 旋转不符");
+        }
+        _checks++;
+    }
+
+    private static void CheckChestVariants(BlockStateResolver resolver)
+    {
+        foreach (var facing in new[] { "north", "east", "south", "west" })
+        foreach (var type in new[] { "single", "left", "right" })
+        {
+            var id = $"minecraft:chest[facing={facing},type={type},waterlogged=false]";
+            var state = resolver.Resolve(id);
+            Debug.Assert(state.Variants.Count > 0, $"[ASSETS][smoke] {id} 没有模型");
+            var elementCount = state.Variants.SelectMany(static variant => variant.Model.Elements).Count();
+            const int expected = 3;
+            Debug.Assert(elementCount >= expected,
+                $"[ASSETS][smoke] {id} 应包含盖/身/锁舌 实得 {elementCount}");
+            var expectedAngle = facing switch { "south" => 0f, "east" => 90f, "west" => -90f, _ => 180f };
+            foreach (var element in state.Variants.SelectMany(static variant => variant.Model.Elements))
+                if (expectedAngle == 0f)
+                    Debug.Assert(element.Rotation is null, $"[ASSETS][smoke] {id} south 不应旋转");
+                else
+                    Debug.Assert(element.Rotation is { Axis: 1 } rotation &&
+                                 MathF.Abs(rotation.AngleDegrees - expectedAngle) < 1e-4f,
+                        $"[ASSETS][smoke] {id} element rotation 不符");
+        }
+        Debug.WriteLine("[ASSETS][smoke] 箱子: 4 facing × single/left/right ✓");
+        _checks++;
+
+        // 探针：单箱每个面的 box 与 uv（排查上下/前后段位用）。uv 单位是 16/64 后的值，
+        // 乘 4 就是贴图像素。期望（原版 ChestModel）：盖 texOffs(0,0) 5 高、身 texOffs(0,19)
+        // 10 高、锁舌 texOffs(0,0) 2x4x1。
+        foreach (var element in resolver.Resolve("minecraft:chest[facing=north,type=single,waterlogged=false]")
+                     .Variants.SelectMany(static variant => variant.Model.Elements))
+        {
+            Debug.WriteLine($"[ASSETS][chest.probe] box=({element.From.X},{element.From.Y},{element.From.Z})..({element.To.X},{element.To.Y},{element.To.Z}) faces={element.Faces.Count}");
+            foreach (var face in element.Faces)
+                Debug.WriteLine($"[ASSETS][chest.probe]   {face.Face,-6} uvPx=({face.Uv.X * 4:F2},{face.Uv.Y * 4:F2})..({face.Uv.Z * 4:F2},{face.Uv.W * 4:F2}) sprite={face.Sprite}");
+        }
+    }
+
+    // 双箱两个半块的接缝方向。_left 半张贴图的第一段（West）和 _right 的第三段
+    // （East）是透明留白，必须分别落在 x=0 / x=16 这两条朝搭档的边上。
+    // 面序写成 East–North–West–South（东西镜像）时单箱毫无变化——四个侧段几乎同色，
+    // 半张的透明段却被推到外缘，双箱整块空面朝外。这条断言只能从 uv 段号上抓回来。
+    private static void CheckChestHalvesSeam(BlockStateResolver resolver)
+    {
+        // 15 宽展开：dimZ=14、dimX=15 → u0=0 u1=14 u2=29 u3=43 u4=58，÷4 得 uv。
+        // 顶格另算：右界是 u2+dimX=44（不是侧面的 u3=43），差分只有 1px——正因如此
+        // 单箱（14x14）永远试不出来，只有半块这条 15x14 的盒子能钉住它。
+        const float westStart = 0f;      // 第 1 段，_left 的透明接缝
+        const float northStart = 3.5f;   // 第 2 段（背面）
+        const float eastStart = 7.25f;   // 第 3 段，_right 的透明接缝
+        const float southStart = 10.75f; // 第 4 段（正面，闩所在的那面）
+        const float upRight = 11f;       // u2+width = 44 → 11（侧面东段的右界是 10.75）
+        foreach (var facing in new[] { "north", "east", "south", "west" })
+        {
+            var left = Body(resolver, facing, "left");
+            Debug.Assert(left.From.X == 0f,
+                $"[ASSETS][smoke] chest[left] facing={facing} 接缝应在西缘 实得 From.X={left.From.X}");
+            // 原版 left 层用 Util.allOfEnumExcept(WEST)：接缝那一面根本不生成。
+            // 我们早先只靠半张贴图的透明段遮住它，mip 粗层把透明段染成不透明就会浮出暗板。
+            Debug.Assert(left.Faces.All(face => face.Face != FaceName.West),
+                $"[ASSETS][smoke] chest[left] facing={facing} 不该生成接缝面 West");
+            Uv(left, FaceName.North, northStart, 7.25f, "left North 应采第二段");
+            Uv(left, FaceName.East, eastStart, 10.75f, "left East 应采第三段");
+            Uv(left, FaceName.South, southStart, 14.5f, "left South（正面）应采第四段");
+
+            var right = Body(resolver, facing, "right");
+            Debug.Assert(right.To.X == 16f,
+                $"[ASSETS][smoke] chest[right] facing={facing} 接缝应在东缘 实得 To.X={right.To.X}");
+            Debug.Assert(right.Faces.All(face => face.Face != FaceName.East),
+                $"[ASSETS][smoke] chest[right] facing={facing} 不该生成接缝面 East");
+            Uv(right, FaceName.West, westStart, 3.5f, "right West 应采第一段");
+            Uv(right, FaceName.North, northStart, 7.25f, "right North 应采第二段");
+            Uv(right, FaceName.South, southStart, 14.5f, "right South（正面）应采第四段");
+
+            // 顶/底段序：原版 ModelPart.Cube 是 **Down 第一格、Up 第二格**（26.3 未混淆
+            // 字节码实算 DOWN=(u+dz, v, u+dz+dx, v+dz)、UP=(u+dz+dx, v+dz, u+dz+2dx, v)）。
+            // 箱身 Up 必须落在第二格（贴图那格是「黑口 + 2px 木框」的内部），Down 是第一格。
+            // 顶格三件事一次钉死：① u 从 u2=29 起；② u 右界是 u2+width=44（不是 43）；
+            // ③ v 倒序——Uv.Y 是区间下沿（大）、Uv.W 是上沿（小），写正序会把盖顶木纹
+            // 沿南北镜像（单箱两格内容近乎对称，只有角上一个暗像素换边，肉眼抓不住）。
+            var body = Element(resolver, facing, "left", 10f);
+            UvRect(body, FaceName.Down, 3.5f, 4.75f, 7.25f, 8.25f, "箱身 Down 应采第一格");
+            UvRect(body, FaceName.Up, 7.25f, 8.25f, upRight, 4.75f, "箱身 Up 应采第二格（width 宽、v 倒序）");
+            Debug.Assert(body.Faces.Single(face => face.Face == FaceName.Up).Uv.Y >
+                         body.Faces.Single(face => face.Face == FaceName.Up).Uv.W,
+                "[ASSETS][smoke] chest Up 的 v 必须是倒序（原版 UP 传 v+dz 在前、v 在后）");
+
+            // 盖走 texOffs(0,0)：盖条带在 v14..18，身条带在 v33..42。盖传 v=19 会把盖
+            // 采成身的顶部五行，盖/身那道暗分界线消失（单箱看着仍像箱子，所以骗过了一轮）。
+            var lid = Element(resolver, facing, "left", 5f);
+            UvRect(lid, FaceName.North, 3.5f, 3.5f, 7.25f, 4.75f, "箱盖侧面应采盖条带 v14..19");
+            UvRect(lid, FaceName.Up, 7.25f, 3.5f, upRight, 0f, "箱盖 Up 应采盖那条带 v0..14（v 倒序）");
+            // 盖 y 9..14（原版 offset(0,9)），与箱身 0..10 重叠 1px。写 10..15 除了整体高
+            // 1px，还会让盖底与箱身顶共面抢深度。
+            Debug.Assert(lid.From.Y == 9f && lid.To.Y == 14f,
+                $"[ASSETS][smoke] chest lid 应在 y 9..14 实得 {lid.From.Y}..{lid.To.Y}");
+            // 闩 y 7..11（原版 addBox(...,-2,14,2,4,1) @ offset(0,9,1)）。
+            var latch = Element(resolver, facing, "left", 4f);
+            Debug.Assert(latch.From.Y == 7f && latch.To.Y == 11f,
+                $"[ASSETS][smoke] chest lock 应在 y 7..11 实得 {latch.From.Y}..{latch.To.Y}");
+        }
+
+        Debug.WriteLine("[ASSETS][smoke] 双箱接缝: 接缝面不生成 + 顶格 width 宽且 v 倒序 ✓");
+        _checks++;
+        return;
+
+        static void Uv(ModelElement element, FaceName face, float u0, float u1, string message)
+        {
+            var uv = element.Faces.Single(candidate => candidate.Face == face).Uv;
+            Debug.Assert(MathF.Abs(uv.X - u0) < 1e-4f && MathF.Abs(uv.Z - u1) < 1e-4f,
+                $"[ASSETS][smoke] {message} 实得 {uv}");
+        }
+
+        static void UvRect(ModelElement element, FaceName face, float u0, float v0, float u1, float v1,
+            string message)
+        {
+            var uv = element.Faces.Single(candidate => candidate.Face == face).Uv;
+            Debug.Assert(MathF.Abs(uv.X - u0) < 1e-4f && MathF.Abs(uv.Y - v0) < 1e-4f &&
+                         MathF.Abs(uv.Z - u1) < 1e-4f && MathF.Abs(uv.W - v1) < 1e-4f,
+                $"[ASSETS][smoke] {message} 实得 {uv}");
+        }
+
+        // 按盒件高度取件：箱身 10、盖 5、闩 4。
+        static ModelElement Element(BlockStateResolver resolver, string facing, string type, float height) =>
+            resolver.Resolve($"minecraft:chest[facing={facing},type={type},waterlogged=false]")
+                .Variants.SelectMany(static variant => variant.Model.Elements)
+                .First(element => MathF.Abs(element.To.Y - element.From.Y - height) < 1e-4f);
+
+        static ModelElement Body(BlockStateResolver resolver, string facing, string type) =>
+            resolver.Resolve($"minecraft:chest[facing={facing},type={type},waterlogged=false]")
+                .Variants.SelectMany(static variant => variant.Model.Elements)
+                .OrderByDescending(static element => element.To.Y - element.From.Y)
+                .First();
+    }
+
+    private static void CheckRailMatrix(BlockStateResolver resolver)
+    {
+        string[] railShapes =
+        [
+            "north_south", "east_west", "ascending_east", "ascending_west", "ascending_north",
+            "ascending_south", "south_east", "south_west", "north_west", "north_east"
+        ];
+        foreach (var shape in railShapes) AssertRail($"minecraft:rail[shape={shape},waterlogged=false]");
+        foreach (var rail in new[] { "powered_rail", "detector_rail", "activator_rail" })
+        foreach (var shape in railShapes.Take(6))
+            AssertRail($"minecraft:{rail}[powered=false,shape={shape},waterlogged=false]");
+        Debug.WriteLine("[ASSETS][smoke] 铁轨: 10 普通 shape + 18 powered/detector/activator shape ✓");
+        _checks++;
+        return;
+
+        void AssertRail(string id)
+        {
+            var state = resolver.Resolve(id);
+            var elements = state.Variants.SelectMany(static variant => variant.Model.Elements).ToArray();
+            Debug.Assert(elements.Length > 0 && elements.Sum(static element => element.Faces.Count) > 0,
+                $"[ASSETS][smoke] {id} 没有铁轨几何");
+            if (id.Contains("ascending_", StringComparison.Ordinal))
+                Debug.Assert(elements.SelectMany(static element => new[] { element.From.Y, element.To.Y }).Max() > 1f,
+                    $"[ASSETS][smoke] {id} 坡道没有抬高 Y");
+        }
+    }
+
+    private static void CheckRedstoneMultipart(BlockStateResolver resolver)
+    {
+        // XK redstone display 的连接条件使用 "side|up"；应同时命中两段连接线
+        // 与 power=7 数字层，不能只剩数字。
+        var state = resolver.Resolve(
+            "minecraft:redstone_wire[east=none,north=side,power=7,south=none,west=none]");
+        var modelIds = state.Variants.Select(static variant => variant.ModelId).ToArray();
+        Debug.Assert(modelIds.Any(static id => id.Contains("redstone_dust_side", StringComparison.Ordinal)),
+            $"[ASSETS][smoke] 红石 north=side 没命中连接线 multipart: [{string.Join(", ", modelIds)}]");
+        Debug.Assert(modelIds.Any(static id => id.EndsWith("redstone_dust_p07", StringComparison.Ordinal)),
+            $"[ASSETS][smoke] 红石 power=7 没命中数字层: [{string.Join(", ", modelIds)}]");
+        Debug.Assert(modelIds.Length >= 3,
+            $"[ASSETS][smoke] 单向红石应包含两段线+数字层，实得 {modelIds.Length}: [{string.Join(", ", modelIds)}]");
         _checks++;
     }
 

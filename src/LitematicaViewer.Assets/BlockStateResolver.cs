@@ -182,7 +182,8 @@ public sealed class BlockStateResolver
         foreach (var pair in key.Split(','))
         {
             var parts = pair.Split('=', 2);
-            if (parts.Length != 2 || !properties.TryGetValue(parts[0], out var value) || value != parts[1])
+            if (parts.Length != 2 || !properties.TryGetValue(parts[0], out var value)
+                                  || !PropertyValueMatches(parts[1], value))
                 return false;
         }
 
@@ -198,7 +199,7 @@ public sealed class BlockStateResolver
         {
             var parts = pair.Split('=', 2);
             if (parts.Length != 2) return false;
-            if (properties.TryGetValue(parts[0], out var value) && value != parts[1])
+            if (properties.TryGetValue(parts[0], out var value) && !PropertyValueMatches(parts[1], value))
                 return false;
         }
 
@@ -221,12 +222,22 @@ public sealed class BlockStateResolver
             if (value is null) return false;
 
             var matched = entry.Value.ValueKind == JsonValueKind.Array
-                ? entry.Value.EnumerateArray().Any(v => v.ValueKind == JsonValueKind.String && v.GetString() == value)
-                : entry.Value.ValueKind == JsonValueKind.String && entry.Value.GetString() == value;
+                ? entry.Value.EnumerateArray().Any(v => v.ValueKind == JsonValueKind.String
+                                                       && PropertyValueMatches(v.GetString(), value))
+                : entry.Value.ValueKind == JsonValueKind.String
+                  && PropertyValueMatches(entry.Value.GetString(), value);
             if (!matched) return false;
         }
 
         return true;
+    }
+
+    // Blockstate 条件里的竖线不是字面字符，而是候选值分隔符。例如红石线的
+    // `"north": "side|up"` 表示 north 为 side 或 up 时都命中。材质包经常
+    // 用这种写法；按整串比较会把连接线 multipart 全过滤，只剩 power 数字层。
+    private static bool PropertyValueMatches(string? expected, string actual)
+    {
+        return expected is not null && expected.Split('|').Contains(actual, StringComparer.Ordinal);
     }
 
     // Bare ids occur in hand-authored/converted schematics. Multipart JSON has no explicit

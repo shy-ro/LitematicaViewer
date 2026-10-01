@@ -22,6 +22,9 @@ public sealed partial class BlockMeshBuilder
     private readonly BlockStateResolver _resolver;
     private int _emptySpriteFaces;
     private FluidMesher? _fluid;
+    private int _specialEntitiesEmitted;
+    private int _specialEntitiesSkipped;
+    private int _specialSpritesMissing;
 
     private int _skippedFaces;
 
@@ -31,7 +34,9 @@ public sealed partial class BlockMeshBuilder
         _atlas = atlas;
     }
 
-    public string Stats => $"skippedFaces={_skippedFaces} emptySpriteFaces={_emptySpriteFaces}";
+    public string Stats => $"skippedFaces={_skippedFaces} emptySpriteFaces={_emptySpriteFaces} " +
+                           $"specialEmitted={_specialEntitiesEmitted} specialSkipped={_specialEntitiesSkipped} " +
+                           $"specialMissingSprites={_specialSpritesMissing}";
 
     // 调色板里实际用到的 sprite 全集。先收集再建图集，图集里就没有用不上的贴图。
     // 收 region 列表而不是 document：调用方（Sample）可能只网格化单个 region。
@@ -263,11 +268,11 @@ public sealed partial class BlockMeshBuilder
         if (element.Rotation is { } rot)
         {
             var origin = rot.Origin / 16f;
-            a = RotateAround(a, rot.Axis, rot.AngleDegrees, origin);
-            b = RotateAround(b, rot.Axis, rot.AngleDegrees, origin);
-            c = RotateAround(c, rot.Axis, rot.AngleDegrees, origin);
-            e = RotateAround(e, rot.Axis, rot.AngleDegrees, origin);
-            normal = Rotate(normal, rot.Axis, rot.AngleDegrees);
+            a = RotateElementAround(a, rot.Axis, rot.AngleDegrees, origin);
+            b = RotateElementAround(b, rot.Axis, rot.AngleDegrees, origin);
+            c = RotateElementAround(c, rot.Axis, rot.AngleDegrees, origin);
+            e = RotateElementAround(e, rot.Axis, rot.AngleDegrees, origin);
+            normal = RotateElement(normal, rot.Axis, rot.AngleDegrees);
         }
 
         a = ApplyVariantRotation(a, variant);
@@ -332,6 +337,30 @@ public sealed partial class BlockMeshBuilder
         return result;
     }
 
+    // model JSON 的 element rotation 角度按原符号应用；不要和 blockstate
+    // variant 的 y/x 旋转混用。template_torch_wall 使用 -22.5°，若这里也取负，
+    // 墙上红石火把会朝相反方向倾斜。
+    private static Vector3 RotateElementAround(Vector3 v, int axis, float degrees, Vector3 origin)
+    {
+        return RotateElement(v - origin, axis, degrees) + origin;
+    }
+
+    private static Vector3 RotateElement(Vector3 v, int axis, float degrees)
+    {
+        var radians = degrees * MathF.PI / 180f;
+        var cos = MathF.Cos(radians);
+        var sin = MathF.Sin(radians);
+        return axis switch
+        {
+            0 => new Vector3(v.X, v.Y * cos - v.Z * sin, v.Y * sin + v.Z * cos),
+            1 => new Vector3(v.X * cos + v.Z * sin, v.Y, -v.X * sin + v.Z * cos),
+            2 => new Vector3(v.X * cos - v.Y * sin, v.X * sin + v.Y * cos, v.Z),
+            _ => v
+        };
+    }
+
+    // 特殊网格层（告示牌/旗帜）的方块属性旋转仍沿用 blockstate 旋转约定；与
+    // element JSON 角度分开，避免修复墙上火把时改变告示牌贴图方向。
     private static Vector3 RotateAround(Vector3 v, int axis, float degrees, Vector3 origin)
     {
         return Rotate(v - origin, axis, degrees) + origin;

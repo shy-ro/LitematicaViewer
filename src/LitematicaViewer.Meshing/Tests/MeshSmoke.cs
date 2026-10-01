@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Immutable;
 using System.Numerics;
 using LitematicaViewer.Assets;
 using LitematicaViewer.Core.Model;
@@ -29,6 +30,31 @@ public static class MeshSmoke
         }
         catch (IOException)
         {
+        }
+
+        if (args.Length >= 3 && args[0] == "--entity-corpus")
+            return AuditEntityCorpus(args[1], args.Skip(2));
+
+        if (args.Length >= 3 && args[0] == "--container-montage")
+            return PreviewBlocks.RunContainerMontage(args[1], [.. args.Skip(2)]);
+
+        if (args.Length >= 3 && args[0] == "--chest-dump")
+            return PreviewBlocks.RunChestDump(args[1], [.. args.Skip(2)]);
+
+        if (args.Length >= 3 && args[0] == "--entity-audit")
+        {
+            using TextWriterTraceListener auditListener = new(Console.Out);
+            Trace.Listeners.Add(auditListener);
+            Trace.AutoFlush = true;
+            _packs = new PackStack();
+            foreach (var packPath in args.Skip(2))
+                _packs.Add(Directory.Exists(packPath)
+                    ? ResourcePack.OpenFolder(packPath)
+                    : ResourcePack.OpenZip(packPath));
+            _resolver = new BlockStateResolver(_packs);
+            CheckRealFile(args[1]);
+            Debug.WriteLine($"[MESH][entity.audit] completed file={args[1]} checks={_checks}");
+            return 0;
         }
 
         // --resolve <blockId> <资源包...>：打印一个状态串的解析结果（命中哪些模型、
@@ -247,7 +273,14 @@ public static class MeshSmoke
         CheckFaceCulling();
         CheckAmbientOcclusion();
         CheckLogAxisRotation();
+        CheckWallTorchElementRotation();
         CheckFluidRules();
+        CheckSignFrontAndBack();
+        CheckSignGeometry();
+        CheckPaintingGeometry();
+        CheckArmorStandGeometry();
+        CheckDroppedItemAndBoat();
+        CheckStaticMobs();
         foreach (var path in litematics) CheckRealFile(path);
 
         Debug.WriteLine($"[MESH][smoke] 完成 checks={_checks}");
@@ -265,6 +298,66 @@ public static class MeshSmoke
         return new BlockMeshBuilder(_resolver, atlas);
     }
 
+    private static int AuditEntityCorpus(string reportPath, IEnumerable<string> roots)
+    {
+        Dictionary<string, (int Count, HashSet<string> Files)> blockEntities = new(StringComparer.Ordinal);
+        Dictionary<string, (int Count, HashSet<string> Files)> entities = new(StringComparer.Ordinal);
+        List<string> failures = [];
+        var files = roots.SelectMany(root => Directory.Exists(root)
+                ? Directory.EnumerateFiles(root, "*.litematic", SearchOption.AllDirectories)
+                : File.Exists(root) ? [root] : [])
+            .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        foreach (var path in files)
+        {
+            var result = LitematicLoader.TryLoadFile(path);
+            if (!result.Success || result.Document is null)
+            {
+                failures.Add($"{path}\t{result.Error}\t{result.Message}");
+                continue;
+            }
+            foreach (var region in result.Document.Regions)
+            {
+                foreach (var item in region.BlockEntities.Values) Add(blockEntities, item.Id, path);
+                foreach (var item in region.Entities) Add(entities, item.Id, path);
+            }
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(reportPath)) ?? ".");
+        List<string> lines = ["kind\tid\tcount\tfiles\texamples"];
+        Append("block_entity", blockEntities);
+        Append("entity", entities);
+        if (failures.Count > 0)
+        {
+            lines.Add("");
+            lines.Add("failures");
+            lines.AddRange(failures);
+        }
+        File.WriteAllLines(reportPath, lines);
+        Console.WriteLine($"[MESH][entity.corpus] files={files.Length} parsed={files.Length - failures.Count} failures={failures.Count}");
+        foreach (var pair in entities.OrderByDescending(static pair => pair.Value.Count))
+            Console.WriteLine($"[MESH][entity.corpus] entity {pair.Key} count={pair.Value.Count} files={pair.Value.Files.Count}");
+        foreach (var pair in blockEntities.OrderByDescending(static pair => pair.Value.Count).Take(30))
+            Console.WriteLine($"[MESH][entity.corpus] blockEntity {pair.Key} count={pair.Value.Count} files={pair.Value.Files.Count}");
+        Console.WriteLine($"[MESH][entity.corpus] report={Path.GetFullPath(reportPath)}");
+        return failures.Count == 0 ? 0 : 1;
+
+        static void Add(Dictionary<string, (int Count, HashSet<string> Files)> target, string id, string path)
+        {
+            if (!target.TryGetValue(id, out var current)) current = (0, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            current.Count++;
+            current.Files.Add(path);
+            target[id] = current;
+        }
+
+        void Append(string kind, Dictionary<string, (int Count, HashSet<string> Files)> source)
+        {
+            foreach (var pair in source.OrderByDescending(static pair => pair.Value.Count).ThenBy(static pair => pair.Key))
+                lines.Add($"{kind}\t{pair.Key}\t{pair.Value.Count}\t{pair.Value.Files.Count}\t" +
+                          string.Join(" | ", pair.Value.Files.Take(3)));
+        }
+    }
+
     private static LitematicRegion MakeRegion(Vector3I size, BlockStateDefinition[] palette, int[] blocks)
     {
         var position = Vector3I.Zero;
@@ -275,6 +368,201 @@ public static class MeshSmoke
             IntBounds.FromPositionSize(position, size),
             [.. palette],
             [.. blocks]);
+    }
+
+    private static NbtMap Map(params (string Key, NbtData Value)[] values) =>
+        new(values.ToImmutableDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.Ordinal));
+
+    private static NbtSequence Sequence(params NbtData[] values) => new([.. values]);
+
+    private static void CheckSignFrontAndBack()
+    {
+        BlockStateDefinition sign = new("minecraft:oak_sign",
+            BlockStateDefinition.NoProperties.SetItem("rotation", "0").SetItem("waterlogged", "false"));
+        var front = Map(("messages", Sequence(new NbtText("{\"text\":\"正面\"}"))),
+            ("color", new NbtText("black")));
+        var back = Map(("messages", Sequence(new NbtText("{\"text\":\"背面\"}"))),
+            ("color", new NbtText("red")), ("has_glowing_text", new NbtInteger(1)));
+        var blockEntity = new BlockEntityData("minecraft:sign", Vector3I.Zero,
+            Map(("front_text", front), ("back_text", back)));
+        var region = MakeRegion(new Vector3I(1, 1, 1), [sign], [0]) with
+        {
+            BlockEntities = ImmutableDictionary<Vector3I, BlockEntityData>.Empty.Add(Vector3I.Zero, blockEntity)
+        };
+        HashSet<string> sprites = [];
+        List<GeneratedSprite> generated = [];
+        var collector = new BlockMeshBuilder(_resolver, TextureAtlas.Build(_packs, []));
+        collector.CollectSprites([region], sprites, _packs, generated);
+        Debug.Assert(generated.Count == 2, $"[MESH][smoke] 双面告示牌应生成 2 张文字贴图 实得 {generated.Count}");
+        Debug.Assert(generated.All(static sprite => sprite.Width == 192 && sprite.Height == 96),
+            "[MESH][smoke] 告示牌文字贴图应为 192x96");
+        var atlas = TextureAtlas.Build(_packs, sprites, generated);
+        var mesh = new BlockMeshBuilder(_resolver, atlas).BuildRegion(region);
+        Debug.Assert(mesh.Indices.Length >= 12, "[MESH][smoke] 双面告示牌文字应至少增加两个 quad");
+        CheckVerticesWellFormed(mesh, atlas);
+        Debug.WriteLine("[MESH][smoke] 告示牌: front/back 分离、192x96 文字贴图 ✓");
+        _checks++;
+    }
+
+    // 告示牌几何/朝向回归。数字全部来自原版 SignModel ×2/3 与 WallSignRenderer 的墙牌偏移，
+    // 用渲染出的顶点包围盒钉住——只看截图的话牌面长轴装反（rotation 用了正角）在
+    // 0/180 两个朝向上完全自逆，看不出来。
+    private static void CheckSignGeometry()
+    {
+        // rotation=0（朝南）：牌面与格子等宽（0..16px）、上沿 17.33px，支柱踩地到 y=0。
+        var south = SignBoundingBox("minecraft:oak_sign", ("rotation", "0"), ("waterlogged", "false"));
+        Debug.Assert(MathF.Abs(south.Min.X) < 0.01f && MathF.Abs(south.Max.X - 1f) < 0.01f,
+            $"[MESH][smoke] 站牌牌面应与格子等宽 实得 x={south.Min.X:F3}..{south.Max.X:F3}");
+        Debug.Assert(MathF.Abs(south.Min.Y) < 0.01f && MathF.Abs(south.Max.Y - 17.333f / 16f) < 0.01f,
+            $"[MESH][smoke] 站牌应从地面到 17.33px 实得 y={south.Min.Y:F3}..{south.Max.Y:F3}");
+        Debug.Assert(south.Max.Z - south.Min.Z < 0.15f,
+            $"[MESH][smoke] 朝南站牌应是一片薄板 实得 spanZ={south.Max.Z - south.Min.Z:F3}");
+
+        // rotation=4（朝西）：牌面长轴转到 Z；文字片必须跟着到西侧（x≈7.13px）。
+        // 牌面用 element 约定、文字用 blockstate 约定，差一个负号；装反时文字会跑到东面。
+        var west = SignBoundingBox("minecraft:oak_sign", ("rotation", "4"), ("waterlogged", "false"));
+        Debug.Assert(west.Max.Z - west.Min.Z > 0.99f && west.Max.X - west.Min.X < 0.15f,
+            $"[MESH][smoke] rotation=4 牌面长轴应转到 Z 实得 spanX={west.Max.X - west.Min.X:F3} " +
+            $"spanZ={west.Max.Z - west.Min.Z:F3}");
+        Debug.Assert(MathF.Abs(west.Min.X - 7.133f / 16f) < 0.02f,
+            $"[MESH][smoke] rotation=4 文字片应在西侧 实得 minX={west.Min.X:F3}");
+
+        // rotation=8（朝北）：文字必须转到 -Z 面（7.13px）。留在南面就是文字没跟着牌面转，
+        // 视角从 +Z 看过去「背面也有字」。
+        var north = SignBoundingBox("minecraft:oak_sign", ("rotation", "8"), ("waterlogged", "false"));
+        Debug.Assert(MathF.Abs(north.Min.Z - 7.133f / 16f) < 0.02f,
+            $"[MESH][smoke] rotation=8 文字片应在北面 实得 minZ={north.Min.Z:F3}");
+
+        // 墙牌 facing=east：牌面贴西墙（0.33..1.67px），文字面朝东（1.867px），且没有支柱。
+        var wall = SignBoundingBox("minecraft:oak_wall_sign", ("facing", "east"), ("waterlogged", "false"));
+        Debug.Assert(MathF.Abs(wall.Min.X - 0.333f / 16f) < 0.02f && MathF.Abs(wall.Max.X - 1.867f / 16f) < 0.02f,
+            $"[MESH][smoke] facing=east 墙牌应贴西墙、文字朝东 实得 x={wall.Min.X:F3}..{wall.Max.X:F3}");
+        Debug.Assert(MathF.Abs(wall.Min.Y - 4.333f / 16f) < 0.02f && wall.Max.Z - wall.Min.Z > 0.99f,
+            $"[MESH][smoke] facing=east 墙牌应压在 y4.33..12.33、长轴 Z 实得 y0={wall.Min.Y:F3} " +
+            $"spanZ={wall.Max.Z - wall.Min.Z:F3}");
+        Debug.WriteLine("[MESH][smoke] 告示牌几何: 牌面 16x8、支柱踩地、墙牌贴墙、文字同号 ✓");
+        _checks++;
+    }
+
+    private static (Vector3 Min, Vector3 Max) SignBoundingBox(string blockId,
+        (string Key, string Value) property, (string Key, string Value) second)
+    {
+        var definition = new BlockStateDefinition(blockId,
+            BlockStateDefinition.NoProperties.SetItem(property.Key, property.Value)
+                .SetItem(second.Key, second.Value));
+        var text = Map(("messages", Sequence(new NbtText("{\"text\":\"牌\"}"))), ("color", new NbtText("black")));
+        var blockEntity = new BlockEntityData("minecraft:sign", Vector3I.Zero, Map(("front_text", text)));
+        var region = MakeRegion(new Vector3I(1, 1, 1), [definition], [0]) with
+        {
+            BlockEntities = ImmutableDictionary<Vector3I, BlockEntityData>.Empty.Add(Vector3I.Zero, blockEntity)
+        };
+        HashSet<string> sprites = [];
+        List<GeneratedSprite> generated = [];
+        var collector = new BlockMeshBuilder(_resolver, TextureAtlas.Build(_packs, []));
+        collector.CollectSprites([region], sprites, _packs, generated);
+        var atlas = TextureAtlas.Build(_packs, sprites, generated);
+        var mesh = new BlockMeshBuilder(_resolver, atlas).BuildRegion(region);
+        CheckVerticesWellFormed(mesh, atlas);
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+        for (var i = 0; i < mesh.VertexCount; i++)
+        {
+            var point = new Vector3(mesh.Vertices[i * MeshData.FloatsPerVertex],
+                mesh.Vertices[i * MeshData.FloatsPerVertex + 1], mesh.Vertices[i * MeshData.FloatsPerVertex + 2]);
+            min = Vector3.Min(min, point);
+            max = Vector3.Max(max, point);
+        }
+
+        Debug.WriteLine($"[MESH][smoke] sign bbox {blockId} {property.Key}={property.Value} " +
+                        $"min=({min.X:F3},{min.Y:F3},{min.Z:F3}) max=({max.X:F3},{max.Y:F3},{max.Z:F3}) " +
+                        $"verts={mesh.VertexCount}");
+        return (min, max);
+    }
+
+    private static void CheckPaintingGeometry()
+    {
+        var painting = new EntityData("minecraft:painting", new Vector3(2, 2, 2),
+            Map(("variant", new NbtText("minecraft:donkey_kong")), ("Facing", new NbtInteger(5))));
+        var region = MakeRegion(new Vector3I(1, 1, 1), [Air], [0]) with { Entities = [painting] };
+        HashSet<string> sprites = [];
+        var collector = new BlockMeshBuilder(_resolver, TextureAtlas.Build(_packs, []));
+        collector.CollectSprites([region], sprites, _packs, []);
+        Debug.Assert(sprites.Contains("minecraft:painting/donkey_kong") &&
+                     sprites.Contains("minecraft:painting/back"),
+            "[MESH][smoke] 画应收集 motive 与背板贴图");
+        var atlas = TextureAtlas.Build(_packs, sprites);
+        var mesh = new BlockMeshBuilder(_resolver, atlas).BuildRegion(region);
+        Debug.Assert(mesh.VertexCount == 8 && mesh.Indices.Length == 12,
+            $"[MESH][smoke] 画应为正背两个 quad 实得 verts={mesh.VertexCount} indices={mesh.Indices.Length}");
+        var xs = Enumerable.Range(0, mesh.VertexCount).Select(i => mesh.Vertices[i * MeshData.FloatsPerVertex]).ToArray();
+        var ys = Enumerable.Range(0, mesh.VertexCount).Select(i => mesh.Vertices[i * MeshData.FloatsPerVertex + 1]).ToArray();
+        Debug.Assert(xs.Max() - xs.Min() < 0.05f && MathF.Abs(ys.Max() - ys.Min() - 3f) < 0.01f,
+            $"[MESH][smoke] east-facing donkey_kong 应为竖 3 格、薄 X 平面 spanX={xs.Max()-xs.Min():F3} spanY={ys.Max()-ys.Min():F3}");
+        CheckVerticesWellFormed(mesh, atlas);
+        Debug.WriteLine("[MESH][smoke] 画: motive 尺寸 4x3、Facing 定向、正背面 ✓");
+        _checks++;
+    }
+
+    private static void CheckArmorStandGeometry()
+    {
+        var rotation = Sequence(new NbtFloating(90), new NbtFloating(0));
+        var armorStand = new EntityData("minecraft:armor_stand", Vector3.Zero,
+            Map(("Rotation", rotation), ("ShowArms", new NbtInteger(1)), ("NoBasePlate", new NbtInteger(1))));
+        var region = MakeRegion(new Vector3I(1, 1, 1), [Air], [0]) with { Entities = [armorStand] };
+        var atlas = TextureAtlas.Build(_packs, ["minecraft:entity/armorstand/wood"]);
+        var mesh = new BlockMeshBuilder(_resolver, atlas).BuildRegion(region);
+        // 无底座：脊柱/肩梁/腰梁/头/双腿/双臂共 8 盒，每盒 24 顶点。
+        Debug.Assert(mesh.VertexCount == 8 * 24,
+            $"[MESH][smoke] 盔甲架 NoBasePlate+ShowArms 应为 8 盒 实得 verts={mesh.VertexCount}");
+        CheckVerticesWellFormed(mesh, atlas);
+        Debug.WriteLine("[MESH][smoke] 盔甲架: 横梁/腰梁/双臂、yaw、NoBasePlate ✓");
+        _checks++;
+    }
+
+    private static void CheckDroppedItemAndBoat()
+    {
+        var item = new EntityData("minecraft:item", new Vector3(0, 0, 0),
+            Map(("Item", Map(("id", new NbtText("minecraft:stone")))),
+                ("Rotation", Sequence(new NbtFloating(30), new NbtFloating(0)))));
+        var boat = new EntityData("minecraft:oak_boat", new Vector3(2, 0, 0),
+            Map(("Rotation", Sequence(new NbtFloating(90), new NbtFloating(0)))));
+        var region = MakeRegion(new Vector3I(1, 1, 1), [Air], [0]) with { Entities = [item, boat] };
+        HashSet<string> sprites = [];
+        var collector = new BlockMeshBuilder(_resolver, TextureAtlas.Build(_packs, []));
+        collector.CollectSprites([region], sprites, _packs, []);
+        Debug.Assert(sprites.Contains("minecraft:block/stone") && sprites.Contains("minecraft:entity/boat/oak"),
+            $"[MESH][smoke] 掉落物/船贴图收集不完整 [{string.Join(',', sprites)}]");
+        var atlas = TextureAtlas.Build(_packs, sprites);
+        var mesh = new BlockMeshBuilder(_resolver, atlas).BuildRegion(region);
+        Debug.Assert(mesh.VertexCount == 8 + 5 * 24,
+            $"[MESH][smoke] 掉落物交叉双面+船 5 盒顶点数不符 {mesh.VertexCount}");
+        CheckVerticesWellFormed(mesh, atlas);
+        Debug.WriteLine("[MESH][smoke] 掉落物: 交叉 sprite；船/木筏: 船体静态网格 ✓");
+        _checks++;
+    }
+
+    private static void CheckStaticMobs()
+    {
+        EntityData[] entities =
+        [
+            new("minecraft:villager", Vector3.Zero, Map(("Rotation", Sequence(new NbtFloating(45))))),
+            new("minecraft:iron_golem", new Vector3(3, 0, 0), NbtMap.Empty),
+            new("minecraft:shulker", new Vector3(6, 0, 0), Map(("Color", new NbtInteger(14)))),
+            new("minecraft:pig", new Vector3(9, 0, 0), NbtMap.Empty)
+        ];
+        var region = MakeRegion(new Vector3I(1, 1, 1), [Air], [0]) with { Entities = [.. entities] };
+        HashSet<string> sprites = [];
+        var collector = new BlockMeshBuilder(_resolver, TextureAtlas.Build(_packs, []));
+        collector.CollectSprites([region], sprites, _packs, []);
+        var atlas = TextureAtlas.Build(_packs, sprites);
+        Debug.Assert(atlas.MissingCount == 0,
+            $"[MESH][smoke] 静态生物缺贴图 [{string.Join(',', atlas.MissingSprites)}]");
+        var mesh = new BlockMeshBuilder(_resolver, atlas).BuildRegion(region);
+        Debug.Assert(mesh.VertexCount == (6 + 6 + 2 + 6) * 24,
+            $"[MESH][smoke] 静态生物盒件顶点数不符 {mesh.VertexCount}");
+        CheckVerticesWellFormed(mesh, atlas);
+        Debug.WriteLine("[MESH][smoke] 村民/溺尸/傀儡/猪灵/潜影贝/猪静态模型与 yaw ✓");
+        _checks++;
     }
 
     private static void CheckSingleBlock()
@@ -366,6 +654,29 @@ public static class MeshSmoke
 
         Debug.Assert(endCapFaces == 2, $"[MESH][smoke] 端面帽应 2 个面（两端）实得 {endCapFaces}");
         Debug.WriteLine("[MESH][smoke] oak_log[axis=x]: 端面帽 ±X ✓（旋转约定钉住）");
+        _checks++;
+    }
+
+    private static void CheckWallTorchElementRotation()
+    {
+        BlockStateDefinition torch = new(
+            "minecraft:redstone_wall_torch",
+            BlockStateDefinition.NoProperties.SetItem("facing", "east").SetItem("lit", "true"));
+        var region = MakeRegion(new Vector3I(1, 1, 1), [torch], [0]);
+        HashSet<string> sprites = [];
+        var collector = new BlockMeshBuilder(_resolver, TextureAtlas.Build(_packs, []));
+        collector.CollectSprites([region], sprites);
+        var builder = new BlockMeshBuilder(_resolver, TextureAtlas.Build(_packs, sprites));
+        var mesh = builder.BuildRegion(region);
+
+        // facing=east 的模板位于 x=0 墙面，element angle=-22.5° 应让火把顶端
+        // 向 +X（方块内部/朝东）倾斜。把 element 与 variant 共用取负角函数时，
+        // 整体质心会落到 x<0，即火把反向插进墙外。
+        var meanX = Enumerable.Range(0, mesh.VertexCount)
+            .Average(vertex => mesh.Vertices[vertex * MeshData.FloatsPerVertex + MeshData.PositionOffset]);
+        Debug.Assert(meanX > 0f,
+            $"[MESH][smoke] east 墙上红石火把应向 +X 倾斜，顶点均值 x={meanX}");
+        Debug.WriteLine($"[MESH][smoke] redstone_wall_torch: element -22.5° 保持原符号 meanX={meanX:F3} ✓");
         _checks++;
     }
 
@@ -545,11 +856,12 @@ public static class MeshSmoke
 
         HashSet<string> sprites = [];
         var collector = CreateBuilder();
-        collector.CollectSprites(document.Regions, sprites);
+        List<GeneratedSprite> generatedSprites = [];
+        collector.CollectSprites(document.Regions, sprites, _packs, generatedSprites);
         Debug.WriteLine($"[MESH][smoke] {Path.GetFileName(path)}: {document.Regions.Length} 个 region、" +
                         $"{document.TotalBlocks} 方块、{sprites.Count} 张 sprite");
 
-        var atlas = TextureAtlas.Build(_packs, sprites);
+        var atlas = TextureAtlas.Build(_packs, sprites, generatedSprites);
         Debug.WriteLine(
             $"[MESH][smoke] 图集 {atlas.Width}x{atlas.Height}（缺 {atlas.MissingCount} 张" +
             (atlas.MissingCount > 0 ? $"：{string.Join(", ", atlas.MissingSprites)}）" : "）"));
